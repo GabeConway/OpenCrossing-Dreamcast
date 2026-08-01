@@ -9,7 +9,9 @@
 #   make extract                # write the Dreamcast disc tree
 #   make verify                 # re-hash the tree against manifest.json
 #   make relmap                 # which REL/DOL bytes pc_assets.c really needs
-#   make all                    # report + extract + verify
+#   make pack                   # emit files/assets.pak (+ assets.pak.json)
+#   make packverify             # re-verify an existing assets.pak
+#   make all                    # report + extract + pack + verify + packverify
 #
 # Override anything on the command line:
 #   make extract ISO=/path/to/other.gcm OUT=/tmp/other-root
@@ -28,9 +30,10 @@ RELMAP_JSON ?= /tmp/opencrossing-dc/relmap.json
 
 DCASSET := $(PYTHON) $(HERE)/dcasset.py
 
-.PHONY: all report report-json extract extract-szs verify relmap lint clean help
+.PHONY: all report report-json extract extract-szs verify relmap pack \
+        packverify lint clean help
 
-all: report extract verify
+all: report extract pack verify packverify
 
 help:
 	@sed -n '2,20p' $(HERE)/Makefile
@@ -57,6 +60,15 @@ verify:
 relmap:
 	@mkdir -p $(dir $(RELMAP_JSON))
 	$(DCASSET) relmap --repo "$(REPO)" --json "$(RELMAP_JSON)" --spans
+
+# The offset-indexed asset pack. Removes the 16,558,776-byte resident
+# REL+DOL blob that pc_assets_init() cannot allocate on a 16 MB Dreamcast.
+# Spec: kb/asset-pack.md
+pack:
+	$(DCASSET) pack "$(ISO)" --repo "$(REPO)" --out "$(OUT)/files"
+
+packverify:
+	$(DCASSET) packverify "$(OUT)/files/assets.pak" "$(ISO)" --repo "$(REPO)"
 
 lint:
 	$(PYTHON) -m flake8 $(HERE)

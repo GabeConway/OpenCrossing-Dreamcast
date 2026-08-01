@@ -183,13 +183,14 @@ Reference hashes for GAFE01 rev 0 (SHA-256, first 16 hex chars):
 
 ## Findings that change the plan
 
-**1. The resident REL blob is a 16.6 MB RAM problem — and `relmap` shows it
-is unnecessary.** `pc_assets.c` holds the *entire* decompressed REL
-(15,640,056 B) plus `main.dol` (918,720 B) resident and `memcpy`s assets out
-of them by absolute offset (`pc_load_asset`). That is 16.56 MB — more than the
-Dreamcast's entire RAM, before the game allocates anything. `dcasset relmap`
-parses every `pc_load_asset` reference — the 14,495-entry `s_assets[]` table
-plus the generated call sites in `src/` — and merges the byte ranges:
+**1. The 16.6 MB REL blob is unnecessary — and `pack` now removes it.**
+`pc_assets.c` holds the *entire* decompressed REL (15,640,056 B) plus
+`main.dol` (918,720 B) in RAM for the whole of `pc_assets_init()` and
+`memcpy`s assets out of them by absolute offset (`pc_load_asset`), then frees
+both. That is a 16.56 MB peak — more than the Dreamcast's entire RAM.
+`dcasset relmap` parses every `pc_load_asset` reference — the 14,495-entry
+`s_assets[]` table plus the generated call sites in `src/` — and merges the
+byte ranges:
 
 | blob | refs | raw bytes | **merged union** | spans | max end | blob size |
 |---|---:|---:|---:|---:|---|---:|
@@ -214,19 +215,41 @@ and nothing above `0xDBC720`. Two consequences:
   hand PLAN §3.1**, and it is a host-side change (`gen_runtime_assets.py`
   extension) plus a small change in `pc_load_asset`.
 
-Caveat: the union is what the *asset loader* copies out. Whether the game
-reads the REL or DOL through any other path was **not audited** — only
-`pc_load_asset` references were parsed. Treat 8.66 MB as the loader's exact
-footprint and as a lower bound on total REL usage.
+The earlier caveat — "only `pc_load_asset` sites were parsed, so this is a
+lower bound" — was **audited and closed** while building `pack`:
+`g_rel_data` / `g_dol_data` are `static` in `pc_assets.c` and referenced only
+inside `pc_load_asset`; `pc_disc_extract_rel/dol()` have exactly one caller
+each; and `boot.c` compiles `LoadLink("/foresta.rel.szs")` out under
+`TARGET_PC`. 8,787,262 distinct bytes is the **complete** footprint. Details
+and evidence in `kb/asset-pack.md` §7.
 
 **2. `famicom.arc` (1,699,904 B) is droppable.** The NES emulator is an
 explicit non-goal (PLAN §4). Removing it is 6.4% of FST content.
 
 **3. `foresta.map` + `static.map` (5,402,023 B, 20.4% of FST content) are
-linker map text**, i.e. debug symbols. Whether the game reads them at runtime
-(`dvderr.c` symbolication is the plausible caller) was **not verified** — if
-it doesn't, that is another 5.15 MB of disc gone for free. Worth an audit
-before M2.
+droppable — verified.** They are read only by
+`JUTException::queryMapAddress_single()`, reachable only from the PowerPC
+CPU-exception handler, and `showMapInfo_subroutine()` bails on any address
+outside `0x80000000..0x82FFFFFF` (a GameCube MEM1 window that no SH-4 address
+satisfies). Full evidence chain in `kb/asset-pack.md` §8. `dvderr.c` was
+checked specifically and contains no map reference.
+
+**4. The pack: `assets.pak`, 8,917,568 B.** `dcasset pack` emits the 3,188
+chunks the game actually reads, pre-byte-swapped, laid out in
+`pc_assets_init`'s real call order so the Dreamcast streams them front to back
+with **zero backward seeks** given an 8 KB window. Resident cost drops from
+16,558,776 B to a 51,104 B index (+ a 64 KB read buffer) — **15.68 MB saved,
+98.0% of the machine.** It also replaces the 15,640,056-byte `foresta.rel` on
+the disc, so the DC needs no Yaz0 decompressor at boot. Byte-exactness is
+re-proved every run by replaying all 16,365 references through the runtime
+lookup algorithm (8,884,894 B compared, 0 mismatches). Format, lookup
+algorithm, read-ahead strategy and caveats: **`kb/asset-pack.md`**.
+
+**5. The next RAM problem is the destinations, not the source.** The assets
+land in 15,726 statically allocated arrays whose extents sum to ~8,617,214 B
+(8.22 MB), resident for the whole run regardless of where the bytes came
+from. The pack removes the 15.68 MB peak; it does not touch that 8.22 MB.
+`kb/mem-budget.md` needs it as its own line.
 
 ---
 
@@ -252,21 +275,36 @@ make report-json                       # + /tmp/opencrossing-dc/report.json
 make extract                           # -> /tmp/opencrossing-dc/discroot
 make verify                            # re-hash against manifest.json
 make relmap                            # REL/DOL span analysis
-make all                               # report + extract + verify
+make pack                              # -> discroot/files/assets.pak
+make packverify                        # independent re-verification
+make all                               # report + extract + pack + verify + packverify
 
 # override anything
 make extract ISO=/path/to/other.gcm OUT=/tmp/other-root
 
 # or call it directly
-python3 dcasset.py report  "$ISO" [--json F] [--no-lzma] [--force]
-python3 dcasset.py extract "$ISO" [--out DIR] [--keep-szs] [--keep-sys] [--force]
-python3 dcasset.py verify  DIR
-python3 dcasset.py relmap  [--repo DIR] [--json F] [--spans]
+python3 dcasset.py report     "$ISO" [--json F] [--no-lzma] [--force]
+python3 dcasset.py extract    "$ISO" [--out DIR] [--keep-szs] [--keep-sys] [--force]
+python3 dcasset.py verify     DIR
+python3 dcasset.py relmap     [--repo DIR] [--json F] [--spans]
+python3 dcasset.py pack       "$ISO" [--out DIR] [--repo DIR]
+                              [--order load|first-touch|source] [--align N] [--quick]
+python3 dcasset.py packverify PAK "$ISO" [--repo DIR]
 ```
 
 Timings on the M4 host: `report` 12–20 s (dominated by the lzma pass; ~2 s
 with `--no-lzma`), `extract` 1.0 s including Yaz0 and all SHA-256s, `relmap`
-0.2 s.
+0.2 s, `pack` ~3 s including Yaz0, full 16,365-reference round trip and both
+comparison layouts.
+
+### Files
+
+| file | role |
+|---|---|
+| `dcasset.py` | CLI: `report` / `extract` / `verify` / `relmap` / `pack` / `packverify` |
+| `gcm.py` | ISO/GCM/CISO reader, FST walk, DOL sizing, Yaz0 — read-only |
+| `assets_scan.py` | parses `pc_assets.c` into the **ordered** reference list; shared by `relmap` and `pack` so they cannot disagree |
+| `pack.py` | chunking, offline byte-swap, layout, index, verification, read-ahead simulation |
 
 Then:
 
@@ -285,12 +323,14 @@ repo ships tools only (dca3 / sm64-dc legal model, `kb/research-ecosystem.md`
 Conversion, in rough dependency order. None of it is implemented here; today
 the tool only *extracts and measures*.
 
-1. **Per-asset REL/DOL splitting** (finding 1 above). Extend
-   `pc/tools/gen_runtime_assets.py` to emit the 2,496 REL spans + 12 DOL spans
-   as an indexed pack file; change `pc_load_asset` to seek/read. Biggest RAM
-   win available offline. Also do the endian swap (`SWAP_U16` / `SWAP_VTX` /
-   `SWAP_U32`, already classified per asset) **offline** so SH-4 never pays
-   for it at load time.
+1. ~~**Per-asset REL/DOL splitting.**~~ **Done** — `dcasset pack`, spec in
+   `kb/asset-pack.md`. The offline endian swap (`SWAP_U16` / `SWAP_VTX` /
+   `SWAP_U32`) is baked into the pack too, so the SH-4 never pays for it.
+   What remains is the `dc/` side: implement §5's lookup and §6's read-ahead
+   in `pc_load_asset`, and measure the four *other* boot-time swap passes
+   (`pc_bswap_raw_display_lists`, `mFM_InitActableEndian`,
+   `pc_bswap_u8_tlut_palettes`, `pc_bswap_house_pos_list`) which operate on
+   the destinations and are not covered by the pack.
 2. **Textures → PVR** (PLAN §3.3). GC CI4/CI8 → PVR native 4/8-bit paletted;
    RGB565/RGB5A3/IA → twiddled 16-bit; the rest → VQ (offline only; `pvrtex`
    from KOS utils). Needs the harvested-texture corpus from a playthrough,
@@ -304,8 +344,11 @@ the tool only *extracts and measures*.
    data → main RAM. Stage A (rspsim on SH-4) needs no conversion at all, so
    this is gated on the stage-A measurement.
 4. **Drop what the DC does not need:** `famicom.arc` (confirmed non-goal),
-   `opening.bnr` (GC banner), the GC system area; and the `.map` files if the
-   runtime audit clears them.
+   `opening.bnr` (GC banner), the GC system area, `foresta.map` +
+   `static.map` (audit done, see finding 3), and `foresta.rel` itself once
+   `assets.pak` is wired up (finding 4). That removes 22,748,479 B and adds
+   the pack's 8,917,568 B, taking the recommended layout from 36,953,162 B
+   (35.24 MB) to **23,122,251 B (22.05 MB)** — 3.3% of a CD-R.
 5. **Disc layout ordering.** `mkdcdisc` places files in tree order; CD-R
    streams at ~500 KB/s, so hot files belong on outer tracks. The manifest
    should grow a `stream_priority` field once profiling says which files are

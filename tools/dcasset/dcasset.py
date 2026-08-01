@@ -9,20 +9,27 @@ moves offline into this tool, which emits a plain directory tree that
 
 Modes
 -----
-  report    measure the image: real content vs padding, per-file breakdown,
-            compressibility. Answers "how much of the 1.46 GB is real?"
-  extract   write a Dreamcast-ready directory tree + manifest.json
-  verify    re-hash an extracted tree against its manifest
+  report      measure the image: real content vs padding, per-file breakdown,
+              compressibility. Answers "how much of the 1.46 GB is real?"
+  extract     write a Dreamcast-ready directory tree + manifest.json
+  verify      re-hash an extracted tree against its manifest
+  relmap      measure which foresta.rel / main.dol bytes pc_assets.c reads
+  pack        emit assets.pak: the offset-indexed asset pack that removes the
+              16,558,776-byte resident REL+DOL blob. Spec: kb/asset-pack.md
+  packverify  re-verify an existing assets.pak against the ISO + source tree
 
 The user's ISO is *read only*, never copied into the repo, and the default
 output path is deliberately outside the repository.
 
 Usage
 -----
-  python3 dcasset.py report  "/path/Animal Crossing.iso"
-  python3 dcasset.py report  "/path/Animal Crossing.iso" --json out.json
-  python3 dcasset.py extract "/path/Animal Crossing.iso" --out /tmp/dcroot
-  python3 dcasset.py verify  /tmp/dcroot
+  python3 dcasset.py report     "/path/Animal Crossing.iso"
+  python3 dcasset.py report     "/path/Animal Crossing.iso" --json out.json
+  python3 dcasset.py extract    "/path/Animal Crossing.iso" --out /tmp/dcroot
+  python3 dcasset.py verify     /tmp/dcroot
+  python3 dcasset.py relmap     [--json F] [--spans]
+  python3 dcasset.py pack       "/path/Animal Crossing.iso" --out /tmp/dcroot/files
+  python3 dcasset.py packverify /tmp/dcroot/files/assets.pak "/path/…iso"
 """
 
 from __future__ import annotations
@@ -494,113 +501,62 @@ def cmd_extract(args) -> int:
 
 # pc_assets.c pulls every static asset out of the decompressed REL (and a
 # little out of main.dol) by absolute byte offset. On PC both blobs are held
-# resident (15.6 MB + 0.9 MB) -- impossible on a 16 MB Dreamcast. relmap
-# measures which bytes are actually referenced, so a later pass can emit only
-# those spans and drop the resident blobs entirely.
+# in RAM for the whole of pc_assets_init() (15.6 MB + 0.9 MB) -- impossible on
+# a 16 MB Dreamcast. relmap measures which bytes are actually referenced;
+# `pack` then emits only those spans so the blobs never exist on the DC.
+#
+# The parsing itself lives in assets_scan.py, shared with `pack`, so the two
+# subcommands can never disagree about the span set.
 
-# Generated call sites carry inline /* SRC_DOL */-style comments between the
-# arguments, so every separator has to tolerate them. Missing that costs real
-# call sites (it silently dropped one in JFWSystem.cpp).
-_C = r'(?:\s|/\*.*?\*/)*'
-_NUM = r'(0x[0-9A-Fa-f]+|\d+)'
-_ARGS = (
-    _C + _NUM + _C + r',' + _C + _NUM + _C + r',' + _C + r'(\d+)'
-    + _C + r',' + _C + r'(\d+)' + _C
-)
-_CALL_RE = (
-    r'pc_load_asset' + _C + r'\(' + _C + r'(?:"(?:[^"\\]|\\.)*"|NULL)'
-    + _C + r',[^,]+,' + _ARGS + r'\)'
-)
-_TABLE_RE = (
-    r'\{' + _C + r'(?:"(?:[^"\\]|\\.)*"|NULL)' + _C + r',[^,]+,'
-    + _ARGS + r'\}'
-)
-SRC_REL, SRC_DOL = 0, 1
+import assets_scan  # noqa: E402
+
+SRC_REL, SRC_DOL = assets_scan.SRC_REL, assets_scan.SRC_DOL
 
 
 def cmd_relmap(args) -> int:
-    import re
+    refs, st = assets_scan.scan(Path(args.repo).resolve())
 
-    repo = Path(args.repo).resolve()
-    assets_c = repo / "pc" / "src" / "pc_assets.c"
-    if not assets_c.exists():
-        sys.exit(f"not found: {assets_c}")
-
-    ranges: dict[int, list[tuple[int, int]]] = {SRC_REL: [], SRC_DOL: []}
-    n = 0
-
-    txt = assets_c.read_text(errors="replace")
-    marker = "static const PCAsset s_assets[] = {"
-    if marker in txt:
-        i = txt.index(marker)
-        j = txt.index("\n};", i)
-        for m in re.finditer(_TABLE_RE, txt[i:j]):
-            size, off, src = int(m.group(1), 0), int(m.group(2), 0), int(m.group(3))
-            if src in ranges:
-                ranges[src].append((off, off + size))
-                n += 1
-
-    call_re = re.compile(_CALL_RE, re.S)
-    # every textual occurrence, so unmatched ones can be reported rather than
-    # silently dropped
-    occ_re = re.compile(r'pc_load_asset\s*\(')
-    proto_re = re.compile(r'pc_load_asset\s*\(\s*const\s+char\s*\*')
-    occurrences = 0
-    prototypes = 0
-    src_matched = 0
-    for root, _dirs, fnames in os.walk(repo / "src"):
-        for fn in fnames:
-            p = Path(root) / fn
-            try:
-                t = p.read_text(errors="replace")
-            except OSError:
-                continue
-            if "pc_load_asset" not in t:
-                continue
-            occurrences += len(occ_re.findall(t))
-            prototypes += len(proto_re.findall(t))
-            for m in call_re.finditer(t):
-                size, off, src = int(m.group(1), 0), int(m.group(2), 0), int(m.group(3))
-                src_matched += 1
-                if src in ranges:
-                    ranges[src].append((off, off + size))
-                    n += 1
-
-    unaccounted = occurrences - prototypes - src_matched
-    print(f"parsed {n} pc_load_asset references "
-          f"({len(ranges[SRC_REL])} REL + {len(ranges[SRC_DOL])} DOL)")
-    print(f"  src/ tree: {occurrences} textual occurrences = "
-          f"{prototypes} prototypes + {src_matched} parsed calls + "
-          f"{unaccounted} unaccounted")
-    if unaccounted:
+    n = len(refs)
+    n_rel = sum(1 for r in refs if r.src == SRC_REL)
+    n_dol = n - n_rel
+    print(f"parsed {n} pc_load_asset references ({n_rel} REL + {n_dol} DOL)")
+    print(f"  src/ tree: {st['src_occurrences']} textual occurrences = "
+          f"{st['src_prototypes']} prototypes + {st['src_parsed_calls']} "
+          f"parsed calls + {st['src_unaccounted']} unaccounted")
+    print(f"  load order: {st['table_entries']} table entries then "
+          f"{st['init_function_calls']} _pc_load_src_*() functions "
+          f"({st['loader_functions_defined']} defined, "
+          f"{len(st['loader_functions_never_called'])} never called)")
+    for c in st["calls_outside_loader_functions"]:
+        print(f"  note: call outside any loader function at {c['where']} "
+              f"(src={c['src']}, size={c['size']}) -- "
+              + ("packed at end of load order" if c["src"] in (SRC_REL, SRC_DOL)
+                 else "SRC_NONE, .bin-only, contributes no pack bytes"))
+    if st["src_unaccounted"]:
         print("  WARNING: unaccounted call sites -- the union below is a "
               "LOWER BOUND")
     out = {
         "reference_count": n,
-        "src_occurrences": occurrences,
-        "src_prototypes": prototypes,
-        "src_parsed_calls": src_matched,
-        "src_unaccounted": unaccounted,
+        "src_occurrences": st["src_occurrences"],
+        "src_prototypes": st["src_prototypes"],
+        "src_parsed_calls": st["src_parsed_calls"],
+        "src_unaccounted": st["src_unaccounted"],
+        "scan": st,
         "sources": {},
     }
-    for src, name, blob_size in ((SRC_REL, "foresta.rel", 15_640_056),
-                                 (SRC_DOL, "main.dol", 918_720)):
-        rs = sorted(ranges[src])
-        merged: list[list[int]] = []
-        for a, b in rs:
-            if merged and a <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], b)
-            else:
-                merged.append([a, b])
+    for src, name in ((SRC_REL, "foresta.rel"), (SRC_DOL, "main.dol")):
+        rs = [r for r in refs if r.src == src]
+        merged = assets_scan.merge_spans(refs, src)
         union = sum(b - a for a, b in merged)
-        raw = sum(b - a for a, b in rs)
+        raw = sum(r.size for r in rs)
         end = merged[-1][1] if merged else 0
         print(f"  {name:<14} {len(rs):>6} refs  raw {mib(raw):>10}  "
               f"union {mib(union):>10} in {len(merged)} spans  "
               f"max end 0x{end:X}")
         out["sources"][name] = {
             "references": len(rs), "raw_bytes": raw, "union_bytes": union,
-            "spans": len(merged), "max_end": end, "blob_size_hint": blob_size,
+            "spans": len(merged), "max_end": end,
+            "blob_size_hint": assets_scan.BLOB_SIZE[src],
         }
         if args.spans:
             out["sources"][name]["span_list"] = [[a, b] for a, b in merged]
@@ -608,6 +564,154 @@ def cmd_relmap(args) -> int:
         Path(args.json).write_text(json.dumps(out, indent=2))
         print(f"json written: {args.json}")
     return 0
+
+
+# -------------------------------------------------------------------- pack
+
+
+def cmd_pack(args) -> int:
+    import pack as packmod
+
+    out = check_out_path(Path(args.out))
+    reader, info = gcm.parse(args.image)
+    try:
+        validate(info, args.force)
+    finally:
+        reader.close()
+
+    man = packmod.run(args.image, Path(args.repo).resolve(), out,
+                      order=args.order, align=args.align, quick=args.quick,
+                      gcm_mod=gcm, mib=mib, commas=commas)
+
+    st, ram = man["pack"], man["ram"]
+    rt, prof, disc = man["roundtrip"], man["access_profile"], man["disc"]
+    W = 78
+    print("=" * W)
+    print("dcasset pack")
+    print("=" * W)
+    print(f"pack file      : {man['pack_file']}")
+    print(f"manifest       : {man['pack_file']}.json")
+    print(f"order          : {st['order']}   chunk alignment: {st['align']} B")
+    print()
+    print("-- CHUNKS " + "-" * (W - 10))
+    for name, s in st["sources"].items():
+        print(f"  {name:<12} {s['references']:>6} refs "
+              f"{commas(s['reference_bytes']):>11} B ->"
+              f"{s['chunks']:>6} chunks {commas(s['chunk_bytes']):>11} B "
+              f"({mib(s['chunk_bytes'])})")
+        print(f"  {'':<12} blob {commas(s['blob_size']):>11} B, "
+              f"unique {commas(s['unique_bytes'])} B, "
+              f"duplicated {commas(s['duplicated_bytes'])} B, "
+              f"max off 0x{s['max_referenced_offset']:X}")
+    print(f"  pre-swapped chunks          "
+          f"{st['chunks_preswapped']}/{st['index_entries']}")
+    if st["chunks_raw_due_to_swap_conflict"]:
+        print(f"  !! {st['chunks_raw_due_to_swap_conflict']} chunk(s) left raw "
+              f"(overlapping refs disagree about the swap); runtime swaps them")
+    print()
+    print("-- FILE LAYOUT " + "-" * (W - 15))
+    print(f"  header                      {commas(st['header_size']):>12} B")
+    print(f"  source table                "
+          f"{commas(st['source_table_bytes']):>12} B")
+    print(f"  chunk index ({st['index_entries']} x "
+          f"{man['format']['index_entry_size']} B)"
+          f"{commas(st['index_bytes']):>13} B  <- resident")
+    print(f"  sort table  ({st['index_entries']} x "
+          f"{man['format']['sorted_entry_size']} B)"
+          f"{commas(st['sorted_table_bytes']):>14} B  <- resident")
+    print(f"  payload                     {commas(st['payload_bytes']):>12} B  "
+          f"({mib(st['payload_bytes'])}), "
+          f"{commas(st['payload_alignment_padding'])} B of it alignment pad")
+    print(f"  = file                      {commas(st['file_bytes']):>12} B  "
+          f"({mib(st['file_bytes'])})")
+    print(f"  largest single chunk        "
+          f"{commas(st['max_chunk_bytes']):>12} B")
+    print(f"  payload crc32               0x{st['payload_crc32']:08X}")
+    print(f"  replaces foresta.rel        "
+          f"{commas(disc['replaces_foresta_rel_bytes']):>12} B on disc  "
+          f"(-{commas(disc['disc_saving_vs_shipping_rel_bytes'])} B), "
+          f"{disc['stream_seconds_at_500kb_s']} s to stream at 500 KB/s")
+    print()
+    print("-- RAM " + "-" * (W - 7))
+    print(f"  status quo (REL+DOL blob at init)   "
+          f"{commas(ram['status_quo_peak_blob_bytes']):>12} B  "
+          f"{mib(ram['status_quo_peak_blob_bytes']):>10}")
+    print(f"  pack resident index + sort table    "
+          f"{commas(ram['pack_resident_index_bytes']):>12} B  "
+          f"{mib(ram['pack_resident_index_bytes']):>10}  "
+          f"({ram['index_pct_of_machine']}% of 16 MB)")
+    print(f"  + recommended read buffer           "
+          f"{commas(ram['pack_read_buffer_bytes_recommended']):>12} B")
+    print(f"  = pack peak                         "
+          f"{commas(ram['pack_peak_bytes']):>12} B  "
+          f"{mib(ram['pack_peak_bytes']):>10}")
+    print(f"  SAVING                              "
+          f"{commas(ram['saving_bytes']):>12} B  "
+          f"{mib(ram['saving_bytes']):>10}  "
+          f"({ram['saving_pct_of_machine']}% of the machine's 16 MB)")
+    print()
+    print("-- BOOT READ PATTERN " + "-" * (W - 21))
+    print(f"  reads                       {commas(prof['reads']):>12}")
+    print(f"  forward / backward          "
+          f"{commas(prof['forward_reads']):>12} / {prof['backward_reads']}")
+    print(f"  max backward jump           "
+          f"{commas(prof['max_backward_bytes']):>12} B")
+    print(f"  min sliding window          "
+          f"{commas(prof['min_sliding_window_bytes']):>12} B")
+    print(f"  lookups: cursor / bsearch   "
+          f"{commas(prof['lookups_via_cursor_fast_path']):>12} / "
+          f"{commas(prof['lookups_via_binary_search'])}")
+    for k, v in man["access_profile_alternatives"].items():
+        print(f"  [--order {k:<11}] {v['index_entries']:>5} entries, "
+              f"file {mib(v['file_bytes']):>8}, backward "
+              f"{v['backward_reads']:>6}, window "
+              f"{commas(v['min_sliding_window_bytes']):>11} B")
+    print()
+    print("-- READ-AHEAD SIMULATION (forward-only window) " + "-" * (W - 47))
+    print(f"  {'window':>8}  {'faults':>7}  {'from window':>12}  "
+          f"{'streamed':>12}  {'x file':>7}  {'s @500KB/s':>10}")
+    for _k, v in sorted(man["readahead_simulation"].items(),
+                        key=lambda kv: int(kv[0])):
+        print(f"  {commas(v['buffer_bytes']):>8}  {v['window_faults']:>7}  "
+              f"{commas(v['reads_served_from_window']):>12}  "
+              f"{commas(v['bytes_streamed']):>12}  "
+              f"{v['overhead_vs_file']:>7.4f}  "
+              f"{v['stream_seconds_at_500kb_s']:>10}")
+    print()
+    print("-- ROUND TRIP " + "-" * (W - 14))
+    print(f"  references replayed         "
+          f"{commas(rt['references_replayed']):>12}  "
+          f"{commas(rt['bytes_compared'])} B compared")
+    print(f"  mismatches                  {rt['mismatches']:>12}")
+    print(f"  payload crc32               "
+          f"{'ok' if rt['payload_crc32_ok'] else 'BAD':>12}")
+    print(f"  max back-scan depth         "
+          f"{rt['max_backscan_depth']:>12}  (runtime fallback loop bound)")
+    print(f"  swap self-test              "
+          f"{man['swap_selftest']['cases']:>12} cases vs literal C loops")
+    print(f"  VERDICT                     "
+          f"{'OK - byte-identical' if rt['ok'] else 'FAILED':>12}")
+    print("=" * W)
+    return 0 if rt["ok"] else 1
+
+
+def cmd_packverify(args) -> int:
+    import pack as packmod
+
+    res = packmod.verify_existing(Path(args.pak), args.image,
+                                  Path(args.repo).resolve(), gcm)
+    rt = res["roundtrip"]
+    print(f"pack           : {res['pack_file']} ({commas(res['pack_bytes'])} B)")
+    print(f"index entries  : {commas(res['index_entries'])}")
+    print(f"references     : {commas(res['references'])} "
+          f"({res['scan_unaccounted']} unaccounted call sites)")
+    print(f"bytes compared : {commas(rt['bytes_compared'])}")
+    print(f"payload crc32  : {'ok' if rt['payload_crc32_ok'] else 'BAD'}")
+    print(f"mismatches     : {rt['mismatches']}")
+    for m in rt["mismatch_examples"]:
+        print(f"   {m}")
+    print("VERDICT        : " + ("OK" if rt["ok"] else "FAILED"))
+    return 0 if rt["ok"] else 1
 
 
 # ------------------------------------------------------------------- verify
@@ -678,6 +782,37 @@ def main(argv=None) -> int:
     rm.add_argument("--spans", action="store_true",
                     help="include the full merged span list in --json")
     rm.set_defaults(func=cmd_relmap)
+
+    pk = sub.add_parser(
+        "pack",
+        help="emit the offset-indexed asset pack (assets.pak + manifest)")
+    pk.add_argument("image")
+    pk.add_argument("--out", default=DEFAULT_OUT + "/files",
+                    help="output directory for assets.pak "
+                         f"(default: {DEFAULT_OUT}/files)")
+    pk.add_argument("--repo", default=str(REPO_ROOT),
+                    help=f"repo root (default: {REPO_ROOT})")
+    pk.add_argument("--order", default="load",
+                    choices=["load", "first-touch", "source"],
+                    help="payload layout (default: load = pc_assets_init's "
+                         "real access order, seek-free)")
+    pk.add_argument("--align", type=int, default=32,
+                    help="chunk alignment in the payload (default: 32)")
+    pk.add_argument("--quick", action="store_true",
+                    help="skip building the alternative layouts for "
+                         "comparison")
+    pk.add_argument("--force", action="store_true",
+                    help="proceed on a non-GAFE01-rev0 image")
+    pk.set_defaults(func=cmd_pack)
+
+    pv = sub.add_parser(
+        "packverify",
+        help="re-verify an existing assets.pak against the ISO + source tree")
+    pv.add_argument("pak")
+    pv.add_argument("image")
+    pv.add_argument("--repo", default=str(REPO_ROOT),
+                    help=f"repo root (default: {REPO_ROOT})")
+    pv.set_defaults(func=cmd_packverify)
 
     v = sub.add_parser("verify", help="check an extracted tree against manifest")
     v.add_argument("root")
