@@ -179,7 +179,7 @@ failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
 
    **`DC_MAIN_MEMORY_SIZE` (4,000,000) is heap-allocated at `dc_os.c:400`** —
    4 MB *on top of* the 22.5 MB image, not inside it. **The true overage is
-   worse than 6.5 MB.**
+   counted against the heap side of the budget, not the 22.5 MB image.**
 
    ⚠️ **The emu64/N64-emulation lead is a red herring — do not chase it
    again.** `emu64` is a GBI display-list interpreter that emits GX, **not** a

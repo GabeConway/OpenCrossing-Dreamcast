@@ -377,7 +377,8 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
   memory ledger; assets load from `/cd`. `tev_map.md` written (all 101 configs
   classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
   **The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
-  boot until ~6.5 MB comes out, and `-O0` is mandatory. This is the gate.**
+  boot until ~14.45 MB comes out (§3.1 — the image budget is 8,035,072 B, not
+  16 MB), and `-O0` is mandatory. This is the gate.**
 - **M3 — vertical slice.** Load/create town, walk, enter buildings, talk,
   save/load on emulated VMU; audio stage A (rspsim @ 22 kHz). **CPU go/no-go
   gate:** town-frame game logic ≤ 25 ms. *This is the milestone that decides
