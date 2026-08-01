@@ -54,8 +54,11 @@ caches + 10.9 MB binary. Plan of attack:
   DC arena to measured-peak + margin. Target: ≤ 9 MB.
 - **Shrink the binary.** The armhf ELF is 10.9 MB largely because `src/data/`
   (464k LOC of generated tables) compiles in. Extend `gen_runtime_assets.py`
-  to evict the biggest tables to disc-loaded assets. `-Os` for cold game code.
-  Target: ≤ 4 MB text+data resident.
+  to evict the biggest tables to disc-loaded assets. **Not `-Os`** — see the
+  directive at the head of §3.2. The size levers are all layout-class:
+  `-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, `.bss`
+  right-sizing, dropping non-goal subsystems (NES), and moving rodata to
+  `/cd`. Target: ≤ 4 MB text+data resident.
 - **Vertex buffer:** 3.1 MB static (65536 × 48 B) shrinks — DC submits in
   32-byte `pvr_vertex16_t`-style records per-list; batch buffer can be ¼ the
   size with 16-bit quantized formats (dca3's meshlet trick, decoded by FTRV).
@@ -69,25 +72,74 @@ in dca3 territory. **Fallback:** the 32 MB RAM mod exists and KOS supports
 it, but "stock 16 MB" is the design constraint; the mod must never become a
 requirement (dca3 holds this line, we hold it too).
 
+**Measured 2026-08-01 — the sketch above is aspiration, these are facts:**
+
+| | bytes | note |
+|---|---:|---|
+| linked ELF `.text` | 6,318,568 | at `-O0`, all 3917 TUs, zero exclusions |
+| linked ELF `.data` | 2,638,852 | |
+| linked ELF `.bss` | 13,526,548 | classification in flight |
+| **total** | **22,483,968** | ends `0x8d581c14`; `_arch_mem_top` = `0x8d000000` |
+
+It links; it will not boot. **~6.5 MB must come out, plus heap headroom**, and
+`-O0` is mandatory. Two levers are measured rather than guessed:
+
+- **Resident REL blob, −15.68 MB (solved, tool built).** `pc_assets.c` kept
+  the decompressed `foresta.rel` + `main.dol` resident = 16,558,776 B.
+  `dcasset pack` replaces it with an 8,917,568 B `assets.pak` on `/cd` plus a
+  51,104 B resident index, pre-byte-swapped and laid out in load order so an
+  8 KB window yields zero seeks. See `kb/asset-pack.md`.
+- **Asset destination arrays, +8.22 MB (the new floor).** Those assets land in
+  15,726 static arrays totalling ~8,617,214 B that stay resident regardless of
+  source. This is now the largest single line in the budget. The pack format
+  makes every asset individually addressable, so demand-loading into pooled
+  storage is a loader-only change — no codegen, permitted under §3.2.
+- **`foresta.map`/`static.map`, −5,402,023 B of disc (settled, droppable).**
+  Only reader is `JUTException::queryMapAddress_single` on the
+  `OSSetErrorHandler` path, which returns false outside
+  `0x80000000..0x82FFFFFF` — no SH-4 address qualifies.
+
 ### 3.2 CPU: 200 MHz vs -O0 decomp code
 
-- **Adopt upstream's -O2.** flyngmt commit `4f428276` (2026-07-10, "Compile
-  everything at -O2") demonstrates game code at -O2 with
-  `-fno-strict-aliasing -fwrapv` neutralizing the type-punning and
-  signed-overflow UB classes — on x86. Carry the Anbernic repo's extra guards
-  (`-fno-delete-null-pointer-checks -fno-lifetime-dse
-  -fno-aggressive-loop-optimizations -fno-strict-overflow`).
-- **Alignment is the residual class.** The base repo's ARM record: -O1 caused
+> **Revised 2026-08-01 by user directive.** This section previously planned to
+> adopt upstream's `-O2`. **Optimization is off the table**: "the optimizations
+> cause problems and we cant use them without the port being broken." Game
+> code (`src/`) builds at **`-O0`**, and that is a fixed input to every other
+> plan in this document, RAM included.
+
+- **`-O0` is the contract.** The armhf record is why: `-O2` produced a
+  wild-pointer crash loop from boot; `-O1` produced a hard SIGBUS on the intro
+  train scene. x86 tolerates this code because it is byte-addressable and
+  forgiving; ARM did not, and SH-4 is a strict-alignment ISA like ARM. Upstream
+  flyngmt commit `4f428276` (2026-07-10, "Compile everything at -O2") with
+  `-fno-strict-aliasing -fwrapv` is an **x86-only** data point and does not
+  transfer. Do not re-propose `-O1`/`-O2`/`-Os`/LTO as a size or speed lever.
+- **Codegen vs layout.** The ban is on anything that changes instruction
+  selection. It is *not* a ban on `-ffunction-sections -fdata-sections` +
+  `-Wl,--gc-sections`, `.bss` right-sizing, linker script placement, or moving
+  data to disc — those are layout, and they are the RAM plan (§3.1).
+- **Speed therefore has to come from elsewhere:** SH-4 FTRV/XMTRX in the
+  matrix layer (`dc/src/dc_mtx.c`, done), store queues for PVR submission,
+  fewer draw calls, a 30 fps target, and hand-optimizing individual hot
+  functions at the source level — which is portable, upstreamable, and
+  reviewable in a way `-O2` is not. If a specific TU is measured hot and
+  provably alignment-clean, a per-TU exception can be argued on evidence; the
+  `dc/Makefile` supports per-TU flags. It is not the plan.
+- **Alignment is still the residual class** even at `-O0`. The base repo's
+  ARM record: -O1 caused
   a hard SIGBUS (unaligned LDRD/VFP) on the intro train scene; x86 never sees
   this. SH-4 is also a strict-alignment ISA, so expect the same class.
   Mitigation: SH-4 raises a CPU exception on unaligned access — install an
   exception handler that logs PC + faulting address (the base port's SIGBUS
   recovery pattern), triage per-TU exactly as the Anbernic repo did, fix the
   misaligned casts at the source where found (upstreamable fixes).
-- **Budget arithmetic.** Single-thread A53@1.5 GHz ≈ 10–20× SH-4@200 MHz
-  scalar. Recovering -O0→-O2 (≥2–3×) plus a 30 fps target (2× the frame
-  budget of 60) plus SH-4 FTRV/FIPR in `pc_mtx` hot paths closes much of the
-  gap, but not provably all of it. **Go/no-go gate at M3:** measured game
+- **Budget arithmetic — now worse, state it plainly.** Single-thread
+  A53@1.5 GHz ≈ 10–20× SH-4@200 MHz scalar. The old arithmetic leaned on
+  `-O0`→`-O2` for ≥2–3× of that; **that term is gone.** What remains is the
+  30 fps target (2× the frame budget of 60), FTRV/XMTRX in the matrix layer,
+  and source-level work on whatever the profiler names. This does not
+  provably close the gap, and pretending otherwise would make the M3 gate
+  meaningless. **Go/no-go gate at M3:** measured game
   logic time for a town frame must be ≤ 25 ms on hardware/Flycast-with-
   realistic-timing before renderer perf work continues.
 - **30 fps is the design target,** not degraded-60. Upstream's 2026-08-01
@@ -240,10 +292,16 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 ## 8. Toolchain & workflow
 
-- **Toolchain:** KOS master + dc-chain GCC (per sm64-dc: GCC 14+, KOS+GLdc
-  master), containerized (Docker) exactly like the base repo's armhf flow —
-  reproducible `docker run … build-dc.sh`. `-fsigned-char` (SH-4 GCC chars
-  are unsigned by default, same trap as ARM). kos-ports: GLdc, zlib.
+- **Toolchain (built, pinned, working):** `opencrossing-dc:sdk` — sh-elf GCC
+  15.2.0, newlib 4.6.0.20260123, binutils 2.45.1, KOS 2.3.0 (`1c6398f9`),
+  kos-ports (`f4faacc4`), GLdc (`a1cd80a8`), mkdcdisc (`3c2ef63a`),
+  `-m4-single`, thread model kos. Cold build ≈ 27 min. Host entry points:
+  `dc/build-dc-image.sh` (image, idempotent) then `dc/build-dc.sh` (build).
+  `dc/build-dc-docker.sh` runs *inside* the container and is not a host entry
+  point. This host has **no BuildKit**: `DOCKER_BUILDKIT=0`, never pass
+  `--progress`. Note **char is SIGNED by default** on this build, so
+  `-fsigned-char` is belt-and-braces rather than load-bearing — the ARM trap
+  does not reproduce here. kos-ports: GLdc, zlib.
 - **Iteration:** build → `mkdcdisc` → **Flycast** headless/windowed (author
   lineage = dca3's skmp; accuracy proven by dca3 itself). GDB: Flycast's GDB
   server (port 3263) for crash triage; lxdream-nitro when MMIO-level truth is
@@ -260,17 +318,23 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 ## 9. Milestones
 
-- **M0 — scaffold.** Toolchain container builds a KOS hello-world; mkdcdisc +
-  Flycast smoke harness runs it. Repo: `dc/`, `tools/`, kb seeded. *Gate:
-  `harness/smoke.sh dc` green.*
-- **M1 — it links.** Vendored `src/` compiles for sh-elf at -O2+guards with
-  a stubbed `dc/` platform layer; host `tools/` extract a disc layout from a
-  real ISO; save-compression feasibility measured on real saves. *Gate: ELF
-  links; extractor output complete; save-compression numbers in kb.*
-- **M2 — pixels.** Boots to title screen in Flycast on GLdc stage-A renderer;
-  arena shrunk with boot-time memory ledger; assets load from `/cd`.
-  `tev_map.md` written (all 101 configs classified). *Gate: title screen at
-  any fps; RAM ledger ≤ 16 MB true.*
+- **M0 — scaffold. ✅ MET 2026-08-01.** Toolchain container builds a KOS
+  hello-world; mkdcdisc + Flycast smoke harness runs it. Repo: `dc/`,
+  `tools/`, kb seeded. *Gate: `harness/dc/smoke.sh` green — verified for real:
+  exits 0 on selftest, 1 on crashtest, `crash.sh` symbolises the fault to
+  `crashtest.c:39`, `perf.sh` passes in-band and fails on a shifted baseline.*
+- **M1 — it links. ✅ MET 2026-08-01.** *Gate: ELF links; extractor output
+  complete; save-compression numbers in kb.* **3917/3917 TUs compile for
+  sh-elf at `-O0`+guards** (the gate originally read "-O2+guards"; see §3.2 —
+  `-O0` is now the contract), zero exclusions, and `src/` was not modified:
+  every compat fix lives in `dc/include/dc_prelude.h` as a force-include. It
+  links and produces a 27 MB unpadded CDI.
+- **M2 — pixels. ← current milestone; RAM is the blocker.** Boots to title
+  screen in Flycast on GLdc stage-A renderer; arena shrunk with boot-time
+  memory ledger; assets load from `/cd`. `tev_map.md` written (all 101 configs
+  classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
+  **The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
+  boot until ~6.5 MB comes out, and `-O0` is mandatory. This is the gate.**
 - **M3 — vertical slice.** Load/create town, walk, enter buildings, talk,
   save/load on emulated VMU; audio stage A (rspsim @ 22 kHz). **CPU go/no-go
   gate:** town-frame game logic ≤ 25 ms. *This is the milestone that decides
@@ -287,9 +351,10 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 | Risk | Sev | Mitigation |
 |---|---|---|
-| RAM doesn't fit even after §3.1 | fatal | measure early (M2 ledger); graph-ARAM windowing is the big unknown — prototype in M1 on PC build |
-| Game logic too slow on SH-4 even at -O2 | fatal | M3 gate; -O2 triage plan §3.2; 30 fps target; profile-guided per-TU work |
-| SH-4 -O2 miscompiles (alignment class) | high | exception-handler triage, per-TU fallback, fix at source |
+| RAM doesn't fit even after §3.1 | **fatal, and now ACTIVE** | measured at 22.5 MB vs 16 MB; levers are layout-class only (§3.2). Asset pack lands −15.68 MB of peak but exposes an 8.22 MB destination-array floor. If layout levers don't close it, the honest outcomes are: cut content, or the port doesn't fit — not "turn on -O2" |
+| Game logic too slow on SH-4 at `-O0` | fatal | M3 gate. The `-O2` term is **gone** (§3.2), so the budget is genuinely worse: 30 fps target, FTRV/XMTRX, store queues, source-level work on profiled hot functions |
+| Source-level hot-path rewrites diverge from upstream | med | keep them minimal and upstreamable; they're reviewable in a way `-O2` is not |
+| Alignment faults at `-O0` (residual class) | high | exception-handler triage (installed in `dc_main.c`), per-TU fallback, fix at source |
 | Save won't fit VMU | high | compression prototype at M1, 2-VMU spanning, converter tool preserves GCI interchange |
 | TEV configs that don't approximate | med | finite set (101); per-config table; worst cases get baked assets |
 | EFB-capture effects | med | enumerate call sites; per-case (pre-render, stub, or PVR RTT) |
@@ -298,6 +363,15 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 | Upstream divergence (dt fixes land daily) | low | track flyngmt; cherry-pick dt/timing work — it's exactly what 30 fps needs |
 
 ## 11. Open questions (to resolve during M0–M1)
+
+**Resolved 2026-08-01:** `foresta.map`/`static.map` are droppable — only
+reader is `JUTException::queryMapAddress_single` on the `OSSetErrorHandler`
+path, which returns false outside `0x80000000..0x82FFFFFF`. And the resident
+REL blob is solved by `dcasset pack` (§3.1). New question raised by that work:
+**does `emu64` emulate an N64 CPU/RSP, or only translate microcode to GX?**
+That decides whether an RDRAM-sized buffer is sitting in our `.bss` — the game
+shipped on N64 in 4 MB, so buffers sized for a 24 MB GameCube are not sized
+for need. (Feeds §3.1 and question 6.)
 
 1. Real JKRHeap high-water marks — instrument the PC build. (Feeds §3.1.)
 2. Real save entropy — compress a late-game GCI corpus. (Feeds §6.)

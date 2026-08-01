@@ -124,26 +124,33 @@ Streaming numbers measured against an unpadded image are optimistic.
 
 ---
 
-## Optimization level — read before changing
+## Optimization level — `-O0`, and this is not a tunable
 
-`DECOMP_OPT` defaults to `-O0`, matching the armhf base port, whose history is
-recorded in `pc/CMakeLists.txt:21-29` (`-O2` → wild-pointer crash loop from
-boot; `-O1` → SIGBUS on the intro train scene; no `-O` → stable).
+**Project directive (2026-08-01): raising `DECOMP_OPT` is banned.** Verbatim:
+*"the optimizations cause problems and we cant use them without the port being
+broken."* This is a decision, not a default to be revisited by whoever next
+looks at the binary size. Do not propose `-O1`/`-O2`/`-Os`/LTO as a size or
+speed lever, and do not benchmark it as one.
 
-Two things to know before you raise it:
+The history is in `pc/CMakeLists.txt:21-29`: `-O2` → wild-pointer crash loop
+from boot; `-O1` → SIGBUS on the intro train scene; no `-O` → stable. An
+earlier draft of this file argued those data points were confounded and that
+`-O2`'s 48 % `.text` cut (~3 MB) might make it "a budget requirement, not an
+optimization." **That argument is retired.** A 3 MB saving on an image that
+does not run is worth nothing, and the RAM plan (PLAN §3.1) is built entirely
+from layout-class levers instead.
 
-1. **Both of those data points are confounded**
-   (`kb/design-shelf-hazards.md` §1.2): upstream had to add a missing static
-   member definition to make `-O2` work at all, and the ARM `-O2` attempt was
-   made simultaneously with `-mfpu=neon-vfpv4`. Neither confound exists on SH-4.
-2. **`-O2` cuts `.text` by 48 %** (measured, §3.4) — on a 16 MB machine that is
-   roughly 3 MB of RAM. `-O0` may simply not be affordable on this hardware, in
-   which case `-O2` is a budget requirement, not an optimization.
+What is allowed, because it does not change instruction selection:
+`-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, `.bss`
+right-sizing, linker script placement, moving data to `/cd`, and dropping
+non-goal subsystems. Codegen is banned; layout is fair game.
 
-`-O0` here literally means `-O0`, not "omit `-O`": `$KOS_CFLAGS` already
-carries `-O2` and the last `-O` on the command line wins.
+`DECOMP_OPT` remains settable only as a diagnostic escape hatch — e.g. to
+confirm that a suspected miscompile is optimization-dependent. `-O0` here
+literally means `-O0`, not "omit `-O`": `$KOS_CFLAGS` already carries `-O2`
+and the last `-O` on the command line wins.
 
-**Gate:** any change to a translation unit's optimization level requires a full
+**Gate, if a per-TU exception is ever argued on measured evidence:** a full
 new-game intro on hardware (KK Slider → train → town arrival). That is the
 sequence that historically exposed the alignment bug class.
 
@@ -256,11 +263,22 @@ as host code.
 ```
 
 KOS's `_arch_mem_top` for a stock console is `0x8d000000`, and the image ends
-at `0x8d581c14` — roughly **5.8 MB over the 16 MB contract**. This is the
-budget problem `kb/design-shelf-hazards.md` §3.4 predicted for `-O0`: `-O2`
-was measured to cut `.text` by 48 %, which recovers about 3 MB of it. The rest
-has to come out of `.bss` (`DC_MAIN_MEMORY_SIZE` is a 4 MB static arena) and
-`.data` (`src/data`, which wants `-Os`). Nothing here has been booted.
+at `0x8d581c14` — roughly **5.8 MB over the 16 MB contract**, before any heap
+headroom. Nothing here has been booted.
+
+All of it has to come out of layout, not codegen (see the optimization section
+above). The levers, ranked, with `kb/STATE.md` carrying live numbers:
+
+1. **`.bss`, 13.5 MB** — the bulk of the overage. Roughly 8.22 MB of it is the
+   15,726 static asset destination arrays; `DC_MAIN_MEMORY_SIZE` is a 4 MB
+   static arena. Both are sized for a 24 MB GameCube, not for need — this game
+   shipped on N64 in 4 MB of RDRAM.
+2. **The resident REL blob, −15.68 MB of peak** — `dcasset pack` already
+   replaces `pc_assets.c`'s resident `foresta.rel` + `main.dol` (16,558,776 B)
+   with an 8.9 MB `assets.pak` on `/cd` plus a 51 KB index. Needs the runtime
+   loader wired up. See `kb/asset-pack.md`.
+3. **`--gc-sections`** with `-ffunction-sections -fdata-sections`.
+4. **Drop non-goal subsystems** — NES emulation, `famicom.arc`.
 
 ---
 

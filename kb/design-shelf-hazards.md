@@ -11,6 +11,33 @@ tree. Items marked UNVERIFIED say so explicitly.
 > stable across GCC versions. Codegen-detail claims (store merging, memcpy
 > inlining) must be re-checked once the real M0 container exists.
 
+> ## ⚠️ Superseded in part — read this before trusting anything below
+>
+> **Updated 2026-08-01.** The real M0 container now exists and is *not* the
+> image this document measured: `opencrossing-dc:sdk` is **GCC 15.2.0 /
+> newlib 4.6.0.20260123 / KOS 2.3.0 (`1c6398f9`)**, versus GCC 9.3.0 / newlib
+> 3.3.0 / KOS `525cbda` here. All 3917 TUs compile and link against it with
+> **zero exclusions and no edits to `src/`**, so this document's exclusion
+> lists are pessimistic. Known divergences:
+>
+> - **`-fno-builtin` (§3.1) is falsified** — it was marked "(VERIFIED)" as KOS
+>   convention and it breaks the link. See the flag table.
+> - **The §2.3 header-collision scan missed the two collisions that actually
+>   bit us**, because newer KOS/newlib headers introduce them: KOS
+>   `dc/fmath.h:109`'s `static inline float fsqrt(float)` versus the decomp's
+>   `math64.h:34` `#define fsqrt(x) sqrtf(x)`, and POSIX `link()` versus the
+>   decomp's `typedef struct link_ link` arriving through `<stdio.h>` →
+>   `<sys/stdio.h>` → `<unistd.h>`. Both are fixed in
+>   `dc/include/dc_prelude.h`; the second cannot be fixed with a blanket
+>   `-Dlink=`, which renames both sides.
+> - **Char signedness (§2.x):** this image defaults to **SIGNED**, so
+>   `-fsigned-char` is belt-and-braces, not load-bearing.
+> - **Optimization flags anywhere below are moot** — `src/` builds at `-O0`
+>   by user directive (CLAUDE.md, PLAN §3.2).
+>
+> Treat the ABI facts as durable and every codegen-detail claim as unverified
+> until re-measured on GCC 15.2.
+
 ---
 
 ## 0. Headline result
@@ -235,7 +262,7 @@ All flags below were **individually VERIFIED to be accepted by `sh-elf-gcc
 | `-fno-aggressive-loop-optimizations` | Base-repo guard: decomp loops index past declared array bounds. |
 | `-fno-strict-overflow` | Base-repo guard: pointer-arithmetic overflow. |
 | `-fno-stack-protector` | Base-repo flag; also KOS has no `__stack_chk_fail` guarantee for game TUs. |
-| `-fno-builtin` | KOS convention (`KOS_CFLAGS`, VERIFIED). Also stops GCC recognizing hand-rolled `Jac_bcopyfast`-style loops and replacing them with `memcpy` under *stronger* alignment assumptions. |
+| ~~`-fno-builtin`~~ | **FALSIFIED 2026-08-01 — do not use.** This row claimed KOS convention "(VERIFIED)". It is not: `$KOS_CFLAGS` in `opencrossing-dc:sdk` does not contain it, and adding it **breaks the link** — `m_select.c:936,993` then emit calls to a real `alloca` that newlib does not provide, and there is no `-fbuiltin-alloca` to re-enable just that one. The original rationale (stopping GCC from turning hand-rolled `Jac_bcopyfast`-style loops into `memcpy` under stronger alignment assumptions) is real but does not justify an unlinkable binary; handle that class by alignment triage instead. |
 | `-ffunction-sections -fdata-sections` (+ `-Wl,--gc-sections`) | KOS default. Directly attacks PLAN §3.1's ≤4 MB binary target. |
 | `-fsigned-char` | **Not strictly required.** VERIFIED: `sh-elf-gcc` defaults to **signed** char (`(char)-1 < 0` is true; `__CHAR_UNSIGNED__` is undefined). This **corrects PLAN §8 and kb/base-repo-map.md**, both of which state SH-4 GCC chars are unsigned. Keep the flag anyway — zero cost, documents intent, survives a toolchain swap. |
 | `-DTARGET_PC` **and** `-DTARGET_DC` | **Critical.** `#ifdef TARGET_PC` in `src/` guards the base port's little-endian correctness fixes — byte-wise texconv in `emu64.c:840-864`, the swapped `u16` pair ordering in `sys_matrix.c:_MtxF_to_Mtx`/`Matrix_MtxtoMtxF`, the overlap-safe `Jac_bcopy` in `sample.c:33`. `TARGET_PC` here means "not GameCube", not "PC". Dropping it silently reintroduces big-endian assumptions. Add `TARGET_DC` for genuinely DC-specific branches. |

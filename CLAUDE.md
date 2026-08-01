@@ -34,6 +34,18 @@ Read them for game/decomp facts; ignore their hardware advice.
 - Decomp game code (`src/`) is vendored: gnu89, UB-dependent, 32-bit pointer
   assumptions everywhere. SH-4 is ILP32 little-endian, so the base port's
   32-bit and endianness work carries over unchanged. Keep the UB-guard flags.
+- **`src/` builds at `-O0`. `-O1`/`-O2`/`-Os`/LTO are banned** — user
+  directive, not a preference: "the optimizations cause problems and we cant
+  use them without the port being broken." armhf record: `-O2` = wild-pointer
+  crash loop from boot, `-O1` = hard SIGBUS on the intro train scene. Do not
+  propose optimization as a size or speed lever, and do not benchmark it as
+  one. What *is* allowed is anything that doesn't change instruction
+  selection: `-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`,
+  `.bss` right-sizing, linker script placement, moving data to `/cd`, dropping
+  non-goal subsystems. Codegen is banned; layout is fair game.
+- **Never edit `src/`** to make it compile. Compat fixes go in
+  `dc/include/dc_prelude.h`, which is force-included. All 3917 TUs build this
+  way today with zero exclusions.
 - Platform code: `dc/` (Dreamcast) — new. `pc/` (Linux/SDL/GLES) — reference.
 - Host-side tools (asset extraction, conversion, disc build) go in `tools/`.
 - Every optimization gets a kill switch, as in the base repo (`PC_NO_*`
@@ -56,18 +68,37 @@ Read them for game/decomp facts; ignore their hardware advice.
 ## Toolchain & testing
 
 ```bash
-# (M0 deliverables — being built now)
-dc/build-dc-docker.sh          # sh-elf + KOS + GLdc + mkdcdisc in Docker
+dc/build-dc-image.sh           # build opencrossing-dc:sdk (idempotent, ~27 min cold)
+dc/build-dc.sh                 # HOST entry point: build -> ELF + unpadded CDI
+DC_TARGET=objs dc/build-dc.sh  # compile only, no link
 harness/dc/smoke.sh            # boot a CDI in Flycast, capture console, assert
+harness/dc/crash.sh            # symbolise a fault via sh-elf-addr2line
 ```
 
-Docker runs under colima on an Apple M4 (arm64 host, 10 cores, 24 GB).
-Flycast is the iteration emulator; the real Dreamcast + burned CD-R is the
-truth. Always give absolute paths in scripts — agents run from varying cwds.
+`dc/build-dc-docker.sh` runs *inside* the container — not a host entry point.
+Docker runs under colima on an Apple M4 (arm64 host, 10 cores, 24 GB) and this
+host has **no BuildKit**: use `DOCKER_BUILDKIT=0` and never pass `--progress`.
+Inside the SDK image use `bash -c`, never `bash -lc` — `-l` re-runs
+`/etc/profile`, drops `sh-elf/bin` from PATH, and every address then
+symbolises to `??`. Pass `-N` to mkdcdisc for emulator runs (unpadded: 1.8 MB
+/ 0.02 s vs 740 MB / 15.6 s). Flycast is the iteration emulator; the real
+Dreamcast + burned CD-R is the truth. Always give absolute paths in scripts —
+agents run from varying cwds.
 
 ## Status (2026-08-01)
 
-Planning complete, M0/M1 execution starting. Nothing builds for Dreamcast
-yet. Keep `PLAN.md` and `kb/` updated as facts change — they are the project
-memory, and the plan is expected to be revised repeatedly as measurements
-come in.
+**M0 and M1 met. M2 blocked on RAM.** All 3917 TUs compile and link for
+sh-elf; the harness is verified against real CDIs. The linked image is
+**22.5 MB against a 16 MB machine** (text 6.3 / data 2.6 / bss 13.5), so it
+links but will not boot. ~6.5 MB must come out using layout levers only.
+
+**Read `kb/STATE.md` first** — it carries current numbers, the ranked RAM
+levers, and a list of traps already paid for (the `fsqrt` collision, POSIX
+`link()`, guest `scif_flush()` killing the Flycast console, `-fno-builtin`
+breaking the link). Do not re-discover them.
+
+Keep `PLAN.md`, `kb/STATE.md`, and `kb/` updated as facts change — they are
+the project memory, and the plan is expected to be revised repeatedly as
+measurements come in. kb docs from the first fan-out were written by agents
+whose adversarial verifiers all died: treat their numbers as claims until
+verified. Two have already been falsified.

@@ -1,5 +1,25 @@
 # RAM budget — 16 MB ledger
 
+> ## ⚠️ Two corrections since this was written (2026-08-01, later same day)
+>
+> 1. **Every `-O2`/`-Os` remedy below is void.** Optimization is banned by
+>    user directive (CLAUDE.md, PLAN §3.2) — `src/` builds at `-O0`, full
+>    stop. Wherever this document proposes `-O2` for hot TUs or `-Os` for cold
+>    ones (bucket 3, and the open-question list), read it as **"unresolved,
+>    must be closed by a layout-class lever instead"**: `--gc-sections`,
+>    `.bss` right-sizing, linker placement, moving data to `/cd`, or dropping
+>    non-goal subsystems.
+> 2. **The real sh-elf link now exists**, so bucket 3 no longer needs an ARM
+>    proxy. Measured at `-O0`, all 3917 TUs, zero exclusions:
+>    **text 6,318,568 / data 2,638,852 / bss 13,526,548 = 22,483,968 B.**
+>    That is ~6.5 MB over budget before heap headroom.
+>
+> Also landed since: the resident REL blob (16,558,776 B) is solved by
+> `dcasset pack` (−15.68 MB, see `kb/asset-pack.md`), which in turn exposed
+> **8.22 MB of static asset destination arrays** — 15,726 of them, resident
+> regardless of source, and now the single largest line in this ledger. It
+> needs its own bucket. `kb/STATE.md` carries the live numbers.
+
 Measured 2026-08-01. Supersedes the sketch in `PLAN.md` §3.1; PLAN should be
 updated to point here. Every number below is tagged **[M]** measured today,
 **[D]** derived from measured numbers, or **[?]** unverified estimate that
