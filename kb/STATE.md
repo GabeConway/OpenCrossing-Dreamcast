@@ -1,113 +1,207 @@
 # Session state — resume here
 
-Last updated 2026-08-01, second execution session (in progress). Written so a
-fresh context can pick up without replaying anything.
+Last updated 2026-08-01, end of the second execution session. Written so a
+fresh context can pick up without replaying anything. Read this first, then
+`CLAUDE.md`, then `PLAN.md`.
 
 ## Headline
 
-**M0 and M1 gates are met. The blocker is RAM, and it is a hard one.**
+**M0 and M1 are met. M2 is blocked on RAM, and the arithmetic says the port is
+not yet known to be viable.**
 
-- **3917 / 3917 translation units compile for sh-elf**, zero exclusions, and
-  `src/` was not modified — every compat fix lives in `dc/include/dc_prelude.h`
-  as a force-include. It also links and produces a 27 MB unpadded CDI.
-- **The linked ELF is 22.5 MB against a 16 MB machine.** text 6,318,568 +
-  data 2,638,852 + bss 13,526,548. It ends at `0x8d581c14`; KOS's
-  `_arch_mem_top` is `0x8d000000`. It links, it will not boot.
-- **The cut required is ~14.45 MB, not the ~6.5 MB an earlier pass reported.**
-  6.5 MB only gets the image under `_arch_mem_top` with ~1.2 MB of heap left,
-  which is less than the game's first archive mount. Against the ledger's own
-  7.61 MB heap (`dc/include/dc_mem_budget.h` buckets 6–12) plus KOS's ~1 MB,
-  **the image budget is 8,035,072 B** and the image is 22,486,548 B. Measure
-  every proposal against 8,035,072 B, not against 16 MB.
-- **Why `.bss` is not free:** KOS's `mm_sbrk()` starts at the ELF `end`
-  symbol. No MMU, no lazy commit. **Every `.bss` byte literally destroys a
-  heap byte.** This is the fact the whole size problem turns on.
-- **Compiler optimization is not available to close that gap** — see the
-  standing constraint below. `.bss` right-sizing, `--gc-sections`, dropping
-  non-goal subsystems, and moving data to `/cd` are the levers.
+- **3917 / 3917 translation units compile and link for sh-elf**, zero
+  exclusions. `src/` carries only two small `#if defined(TARGET_DC)` branches
+  (below); every *compat* fix lives in `dc/include/dc_prelude.h` as a
+  force-include.
+- **The harness works and is verified against real CDIs**, not asserted.
+- **The image is 21,374,996 B** (text 6,318,568 / data 2,638,852 / bss
+  12,415,508), ending at `0x8d472814`.
+- **The image budget is 8,035,072 B**, so **13,339,924 B must still be shed.**
 
-## Standing constraint added this session (user directive)
+## The one paragraph that matters
+
+`.text` (6,318,568) + `.data` (2,638,852) = **8,957,420 B, which already
+exceeds the 8,035,072 B budget with `.bss` at exactly zero.** Subtracting
+`.text` alone leaves **1,716,504 B for all of `.data` + `.bss` combined**;
+they are 15,054,360 B today. Every plan written so far targets `.bss`, and
+**even deleting all of `.bss` does not make the image fit.** Since `-O0` is
+mandatory, `.text` cannot shrink — it can only be *relocated*.
+
+So viability rests on two unanswered questions:
+
+1. **Is the 7.61 MB heap budget real?** Bucket 6 is 4 MB that was **never
+   measured** — `jsyswrap.cpp:547` sets the game heap to
+   `JKRHeap_getFreeSize(systemHeap) - 0x10000`, i.e. the port hands the game
+   whatever is left rather than sizing to need. If the true peak is 1.5 MB,
+   the image budget grows by ~2.5 MB. **Cheapest possible win in the project.**
+2. **Can `.text` leave RAM?** Only two candidate mechanisms: SH-4 MMU demand
+   paging (KOS supports it — see below) or ScummVM-style code overlays.
+
+Research on both was in flight when the session ended; see "Unfinished" below.
+
+## Why the budget is what it is
+
+**KOS's `mm_sbrk()` starts at the ELF `end` symbol. No MMU by default, no lazy
+commit. Every `.bss` byte literally destroys a heap byte.** This is the fact
+the whole size problem turns on, and it is why compression and debug-stripping
+are worth exactly zero (`.bss` is `NOBITS` — there is nothing in the file to
+compress).
+
+Budget = 16 MB − 7.61 MB heap (`dc/include/dc_mem_budget.h` buckets 6–12) −
+~1 MB KOS = 8,035,072 B. Both subtrahends are unverified; see question 1.
+
+## Standing constraint — the `-O0` directive
 
 > "the optimizations cause problems and we cant use them without the port
 > being broken"
 
-**`-O1` / `-O2` / `-Os` / LTO are banned as a strategy.** Not "risky" —
-banned. The armhf record is why: `-O2` gave a wild-pointer crash loop from
-boot, `-O1` gave a hard SIGBUS on the intro train scene. Game code (`src/`)
-builds at **`-O0`, and that is a fixed input to every RAM plan.**
+**`-O1` / `-O2` / `-Os` / LTO are banned.** Not "risky" — banned, by user
+decision. The armhf record is why: `-O2` gave a wild-pointer crash loop from
+boot, `-O1` a hard SIGBUS on the intro train scene. Do not propose or benchmark
+optimization as a size or speed lever; that argument has been had and retired.
 
-The useful distinction is **codegen vs layout**:
+**Codegen vs layout** is the operative distinction:
 
 | Lever | Changes instruction selection? | Allowed |
 |---|---|---|
-| `-O1/-O2/-Os`, LTO | yes | **no** |
-| `-ffunction-sections -fdata-sections` + `-Wl,--gc-sections` | no | yes |
-| Right-sizing `.bss` arrays / arenas | no | yes |
-| Dropping non-goal subsystems (NES, `famicom.arc`) | no | yes |
-| Moving rodata/tables to `/cd`, loaded on demand | no | yes |
-| Linker script placement | no | yes |
+| `-O1/-O2/-Os`, LTO, `-mrelax` | yes | **no** |
+| `.bss` right-sizing, arena sizing | no | yes |
+| Moving data/code to `/cd`, demand loading | no | yes |
+| Linker script placement, overlays, MMU paging | no | yes |
+| Offline asset conversion / decimation | no | yes |
 
-Anything in the "yes" rows is fair game and does not need re-litigating.
+## Boot status — failure fully explained
 
-## What exists and is verified
+`harness/dc/smoke.sh` on the real CDI: **timeout, zero bytes of console
+output.** Attributed by controlled experiment, not inference:
 
-**Toolchain (M0).** `opencrossing-dc:sdk` in the local Docker daemon:
-sh-elf GCC 15.2.0, newlib 4.6.0.20260123, binutils 2.45.1, KOS 2.3.0
-(`1c6398f9`), kos-ports (`f4faacc4`), GLdc (`a1cd80a8`), mkdcdisc
-(`3c2ef63a`), `-m4-single`, thread model kos, **char is SIGNED by default on
-this build** (so `-fsigned-char` is belt-and-braces, not load-bearing).
-Cold rebuild ≈ 27 min (24 stage 1 + 2.5 stage 2). Host has **no BuildKit** —
-`DOCKER_BUILDKIT=0`, never pass `--progress`.
+| image | `.bss` | end | result |
+|---|---:|---|---|
+| `selftest.cdi` (control) | 22,728 | `0x8c048948` | PASS 3.10 s |
+| hello-world + 4.7 MB bss | 4,722,728 | `0x8c4c40a8` | PASS 3.08 s |
+| hello-world + 21 MB bss | 21,022,728 | `0x8d44f888` | **FAIL, 0 bytes** |
+| `OpenCrossing.cdi` | 12,415,508 | `0x8d472814` | **FAIL, 0 bytes** |
 
-- `dc/Dockerfile`, `dc/build-dc-image.sh` — build the image (idempotent).
-- `dc/build-dc.sh` — **host-side** build wrapper (this is the one you run).
-- `dc/build-dc-docker.sh` — runs **inside** the container; not a host entry
-  point. (`CLAUDE.md` originally advertised it as one; it never was.)
-- `dc/Makefile` — plain GNU make. Objects in `dc/build/obj` mirroring source
-  paths. `DC_EXCLUDE` list exists and is **empty**. Uses make's `$(file …)`
-  for a linker response file: 3900 object paths exceed `execve`'s `ARG_MAX`.
+A stock KOS hello-world containing *nothing but* a big array fails identically
+at the same image end. **The silence is size alone** — not a game fault, and
+not the `dc_main.c` trampoline. Startup zeroing runs off physical memory before
+`scif_init()`, so the guest never executes an instruction. There is no crash to
+symbolise until the image fits. Corollary: the trampoline is still untested,
+merely not implicated.
 
-**Harness (M0).** Verified against real CDIs, not asserted:
-`smoke.sh` exits 0 on selftest and 1 on crashtest; `crash.sh` resolves the
-fault to `crashtest.c:39`; `perf.sh` passes in-band and fails on a shifted
-baseline. Band = `max(2% of baseline, 100 µs)`. Symbolisation runs
-`sh-elf-addr2line`/`objdump` in the SDK container against `<image>.src.json`
-provenance sidecars (abs path + sha256 + size + built_utc + image + producer).
+## RAM levers — status
 
-**Platform layer.** `dc/src/dc_{os,gx,vi,pad,audio,aram,dvd,card,misc,stubs,
-mem_ledger,main,mtx}.c`. `dc_main.c` boot order: `dc_mem_ledger_init()` →
-`pc_settings_load/apply()` → `dc_platform_init()` (`vid_set_mode(DM_640x480,
-PM_RGB565)`) → `/cd` check → `pc_assets_init()` → `ac_entry()` →
-`boot_main()`. PVR init deliberately stays in `dc_gx.c`.
+1. **Asset destination arrays — 8,771,358 B (64.5% of `.bss`). THE lever, not
+   yet implemented.** Confirmed to the byte by *three* independent methods
+   (`mem-budget.md` §2 symbol attribution, the asset agent's loader replay, the
+   build agent's `nm -S` sweep). These are `#ifdef TARGET_PC` placeholder
+   arrays that `pc_assets.c` fills eagerly at boot — **scaffolding the PC port
+   added**, not something the game needs; the GameCube original read straight
+   from the REL. Fix is demand-loading into pooled storage: a **loader-only
+   change, no codegen**. Everything else is a rounding error next to this.
+2. **Resident REL blob — 16.56 MB peak. SOLVED, tool built and verified.**
+   `dcasset pack` emits `assets.pak` (8,917,568 B) + a 51,104 B resident index,
+   replacing the resident `foresta.rel` + `main.dol` (16,558,776 B). Round trip
+   replays 16,365 references over 8,884,894 B with **zero mismatches**. Chunks
+   are pre-byte-swapped offline (SH-4 never runs `do_swap`) and laid out in
+   real load order — 82 backward reads, max reach 7,520 B, so an **8 KB window
+   gives zero seeks**; one linear 8.9 MB read, 17.8 s at 500 KB/s. Also
+   replaces `foresta.rel` on disc (−6.7 MB, no Yaz0 at boot). **Remaining work
+   is the runtime loader in `pc_assets.c`** — and that same loader is what
+   unlocks lever 1. See `kb/asset-pack.md`.
+3. **Applied this session, −1,111,040 B** (measured delta equals the sum
+   exactly): `prbuf` `sizeof(u32)`→`u16` −614,400 · `TEX_BUFFER_DATA_SIZE`
+   `0x80000`→`0xC000` −475,136 · `TEX_BUFFER_BSS_SIZE` `0x4000`→`0x400`
+   −15,360 · `TEXTURE_CACHE_LIST_SIZE` 1024→256 −6,144. All four are reversions
+   of PC-port inflation back to **retail GameCube values**, so sufficiency is
+   proven by the shipped product.
+4. **Still on the ranked list, ~4.3 MB total** (from
+   `kb/research-size-reduction.md`, measured against the real ELF + map):
+   `.data` `src/data` tables to disc −1.94 MB (0.95 MB pointer-free today,
+   0.99 MB needs a REL-style reloc pass) · `s_assets[]` name-string pool →
+   disc index −0.89 MB · `audiomemory`/jaudio → AICA −0.65 MB · emu64
+   `texture_buffer_data` → VRAM (partly taken in item 3) · actor overlay
+   staging arenas → one shared union arena −0.46 MB · `pc_m_card` −0.28 ·
+   `dc_gx` −0.24.
+5. **Not yet costed: offline asset decimation.** The only lever that shrinks
+   the destination arrays *themselves* rather than relocating them. Disc is
+   5.3% full and the target is 640×480. `src/data/model` alone is 5,682,621 B
+   of `.bss`. PLAN §1 already sanctions a documented "DC edition". **This is a
+   product decision for the user, not an engineering one.**
+6. **Not yet checked: source-level table dedup.** `--icf` is unavailable on SH,
+   but `src/data` is generator output — hashing table contents and aliasing
+   duplicates in `gen_runtime_assets.py` is a *generator* change, not codegen.
+   Nobody has looked.
 
-`dc_mtx.c` implements all 37 `PSMTX*`/`PSVEC*`/`C_MTX*`/`gu*` symbols.
-XMTRX behind `DC_MTX_USE_XMTRX` (default 1); FIPR/FSRRA behind
-`DC_MTX_USE_FIPR` (**default 0** — both are ~20-bit approximations).
-`PSMTXConcat(a,b,r)` loads **b untransposed** and FTRVs each row of a (the GX
-column-vector and SH-4 row-vector conventions cancel); `PSMTXMultVec/SR/Array`
-load an explicit `transpose(m44)`. Verified numerically against the scalar
-reference with a host-side FTRV simulator. `PSMTXInverse` left scalar.
+## Closed — do not re-propose any of these
 
-**Asset tooling.** `tools/dcasset/` extracts the real ISO and has a `relmap`
-subcommand; `pack.py` / `assets_scan.py` are landing now. See
-`kb/asset-pack.md`.
+- **`--gc-sections` is mandatory, not an optimization.** `DC_GC_SECTIONS=0`
+  **does not link**: the decomp has genuinely undefined symbols whose
+  referencing sections GC removes (`JKRTask::searchBlank()`, `vtable for
+  JSUOutputStream`, `JSURandomOutputStream::getAvailable()/skip`) plus KOS's
+  `__kos_romdisk`. Its recovery is already spent: 522,150 B (map-based,
+  authoritative).
+- **`--icf`** — no SH backend in gold, no ICF in `ld.bfd`, no SH port of `lld`.
+- **SH GCC has no small-data model** — no `-G`/`-msdata` in `sh.opt`; the KOS
+  script's `.sdata`/`.sbss` are inert, 0 bytes in the map.
+- **`-g0` / strip saves exactly 0** — no debug section carries the `A` flag or
+  appears in any `PT_LOAD`; `objcopy -O binary` never emitted it.
+- **Compressing `1ST_READ.BIN` saves 0 RAM** — `.bss` is `NOBITS`.
+- **AICA's 2 MB cannot hold a C array** — DMA-only over a 16-bit 25 MHz G2 bus.
+  (Still open as a *paging backing store*; see Unfinished.)
+- **emu64 is NOT an N64 emulator and there is no emulated RDRAM anywhere.**
+  It is a GBI display-list interpreter emitting GX. `emu64.hpp:750`'s
+  `u32 segments[16]` is 64 bytes of real GameCube pointers; `seg2k0()`
+  bounds-checks `0x80000000..0x83000000` because that is GameCube MEM1, not
+  because it is an emulated image's extent. Game logic is *ported* — `src/`
+  carries the same TUs as the N64 decomp and `src/static/libultra/`
+  reimplements the N64 OS API on Dolphin OS. Only genuinely emulated memory in
+  the build is rspsim's 4 KB `DMEM[0x1000]`. Whole emu64 tree = 562,374 B of
+  `.bss`. Verified independently twice. See `kb/research-n64-origin.md`.
+- **`foresta.map`/`static.map` (5,402,023 B of disc) are droppable.** Only
+  reader is `JUTException::queryMapAddress_single` on the `OSSetErrorHandler`
+  path, which returns false outside `0x80000000..0x82FFFFFF` — no SH-4 address
+  qualifies.
+- **`-fno-builtin` breaks the link.** `m_select.c:936,993` then call a real
+  `alloca` newlib does not provide, and there is no `-fbuiltin-alloca`.
+  `kb/design-shelf-hazards.md` marked it "(VERIFIED)" as KOS convention; that
+  was false for this image.
+- **`-DTARGET_PC` is non-negotiable and must stay.** It means "not GameCube",
+  not "PC": it guards the base port's little-endian correctness fixes
+  (byte-wise texconv in `emu64.c`, swapped `u16` pair ordering in
+  `sys_matrix.c`, overlap-safe `Jac_bcopy` in `sample.c`). `-DTARGET_DC` is
+  added *alongside* it for genuinely DC-only branches.
 
-## Known-unreviewed and known-wrong
+## Unfinished — three research agents were stopped mid-flight
 
-Every kb deliverable from the first session was written by agents whose
-**adversarial verifiers all died**. Treat kb numbers as claims. Two have
-already been falsified by contact with the real toolchain:
+Each was told to dump partial findings before stopping. **Check whether these
+files exist and what state they are in — they may be complete, partial, or
+absent:**
 
-1. `kb/design-shelf-hazards.md` §3.1 marked `-fno-builtin` "(VERIFIED)" as KOS
-   convention. **False for this image.** `$KOS_CFLAGS` does not contain it,
-   and adding it makes `m_select.c:936,993` emit calls to a real `alloca` that
-   newlib does not provide. There is no `-fbuiltin-alloca`. Dropped.
-2. §2.3's header-collision scan predates this image (it assumed GCC 9.3 / KOS
-   `525cbda`), so it missed both collisions we actually hit — see below.
-
-**Unverifiable offline:** `dc_main.c` rewrites `CONTEXT_PC(*ctx)` to a
-trampoline so exception recovery runs in thread context. If that is wrong the
-failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
+- `kb/research-mmu-paging.md` — **the SH-4 has an MMU and KOS supports it.**
+  Verified present in our image:
+  `/opt/toolchains/dc/kos/kernel/arch/dreamcast/include/arch/mmu.h` exposes a
+  two-level sparse page table, `mmu_page_map`, `mmu_page_map_static`, and
+  crucially **`mmu_map_set_callback()`** — a fault-handler hook returning a
+  `mmupage_t*` for a faulting virtual page, i.e. demand paging. KOS's own
+  header text: *"a few very interesting things that this functionality could be
+  used for (like mapping large files into memory that wouldn't otherwise
+  fit)"*. `kb/research-size-reduction.md`'s "no MMU" is true of KOS's default
+  config, **false of the hardware.** Open: is the fault path complete enough;
+  page size (64 UTLB × 4 KB = only 256 KB reach, but SH-4 supports 64 KB and
+  1 MB pages); TLB-miss cost at 200 MHz; whether store queues and PVR DMA
+  survive MMU-on; **and whether Flycast emulates the UTLB at all** — if it does
+  not, we cannot iterate in the emulator and that alone may be decisive.
+- `kb/research-second-tier-memory.md` — VRAM (8 MB, maybe ~4 MB spare) and
+  AICA (2 MB, ~40 MB/s over G2) reconsidered as a *paging backing store* rather
+  than as addressable memory, which is the framing that dodges the
+  disqualification above. CD-R at ~500 KB/s is ~8 ms per 4 KB page and is
+  almost certainly unusable as primary swap. A benchmark source
+  (`bench_mem2.c`) for the missing SH-4↔VRAM bandwidth figure was being written
+  — **check whether it was ever actually run before trusting any number.**
+- `kb/research-budget-premises.md` — bucket 6 (see question 1 above), an audit
+  of `dc_mem_budget.h` buckets 6–12, the real KOS+GLdc baseline, and a `.data`
+  vs `.rodata` audit.
 
 ## Traps already paid for — do not re-discover these
 
@@ -115,209 +209,92 @@ failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
   the decomp's `math64.h:34` `#define fsqrt(x) sqrtf(x)` rewrites KOS's
   *definition* into a static `sqrtf` that collides with newlib.
 - **POSIX `link()` vs the decomp's `typedef struct link_ link`**, arriving via
-  `<stdio.h>` → `<sys/stdio.h>` → `<unistd.h>`. A blanket `-Dlink=` does not
-  work — it renames both sides. The prelude renames only the POSIX
-  declaration, then restores the identifier.
+  `<stdio.h>` → `<sys/stdio.h>` → `<unistd.h>`. A blanket `-Dlink=` does NOT
+  work — it renames both sides. The prelude renames only the POSIX declaration,
+  then gives the identifier back.
 - **Guest `scif_flush()` permanently kills the Flycast console.** KOS's flush
   clears TEND and spins; Flycast never re-raises TEND on an idle TX FIFO; KOS
-  latches `serial_enabled = 0`; a later crash then prints **nothing**.
-  Bisected across 7 guest variants — raising baud is fine, the flush is the
-  killer. Removed from `selftest.c`/`crashtest.c`. Never call it.
-- **KOS 2.3 assertion text** is `*** ASSERTION FAILURE ***` /
-  capital-A `Assertion "x" failed` — the documented lowercase regex never
-  matched, so a failed `assert()` only ever showed up as a timeout.
+  latches `serial_enabled = 0`; a later crash then prints **nothing**. Bisected
+  across 7 guest variants — raising baud is fine, the flush is the killer.
+  Never call it.
+- **KOS 2.3 assertion text** is `*** ASSERTION FAILURE ***` / capital-A
+  `Assertion "x" failed`. The documented lowercase regex never matched, so a
+  failed `assert()` only ever surfaced as a timeout.
 - **`bash -lc` in the SDK image** re-runs `/etc/profile` and drops
   `/opt/toolchains/dc/sh-elf/bin`, so `sh-elf-addr2line` vanishes and every
   address silently symbolises to `??`. Use `bash -c`.
 - **Sourcing `environ.sh` under `set -u`** exits 127 with nothing on stderr.
-- **mkdcdisc padding**: default = 740,083,145 B / 15.6 s; `-N` = 1,783,337 B /
-  0.021 s. 415× the size and 740× the time. Use `-N` for every emulator run.
+- **mkdcdisc padding**: default 740,083,145 B / 15.6 s vs `-N` 1,783,337 B /
+  0.021 s. Use `-N` for every emulator run; `DC_CDI_PAD=1` only for burns and
+  read-speed-realistic timing.
+- **3900 object paths exceed `execve`'s `ARG_MAX`** — the Makefile uses make's
+  `$(file …)` to build a linker response file.
+- **Host has no BuildKit** — `DOCKER_BUILDKIT=0`, never pass `--progress`.
+  `--platform linux/arm64` is not optional; without it an amd64 pull drops the
+  build into qemu.
 
-## The RAM levers, ranked
+## Toolchain
 
-1. **Resident REL blob — 16.56 MB. SOLVED, tool built and verified.**
-   `pc_assets.c` kept the whole decompressed `foresta.rel` (15.64 MB) plus
-   `main.dol` (0.92 MB) resident, i.e. more than the entire machine.
-   `dcasset pack` emits **`assets.pak`, 8,917,568 B**, covering 16,365
-   references over 8,787,262 distinct blob bytes as 3,188 chunks, with a
-   **51,104 B resident index** (0.3% of RAM). Net saving **15.68 MB**. Round
-   trip: 16,365 references replayed over 8,884,894 B, **zero mismatches**.
-   Chunks are laid out in real load order and **pre-byte-swapped offline**, so
-   the SH-4 never runs `do_swap`; 82 backward reads with max reach 7,520 B mean
-   an **8 KB window gives zero seeks** — the whole load is one linear 8.9 MB
-   read (17.8 s at 500 KB/s). The pack also replaces `foresta.rel` on disc
-   (−6.7 MB, no Yaz0 at boot). The old 8.66 MB lower-bound caveat is **closed**:
-   reconciliation is exact at 2,641 sites with zero unaccounted, and `pack`
-   refuses to build if that ever goes non-zero. Details: `kb/asset-pack.md`.
-   Remaining work is the runtime loader in `pc_assets.c`.
-2. **Asset destination arrays — 8.22 MB. The new floor, and probably most of
-   `.bss`.** The assets land in **15,726 static arrays totalling ~8,617,214 B**
-   that stay resident no matter where the bytes came from. Lever 1 removes a
-   *peak*; this is a *floor*, and it is now the largest single line in the
-   16 MB budget. The pack format already supports the fix — every asset is
-   individually addressable, so demand-loading into pooled storage is a
-   **loader-only change, no codegen**.
-3. **`.bss` right-sizing — 13.5 MB of the 22.5 MB ELF.** Measured with `nm -S`
-   over 3,621 objects: **`src/data/**` = 8,519,191 B = 64% of all BSS**, which
-   matches `kb/mem-budget.md` to the byte *and* corroborates lever 2's
-   8,617,214 B of destination arrays from a completely different direction.
-   By directory: `src/data/model` 5,682,621 · `src/data/npc` 1,593,792 ·
-   `src/game` 1,548,236 · `jaudio_NES` 1,265,101 · `src/data/field` 1,144,896 ·
-   emu64 562,374. Top singles: `prbuf` 1,228,800 (`m_play.c:54`) ·
-   `audiomemory` 589,824 (`game64.c_inc:587`) · `texture_buffer_data` 524,288
-   (`emu64.c:41`) · `pc_m_card.c` save staging 320,150 · `aSTR_overlay`
-   294,912 · `sys_dynamic` 132,104.
+`opencrossing-dc:sdk` in the local Docker daemon (do not rebuild — it is ~27
+min cold): sh-elf GCC 15.2.0, newlib 4.6.0.20260123, binutils 2.45.1, KOS 2.3.0
+(`1c6398f9`), kos-ports (`f4faacc4`), GLdc (`a1cd80a8`), mkdcdisc (`3c2ef63a`),
+`-m4-single`, thread model kos. **char is SIGNED by default** on this build, so
+`-fsigned-char` is belt-and-braces, not load-bearing.
 
-   Two one-line wins, high confidence, no new machinery:
-   - **`prbuf`: `sizeof(u32)` → `sizeof(u16)`, −614,400 B.** Only writer is
-     `copy_efb_to_texture()` doing `GXSetTexCopyDst(640, 480, GX_TF_RGB565, 0)`
-     = 2 B/px; only reader binds `G_IM_SIZ_16b`. The 2× is dead in retail too.
-   - **Revert the PC texture-cache inflation, −496,640 B, three lines.**
-     `texture_cache.h` reads `0x80000 /* 512 KB (was 48 KB) */`; retail GC
-     values sit right below at lines 74/75/16 (`0xC000`, `0x400`, `256`).
-     Sufficiency is proven by the shipped product.
+```bash
+bash dc/build-dc-image.sh        # build the image (idempotent)
+bash dc/build-dc.sh              # HOST entry point -> ELF + unpadded CDI
+DC_TARGET=objs bash dc/build-dc.sh
+bash harness/dc/smoke.sh <cdi>   # boot in Flycast, assert on console
+bash harness/dc/crash.sh <cdi>   # symbolise a fault
+```
 
-   **`DC_MAIN_MEMORY_SIZE` (4,000,000) is heap-allocated at `dc_os.c:400`** —
-   4 MB *on top of* the 22.5 MB image, not inside it. **The true overage is
-   counted against the heap side of the budget, not the 22.5 MB image.**
+`dc/build-dc-docker.sh` runs **inside** the container and is not a host entry
+point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`.
 
-   ⚠️ **The emu64/N64-emulation lead is a red herring — do not chase it
-   again.** `emu64` is a GBI display-list interpreter that emits GX, **not** a
-   machine emulator, and there is no emulated RDRAM in the tree.
-   `emu64.hpp:750`'s `u32 segments[16]` is 64 bytes of real GameCube pointers;
-   `seg2k0()` bounds-checks `0x80000000..0x83000000` because that is GameCube
-   MEM1, not because it is an emulated image's extent. The game logic is
-   *ported*, not emulated — `src/` carries the same TUs as the N64 decomp and
-   `src/static/libultra/` reimplements the N64 OS API on Dolphin OS. The only
-   genuinely emulated memory in the build is rspsim's 4 KB `DMEM[0x1000]`.
-   Whole emu64 layer = 648,229 B with ~13.5 KB of genuine state; the NES
-   emulator is 83 KB. Neither is a lever. See `kb/research-n64-origin.md`.
+## Next actions, in order
 
-   **What the N64 original *does* give us is its memory model:** 4 MB RDRAM,
-   no Expansion Pak, assets and code overlays DMA'd out of the 16 MB cart on
-   demand (`src/dmadata`, `src/boot/{m_std_dma.c,ovlmgr.c,yaz0.c}`), heap
-   running from end-of-BSS to the framebuffer — "reserve as little statically
-   as possible". That is the opposite of what this build does, and it is the
-   shape to aim for, with the CD-R as the cart. The N64 decomp is
-   **zeldaret/af** (active; supersedes BluRosie/doubutsu-no-mori); no PC port
-   exists and both `af` and `ac-decomp` declare porting a non-goal.
-4. **Everything else, −4.32 MB combined** (from `kb/research-size-reduction.md`,
-   measured against the real ELF + map): `.data` `src/data` tables to disc
-   −1.94 MB (0.95 MB pointer-free today, 0.99 MB needs a REL-style reloc pass)
-   · `prbuf` → PVR render target −1.23 MB (supersedes the u16 halving above;
-   take the halving as the cheap step, the render target later) · `s_assets[]`
-   name-string pool → disc index −0.89 MB (888,853 B in `pc_assets.c.o` alone)
-   · `audiomemory`/jaudio → AICA + shrink −0.65 MB · emu64
-   `texture_buffer_data` → decode straight to VRAM −0.52 MB · actor overlay
-   staging arenas → one shared union arena −0.46 MB · `pc_m_card` −0.28 ·
-   `dc_gx` −0.24 · delete NES-emu/texpack/viewer −0.11.
+1. **Read whichever of the three `kb/research-*.md` files above exist.** They
+   answer the viability questions; do not re-derive them.
+2. **Measure bucket 6** if the premises agent did not. Cheapest win available.
+3. **Implement the `pc_assets.c` runtime loader against `assets.pak`**, then
+   demand-load the 8,771,358 B of destination arrays into pooled storage. This
+   is the single largest lever and it is loader-only. Two rules from the pack
+   author: **log window faults, never swallow them** (a regenerated
+   `pc_assets.c` that reorders calls silently degrades to `fs_seek` + binary
+   search — correct but minutes slower), and **do not delete `do_swap`** (a
+   future regeneration with a swap conflict ships that chunk raw with the
+   `PRESWAPPED` bit clear).
+4. **Decide the `.text` question** — MMU paging, overlays, or accept that
+   content must be cut. This is the fork in the road for the project.
+5. Re-link, re-run `smoke.sh`, and expect a *real* crash to symbolise once the
+   image fits — the first one will be informative.
 
-   **Grand total −14.77 MB against −14.45 MB required: it closes on paper with
-   a 2% margin.** "Closes on paper" is not "safe".
-
-## Dead ends — verified, do not re-propose
-
-- **`--gc-sections` is already applied and already spent.** The map's discard
-  block is 29,471 sections recovering **522,150 B of allocatable RAM, and that
-  is all there is.** GCC does not emit unreferenced `static`s even at `-O0`,
-  which is why it is ~292 KB of `.text` and not 2 MB.
-- **`--icf` is unavailable on SH** — gold's `configure.tgt` has no SH backend,
-  `ld.bfd` has no ICF, `lld` has no SH port.
-- **SH GCC has no small-data model** — no `-G`/`-msdata` in
-  `gcc/config/sh/sh.opt`. The `.sdata`/`.sbss` in the KOS linker script are
-  inert boilerplate, 0 bytes in the map.
-- **`-mrelax` / `-Wl,--relax` is a codegen change** (emits `.uses` pseudo-ops
-  so `ld` can synthesise `bsr`). Disqualified under the `-O0` directive.
-- **Stripping debug info saves 0 RAM** — 67 MB of the 72 MB ELF is
-  non-`SHF_ALLOC`; `objcopy -O binary` never emitted it.
-- **Compressing `1ST_READ.BIN` saves 0 RAM.** `.bss` is `NOBITS`; compression
-  is arithmetically incapable of touching the actual problem.
-- **AICA's 2 MB is not usable as a size lever.** Genuine ARAM analogue but
-  DMA-only: G2 is 16-bit @ 25 MHz, ~40 MB/s, with a FIFO protocol KOS itself
-  calls "a pain in the rear." You cannot put a C array there. Budget 0 MB.
-
-## On the shelf
-
-- **Code overlays are real and shipping on DC** — ScummVM's
-  `backends/platform/dc/dcloader.cpp` + `plugin.x`, an SH-4 ELF loader
-  handling exactly `R_SH_DIR32`, in production since 0.7.0. Shelved because it
-  buys `.text`, and `.text` is only 5.26 MB of a 22.5 MB problem.
-- **VRAM as a store is legitimate** — KOS's own linker script demonstrates the
-  mechanism (`.ocram 0x7c001000 (NOLOAD)`). But ~half of VRAM is off-limits
-  during PVR rendering, reads are slow, and there is **no citable measured
-  SH-4↔VRAM read figure** — UNVERIFIED, must be measured before use.
-- **Drop non-goal subsystems.** NES emulation is a documented non-goal;
-  `famicom.arc` is 1.70 MB on disc and the jaudio_NES tree pulls in the SDL
-  shim. Small (−0.11 MB of RAM) but free.
-6. **`foresta.map` / `static.map` — 5,402,023 B of disc. SETTLED: droppable.**
-   The only reader is `JUTException::queryMapAddress_single()`
-   (`JUTDirectFile::fopen` → `DVDOpen`), reachable only via
-   `showMapInfo_subroutine` ← `showStack`/`showGPRMap` ← `printDebugInfo` ←
-   `errorHandler`, installed by `OSSetErrorHandler`. Two independent kills on
-   DC: the REL is never loaded as a module, and `showMapInfo_subroutine`
-   returns false for any address outside `0x80000000..0x82FFFFFF` — **no SH-4
-   address qualifies**. `boot.c:695`'s `setMapFile("/static.map")` only pushes
-   a string; `dvderr.c` has no map reference at all.
-
-## Open questions
-
-1. Real JKRHeap high-water marks — instrument the PC build, cheap there.
-2. `emu64`'s `seg2k0` bound is `0x80000000..0x83000000` (GameCube MEM1) and
-   **still has to be re-derived for KOS's `0x8c000000` RAM base** — every
-   resolved segment pointer on DC will fail that check. Answered: it is a
-   validity assert on real pointers, not an emulated-memory extent (q3 below
-   is closed), so the fix is re-pointing the bound, not removing a buffer.
-3. ~~Does `emu64` emulate an N64 CPU/RSP?~~ **Closed: no.** GBI interpreter
-   emitting GX. See lever 3.
-4. `dc/Makefile:165` defines `-DTARGET_PC`, so the DC build takes
-   `pc_assets.c`'s eager-load branch (8,771,358 B at boot into `#ifdef
-   TARGET_PC` placeholders). Confirm that is deliberate and audit what else
-   that define drags in.
-
-## Disc-space facts (settled — stop re-measuring)
-
-Image 1,459,978,240 B; **real content 27,573,513 B (1.89%)**, the rest
-trailing zeros, confirmed byte-by-byte rather than sampled. Recommended DC
-layout with `foresta.rel` Yaz0-expanded = **35.24 MB, 5.3% of a CD-R.** Disc
-capacity is a non-issue — spend it freely on offline conversions that trade
-disc space for SH-4 cycles. Biggest files: `audiorom.img` 8.30 MB,
-`foresta.rel.szs` 6.14 MB → 15.64 MB expanded, `foresta.map` 4.85 MB,
-`forest_2nd.arc` 4.13 MB, `famicom.arc` 1.70 MB (droppable).
-
-## Next actions
-
-0. **Measure the three unknowns first — one day's work, and the plan's 2%
-   margin depends on them.** KOS+GLdc baseline RAM; `pvr_mem_available()`
-   after a real texture load; `__osMalloc` peak. Ledger bucket 6 (4.0 MB
-   `JKRHeap`/`__osMalloc`) is **entirely unmeasured** — if it is really 6 MB
-   the whole plan is 2 MB short and we should know that before building on it.
-1. **The `src/data` demand-residency conversion is the milestone.** −8.45 MB,
-   57% of the required cut, and it also deletes the 15.64 MB
-   `foresta.rel.szs` boot transient, which is independently a hard blocker on
-   a 16 MB machine. Nothing else is within a factor of five, and with `-O0`
-   frozen there is no second lever of that magnitude. Needs the asset pack's
-   runtime loader (next item) first.
-   Be honest if the levers do not close the gap — "still N MB short with
-   `-O0` mandatory" is a valid and important result, not a failure to report.
-2. Wire the runtime loader in `pc_assets.c` to `assets.pak` (lever 1). Two
-   loader rules from the pack author: **log window faults, never swallow
-   them** (a regenerated `pc_assets.c` that reorders calls silently degrades
-   to `fs_seek` + binary search — correct but minutes slower), and **do not
-   delete `do_swap`** (a future regeneration with a swap conflict ships that
-   chunk raw with the `PRESWAPPED` bit clear).
-3. Demand-load the 8.22 MB of destination arrays into pooled storage
-   (lever 2) — the biggest remaining line, and loader-only.
-4. Boot the real game CDI under `harness/dc/smoke.sh`; report the symbolised
-   crash point via `crash.sh`.
+**Be honest in reporting.** "Still N MB short with `-O0` mandatory" is a valid
+and important result. If the levers do not close the gap, cutting content or
+declaring a stock-16 MB build infeasible are the honest options; quietly
+reopening the optimization question is not.
 
 ## Standing constraints
 
-Stock 16 MB DC — the 32 MB mod must never become a requirement. No shaders,
-no T&L, one texture unit. VMU ≈ 100 KB vs a ~456 KB GC save. CD-R ~500 KB/s,
-so all disc I/O needs read-ahead. Game code stays `-O0` (above). Never commit
-ROM material or built disc images. The user's ISO is at
+Stock 16 MB DC — the 32 MB mod must never become a requirement. No shaders, no
+T&L, one texture unit. VMU ≈ 100 KB vs a ~456 KB GC save. CD-R ~500 KB/s, so
+all disc I/O needs read-ahead. Game code stays `-O0`. Every optimization gets a
+kill switch. **Never commit ROM material or built disc images** — no `.iso`/
+`.gcm`/`.cdi`/`.gdi`/`.gci`. The user's ISO is at
 `/Users/gabe/Documents/GitHub/OpenCrossing-Anbernic/harness/rom/Animal
-Crossing.iso` — reference it, never copy it in. `pc/` is reference material,
-not a build target. Agents must not run git; the main thread commits. Every
-optimization gets a kill switch. Emulator-first iteration (Flycast), hardware
-for truth; dev console is a known-good MIL-CD unit that boots burned CD-Rs.
+Crossing.iso` (GAFE01 USA Rev 0, 1,459,978,240 B) — reference it, never copy it
+in. `pc/` is reference material, not a build target. Agents must not run git;
+the main thread commits. Branches: `main` = releases, `dev` = daily; never tag
+dev. Emulator-first iteration (Flycast), hardware for truth; the dev console is
+a known-good MIL-CD unit that boots burned CD-Rs.
+
+## Caveat on everything in `kb/`
+
+The first session's deliverables were written by agents whose **adversarial
+verifiers all died**, so they are unreviewed. Treat their numbers as claims
+until confirmed. Three have already been falsified by contact with the real
+toolchain: `-fno-builtin` ("VERIFIED", breaks the link), the header-collision
+scan (measured GCC 9.3/KOS `525cbda`, not our GCC 15.2/KOS 2.3, and missed both
+collisions that actually bit us), and "no MMU" (true of KOS's default config,
+false of the hardware).
