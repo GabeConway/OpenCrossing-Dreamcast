@@ -1,0 +1,26 @@
+# ROM material — never commit (see README disclaimer)
+rom/
+*.iso
+*.gcm
+*.ciso
+*.gci
+orig/
+
+# Built disc images contain copyrighted assets — never commit
+*.cdi
+*.gdi
+*.bin
+!**/tools/**/*.bin
+
+# Build output
+build/
+build-*/
+*.elf
+*.o
+*.a
+
+# Editors / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
