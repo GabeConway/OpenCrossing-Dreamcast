@@ -149,17 +149,50 @@ failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
    16 MB budget. The pack format already supports the fix — every asset is
    individually addressable, so demand-loading into pooled storage is a
    **loader-only change, no codegen**.
-3. **`.bss` right-sizing — 13.5 MB of the 22.5 MB ELF.** In flight, and note
-   that lever 2 likely accounts for ~8.2 MB of it, leaving ~5.3 MB to
-   classify. The
-   framing that matters: this game shipped on **N64 in 4 MB of RDRAM**, and
-   the GC build runs it through the in-house `emu64` layer. Buffers sized for a
-   24 MB main + 16 MB ARAM GameCube, or for an emulated N64 memory image, are
-   not sized for need. `emu64_utility.c:40` has a `seg2k0` heuristic keyed on
-   N64 KSEG0 (`0x80000000`) — strong hint that an emulated memory image is in
-   there. Classify every large symbol as *emu64/N64-emulation*,
-   *GameCube-sized*, or *genuinely required on 16 MB*; the classification is
-   worth more than the byte count.
+3. **`.bss` right-sizing — 13.5 MB of the 22.5 MB ELF.** Measured with `nm -S`
+   over 3,621 objects: **`src/data/**` = 8,519,191 B = 64% of all BSS**, which
+   matches `kb/mem-budget.md` to the byte *and* corroborates lever 2's
+   8,617,214 B of destination arrays from a completely different direction.
+   By directory: `src/data/model` 5,682,621 · `src/data/npc` 1,593,792 ·
+   `src/game` 1,548,236 · `jaudio_NES` 1,265,101 · `src/data/field` 1,144,896 ·
+   emu64 562,374. Top singles: `prbuf` 1,228,800 (`m_play.c:54`) ·
+   `audiomemory` 589,824 (`game64.c_inc:587`) · `texture_buffer_data` 524,288
+   (`emu64.c:41`) · `pc_m_card.c` save staging 320,150 · `aSTR_overlay`
+   294,912 · `sys_dynamic` 132,104.
+
+   Two one-line wins, high confidence, no new machinery:
+   - **`prbuf`: `sizeof(u32)` → `sizeof(u16)`, −614,400 B.** Only writer is
+     `copy_efb_to_texture()` doing `GXSetTexCopyDst(640, 480, GX_TF_RGB565, 0)`
+     = 2 B/px; only reader binds `G_IM_SIZ_16b`. The 2× is dead in retail too.
+   - **Revert the PC texture-cache inflation, −496,640 B, three lines.**
+     `texture_cache.h` reads `0x80000 /* 512 KB (was 48 KB) */`; retail GC
+     values sit right below at lines 74/75/16 (`0xC000`, `0x400`, `256`).
+     Sufficiency is proven by the shipped product.
+
+   **`DC_MAIN_MEMORY_SIZE` (4,000,000) is heap-allocated at `dc_os.c:400`** —
+   4 MB *on top of* the 22.5 MB image, not inside it. **The true overage is
+   worse than 6.5 MB.**
+
+   ⚠️ **The emu64/N64-emulation lead is a red herring — do not chase it
+   again.** `emu64` is a GBI display-list interpreter that emits GX, **not** a
+   machine emulator, and there is no emulated RDRAM in the tree.
+   `emu64.hpp:750`'s `u32 segments[16]` is 64 bytes of real GameCube pointers;
+   `seg2k0()` bounds-checks `0x80000000..0x83000000` because that is GameCube
+   MEM1, not because it is an emulated image's extent. The game logic is
+   *ported*, not emulated — `src/` carries the same TUs as the N64 decomp and
+   `src/static/libultra/` reimplements the N64 OS API on Dolphin OS. The only
+   genuinely emulated memory in the build is rspsim's 4 KB `DMEM[0x1000]`.
+   Whole emu64 layer = 648,229 B with ~13.5 KB of genuine state; the NES
+   emulator is 83 KB. Neither is a lever. See `kb/research-n64-origin.md`.
+
+   **What the N64 original *does* give us is its memory model:** 4 MB RDRAM,
+   no Expansion Pak, assets and code overlays DMA'd out of the 16 MB cart on
+   demand (`src/dmadata`, `src/boot/{m_std_dma.c,ovlmgr.c,yaz0.c}`), heap
+   running from end-of-BSS to the framebuffer — "reserve as little statically
+   as possible". That is the opposite of what this build does, and it is the
+   shape to aim for, with the CD-R as the cart. The N64 decomp is
+   **zeldaret/af** (active; supersedes BluRosie/doubutsu-no-mori); no PC port
+   exists and both `af` and `ac-decomp` declare porting a non-goal.
 4. **`--gc-sections`** with `-ffunction-sections -fdata-sections`. Pure
    layout, no codegen change.
 5. **Drop non-goal subsystems.** NES emulation is a documented non-goal;
@@ -178,10 +211,17 @@ failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
 ## Open questions
 
 1. Real JKRHeap high-water marks — instrument the PC build, cheap there.
-2. emu64's GC address-range assumptions (`0x80000000`–`0x83000000`) vs KOS's
-   `0x8c000000` RAM base — the `seg2k0` heuristic must be re-derived.
-3. Does `emu64` emulate an N64 CPU/RSP, or only translate microcode to GX?
-   This decides whether a whole RDRAM-sized buffer exists in our `.bss`.
+2. `emu64`'s `seg2k0` bound is `0x80000000..0x83000000` (GameCube MEM1) and
+   **still has to be re-derived for KOS's `0x8c000000` RAM base** — every
+   resolved segment pointer on DC will fail that check. Answered: it is a
+   validity assert on real pointers, not an emulated-memory extent (q3 below
+   is closed), so the fix is re-pointing the bound, not removing a buffer.
+3. ~~Does `emu64` emulate an N64 CPU/RSP?~~ **Closed: no.** GBI interpreter
+   emitting GX. See lever 3.
+4. `dc/Makefile:165` defines `-DTARGET_PC`, so the DC build takes
+   `pc_assets.c`'s eager-load branch (8,771,358 B at boot into `#ifdef
+   TARGET_PC` placeholders). Confirm that is deliberate and audit what else
+   that define drags in.
 
 ## Disc-space facts (settled — stop re-measuring)
 
