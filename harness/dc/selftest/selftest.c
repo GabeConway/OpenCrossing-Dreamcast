@@ -13,6 +13,12 @@
  *
  * Flycast never exits on its own, so the host-side runner kills it as soon as
  * it sees the END line.  Never print the END line before you are done.
+ *
+ * HARD RULE (verified 2026-08-01, KOS 2.3.0 + Flycast v2.6): never call
+ * scif_flush() from guest code.  It clears TEND and spins waiting for it to
+ * come back; Flycast never re-raises TEND on an idle TX FIFO, the spin times
+ * out, and KOS latches `serial_enabled = 0` -- permanently killing all further
+ * serial output including the crash dump.  printf() already flushes.
  */
 
 #include <kos.h>
@@ -167,7 +173,6 @@ int main(int argc, char **argv) {
     }
 
     printf("OC-DC-HARNESS-END rc=%d\n", failures ? 1 : 0);
-    scif_flush();
 
     /* Sit still; the host runner kills us on the END marker. Returning from
      * main lands in KOS shutdown, which prints extra noise. */

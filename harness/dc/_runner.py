@@ -44,11 +44,17 @@ BASE_CONFIG = [
 ]
 
 DEFAULT_END_MARKER = r"OC-DC-HARNESS-END"
+# Every one of these was observed coming out of KOS 2.3.0 on Flycast v2.6.
+# `ASSERTION FAILURE` and `arch: aborting the system` are NOT optional: KOS 2.3
+# prints `*** ASSERTION FAILURE ***` / `Assertion "x" failed at f.c:9` (capital
+# A) and then aborts, and without those two alternatives a failing assert is
+# only ever caught by the wall-clock timeout.
 DEFAULT_FAIL_MARKER = (
-    r"(kernel panic|Unhandled exception|assertion \"|"
+    r"(kernel panic|Unhandled exception|ASSERTION FAILURE|[Aa]ssertion \"|"
+    r"arch: aborting the system|"
     r"Failed to open ELF|Failed to locate bootfile|ASSERT fail)"
 )
-BOOT_MARKER = r"KallistiOS .*revision|OC-DC-HARNESS-BEGIN"
+BOOT_MARKER = r"KallistiOS |OC-DC-HARNESS-BEGIN"
 
 REC_RE = {
     "mark": re.compile(r"^MARK:(\S+)(?:\s+(.*))?$"),
@@ -59,7 +65,12 @@ REC_RE = {
     "mem": re.compile(r"^MEM\s+(.*)$"),
 }
 END_RC_RE = re.compile(r"OC-DC-HARNESS-END\s+rc=(-?\d+)")
-KOS_REV_RE = re.compile(r"KallistiOS.*revision\s+(\S+?):?$")
+# Two banner formats in the wild:
+#   KOS 2.3.0 (GCC 15 SDK image):  "KallistiOS v2.3.0 [dreamcast/pristine]"
+#                                  "  Git revision: 1c6398f"
+#   KOS 2021 (einsteinx2 image):   "KallistiOS Git revision 525cbda:"
+KOS_REV_RE = re.compile(r"[Gg]it revision:?\s+(\S+?):?$")
+KOS_VER_RE = re.compile(r"^KallistiOS\s+(\S+)")
 MAPLE_RE = re.compile(r"^\s+([A-D]\d):\s+(.*?)\s{2,}\((\S+):\s*(.*)\)")
 
 
@@ -146,6 +157,10 @@ def run(args):
                 s = raw.decode("utf-8", "replace").rstrip("\r")
                 lines.append(s)
                 stamps.append(round(time.time() - t0, 3))
+                if args.tee:
+                    # stderr, never stdout -- stdout must stay pure JSON
+                    sys.stderr.write(s + "\n")
+                    sys.stderr.flush()
                 if boot_re.search(s):
                     booted = True
                 if drain_until is not None:
@@ -224,11 +239,15 @@ def run(args):
             end_rc = int(m.group(1))
 
     kos_rev = None
+    kos_ver = None
     maple = []
     for s in lines:
         m = KOS_REV_RE.search(s)
         if m and kos_rev is None:
             kos_rev = m.group(1).rstrip(":")
+        m = KOS_VER_RE.match(s)
+        if m and kos_ver is None:
+            kos_ver = m.group(1)
         m = MAPLE_RE.match(s)
         if m:
             maple.append({"port": m.group(1), "name": m.group(2).strip(),
@@ -250,6 +269,7 @@ def run(args):
         "run_dir": run_dir,
         "image": os.path.abspath(args.image),
         "line_count": len(lines),
+        "kos_version": kos_ver,
         "kos_revision": kos_rev,
         "maple": maple,
         "failed_asserts": failed_asserts,
@@ -269,10 +289,16 @@ def main():
     ap.add_argument("--fail-drain", type=float, default=1.0)
     ap.add_argument("--end-drain", type=float, default=0.15)
     ap.add_argument("-c", "--config", action="append", default=[])
+    ap.add_argument("--tee", action="store_true",
+                    help="echo guest serial lines to stderr as they arrive")
+    ap.add_argument("--emit-lines", action="store_true",
+                    help="include the full captured console in the JSON")
     a = ap.parse_args()
 
     os.makedirs(a.run_dir, exist_ok=True)
-    result, _ = run(a)
+    result, lines = run(a)
+    if a.emit_lines:
+        result["lines"] = lines or []
     out = os.path.join(a.run_dir, "runner.json")
     with open(out, "w") as f:
         json.dump(result, f, indent=1)
