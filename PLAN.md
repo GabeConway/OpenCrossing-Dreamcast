@@ -81,8 +81,25 @@ requirement (dca3 holds this line, we hold it too).
 | linked ELF `.bss` | 13,526,548 | classification in flight |
 | **total** | **22,483,968** | ends `0x8d581c14`; `_arch_mem_top` = `0x8d000000` |
 
-It links; it will not boot. **~6.5 MB must come out, plus heap headroom**, and
-`-O0` is mandatory. Two levers are measured rather than guessed:
+It links; it will not boot.
+
+**The cut required is ~14.45 MB.** An earlier pass said 6.5 MB; that figure
+only gets the image under `_arch_mem_top` with ~1.2 MB of heap left, which is
+less than the game's first archive mount. Against the ledger's own 7.61 MB
+heap (`dc/include/dc_mem_budget.h` buckets 6–12) plus KOS's ~1 MB, **the image
+budget is 8,035,072 B.** Measure proposals against that, not against 16 MB.
+
+The reason `.bss` is not free: **KOS's `mm_sbrk()` starts at the ELF `end`
+symbol** — no MMU, no lazy commit, so every `.bss` byte destroys a heap byte.
+This single fact is what makes the problem structural rather than cosmetic,
+and it is why compression and debug-stripping are worth exactly zero here
+(`.bss` is `NOBITS`).
+
+`-O0` is mandatory throughout. `kb/research-size-reduction.md` ranks the
+codegen-neutral techniques and totals **−14.77 MB against −14.45 MB required:
+it closes on paper with a 2% margin**, which is "closes on paper", not "safe".
+The dominant term is demand-loading `src/data` (−8.45 MB, 57% of the cut);
+nothing else is within a factor of five. Levers measured rather than guessed:
 
 - **Resident REL blob, −15.68 MB (solved, tool built).** `pc_assets.c` kept
   the decompressed `foresta.rel` + `main.dol` resident = 16,558,776 B.
@@ -98,6 +115,32 @@ It links; it will not boot. **~6.5 MB must come out, plus heap headroom**, and
   Only reader is `JUTException::queryMapAddress_single` on the
   `OSSetErrorHandler` path, which returns false outside
   `0x80000000..0x82FFFFFF` — no SH-4 address qualifies.
+- **`DC_MAIN_MEMORY_SIZE` (4,000,000) is heap-allocated** at `dc_os.c:400` —
+  4 MB *on top of* the image, not inside it. Counted in the heap side of the
+  budget above, not the 22.5 MB.
+
+**Dead ends, verified — do not re-propose** (details in
+`kb/research-size-reduction.md`): `--gc-sections` is already applied and
+already spent (29,471 discarded sections recover 522,150 B of allocatable RAM
+and that is all there is — GCC does not emit unreferenced `static`s even at
+`-O0`); `--icf` has no SH implementation in gold, `ld.bfd` or `lld`; SH GCC has
+no small-data model, so the KOS script's `.sdata`/`.sbss` are inert; `-mrelax`
+is a codegen change and is disqualified; stripping debug info and compressing
+`1ST_READ.BIN` each save exactly 0 RAM; AICA's 2 MB is DMA-only over a 16-bit
+25 MHz G2 bus and cannot hold a C array — budget 0 MB of it.
+
+**Shelved, not rejected:** code overlays are real and shipping on DC (ScummVM's
+`backends/platform/dc/dcloader.cpp` + `plugin.x`, an SH-4 `R_SH_DIR32` ELF
+loader in production since 0.7.0) — shelved because they buy `.text`, and
+`.text` is only 5.26 MB of the problem. VRAM as a store is legitimate and KOS's
+linker script already shows the mechanism (`.ocram 0x7c001000 (NOLOAD)`), but
+~half of VRAM is unavailable during PVR rendering and there is **no measured
+SH-4↔VRAM read figure** — measure before relying on it.
+
+**Measure these three before trusting the 2% margin:** KOS+GLdc baseline RAM,
+`pvr_mem_available()` after a real texture load, and `__osMalloc` peak. Ledger
+bucket 6 (4.0 MB `JKRHeap`/`__osMalloc`) is entirely unmeasured; if it is
+really 6 MB, the plan is 2 MB short.
 
 ### 3.2 CPU: 200 MHz vs -O0 decomp code
 

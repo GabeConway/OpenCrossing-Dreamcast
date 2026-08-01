@@ -263,8 +263,13 @@ as host code.
 ```
 
 KOS's `_arch_mem_top` for a stock console is `0x8d000000`, and the image ends
-at `0x8d581c14` — roughly **5.8 MB over the 16 MB contract**, before any heap
-headroom. Nothing here has been booted.
+at `0x8d581c14`. Nothing here has been booted.
+
+Being under `_arch_mem_top` is **not** the bar. KOS's `mm_sbrk()` starts at the
+ELF `end` symbol, with no MMU and no lazy commit, so every `.bss` byte destroys
+a heap byte. Against the ledger's 7.61 MB heap (`dc/include/dc_mem_budget.h`
+buckets 6–12) plus KOS's ~1 MB, **the image budget is 8,035,072 B — so the cut
+required is ~14.45 MB, not the ~5.8 MB the raw arithmetic suggests.**
 
 All of it has to come out of layout, not codegen (see the optimization section
 above). The levers, ranked, with `kb/STATE.md` carrying live numbers:

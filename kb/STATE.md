@@ -12,8 +12,16 @@ fresh context can pick up without replaying anything.
   as a force-include. It also links and produces a 27 MB unpadded CDI.
 - **The linked ELF is 22.5 MB against a 16 MB machine.** text 6,318,568 +
   data 2,638,852 + bss 13,526,548. It ends at `0x8d581c14`; KOS's
-  `_arch_mem_top` is `0x8d000000`. It links, it will not boot. ~6.5 MB must
-  come out, plus heap headroom.
+  `_arch_mem_top` is `0x8d000000`. It links, it will not boot.
+- **The cut required is ~14.45 MB, not the ~6.5 MB an earlier pass reported.**
+  6.5 MB only gets the image under `_arch_mem_top` with ~1.2 MB of heap left,
+  which is less than the game's first archive mount. Against the ledger's own
+  7.61 MB heap (`dc/include/dc_mem_budget.h` buckets 6–12) plus KOS's ~1 MB,
+  **the image budget is 8,035,072 B** and the image is 22,486,548 B. Measure
+  every proposal against 8,035,072 B, not against 16 MB.
+- **Why `.bss` is not free:** KOS's `mm_sbrk()` starts at the ELF `end`
+  symbol. No MMU, no lazy commit. **Every `.bss` byte literally destroys a
+  heap byte.** This is the fact the whole size problem turns on.
 - **Compiler optimization is not available to close that gap** — see the
   standing constraint below. `.bss` right-sizing, `--gc-sections`, dropping
   non-goal subsystems, and moving data to `/cd` are the levers.
@@ -193,11 +201,54 @@ failure mode is a silent boot hang. Triage flag: `-DDC_NO_CRASH_PROTECTION`.
    shape to aim for, with the CD-R as the cart. The N64 decomp is
    **zeldaret/af** (active; supersedes BluRosie/doubutsu-no-mori); no PC port
    exists and both `af` and `ac-decomp` declare porting a non-goal.
-4. **`--gc-sections`** with `-ffunction-sections -fdata-sections`. Pure
-   layout, no codegen change.
-5. **Drop non-goal subsystems.** NES emulation is a documented non-goal;
-   `famicom.arc` is 1.70 MB on disc and the jaudio_NES tree pulls in the SDL
-   shim.
+4. **Everything else, −4.32 MB combined** (from `kb/research-size-reduction.md`,
+   measured against the real ELF + map): `.data` `src/data` tables to disc
+   −1.94 MB (0.95 MB pointer-free today, 0.99 MB needs a REL-style reloc pass)
+   · `prbuf` → PVR render target −1.23 MB (supersedes the u16 halving above;
+   take the halving as the cheap step, the render target later) · `s_assets[]`
+   name-string pool → disc index −0.89 MB (888,853 B in `pc_assets.c.o` alone)
+   · `audiomemory`/jaudio → AICA + shrink −0.65 MB · emu64
+   `texture_buffer_data` → decode straight to VRAM −0.52 MB · actor overlay
+   staging arenas → one shared union arena −0.46 MB · `pc_m_card` −0.28 ·
+   `dc_gx` −0.24 · delete NES-emu/texpack/viewer −0.11.
+
+   **Grand total −14.77 MB against −14.45 MB required: it closes on paper with
+   a 2% margin.** "Closes on paper" is not "safe".
+
+## Dead ends — verified, do not re-propose
+
+- **`--gc-sections` is already applied and already spent.** The map's discard
+  block is 29,471 sections recovering **522,150 B of allocatable RAM, and that
+  is all there is.** GCC does not emit unreferenced `static`s even at `-O0`,
+  which is why it is ~292 KB of `.text` and not 2 MB.
+- **`--icf` is unavailable on SH** — gold's `configure.tgt` has no SH backend,
+  `ld.bfd` has no ICF, `lld` has no SH port.
+- **SH GCC has no small-data model** — no `-G`/`-msdata` in
+  `gcc/config/sh/sh.opt`. The `.sdata`/`.sbss` in the KOS linker script are
+  inert boilerplate, 0 bytes in the map.
+- **`-mrelax` / `-Wl,--relax` is a codegen change** (emits `.uses` pseudo-ops
+  so `ld` can synthesise `bsr`). Disqualified under the `-O0` directive.
+- **Stripping debug info saves 0 RAM** — 67 MB of the 72 MB ELF is
+  non-`SHF_ALLOC`; `objcopy -O binary` never emitted it.
+- **Compressing `1ST_READ.BIN` saves 0 RAM.** `.bss` is `NOBITS`; compression
+  is arithmetically incapable of touching the actual problem.
+- **AICA's 2 MB is not usable as a size lever.** Genuine ARAM analogue but
+  DMA-only: G2 is 16-bit @ 25 MHz, ~40 MB/s, with a FIFO protocol KOS itself
+  calls "a pain in the rear." You cannot put a C array there. Budget 0 MB.
+
+## On the shelf
+
+- **Code overlays are real and shipping on DC** — ScummVM's
+  `backends/platform/dc/dcloader.cpp` + `plugin.x`, an SH-4 ELF loader
+  handling exactly `R_SH_DIR32`, in production since 0.7.0. Shelved because it
+  buys `.text`, and `.text` is only 5.26 MB of a 22.5 MB problem.
+- **VRAM as a store is legitimate** — KOS's own linker script demonstrates the
+  mechanism (`.ocram 0x7c001000 (NOLOAD)`). But ~half of VRAM is off-limits
+  during PVR rendering, reads are slow, and there is **no citable measured
+  SH-4↔VRAM read figure** — UNVERIFIED, must be measured before use.
+- **Drop non-goal subsystems.** NES emulation is a documented non-goal;
+  `famicom.arc` is 1.70 MB on disc and the jaudio_NES tree pulls in the SDL
+  shim. Small (−0.11 MB of RAM) but free.
 6. **`foresta.map` / `static.map` — 5,402,023 B of disc. SETTLED: droppable.**
    The only reader is `JUTException::queryMapAddress_single()`
    (`JUTDirectFile::fopen` → `DVDOpen`), reachable only via
@@ -235,9 +286,19 @@ disc space for SH-4 cycles. Biggest files: `audiorom.img` 8.30 MB,
 
 ## Next actions
 
-1. Land the `.bss` classification and apply the layout levers; be honest if
-   they do not close 6.5 MB — "still N MB short with `-O0` mandatory" is a
-   valid and important result, not a failure to report.
+0. **Measure the three unknowns first — one day's work, and the plan's 2%
+   margin depends on them.** KOS+GLdc baseline RAM; `pvr_mem_available()`
+   after a real texture load; `__osMalloc` peak. Ledger bucket 6 (4.0 MB
+   `JKRHeap`/`__osMalloc`) is **entirely unmeasured** — if it is really 6 MB
+   the whole plan is 2 MB short and we should know that before building on it.
+1. **The `src/data` demand-residency conversion is the milestone.** −8.45 MB,
+   57% of the required cut, and it also deletes the 15.64 MB
+   `foresta.rel.szs` boot transient, which is independently a hard blocker on
+   a 16 MB machine. Nothing else is within a factor of five, and with `-O0`
+   frozen there is no second lever of that magnitude. Needs the asset pack's
+   runtime loader (next item) first.
+   Be honest if the levers do not close the gap — "still N MB short with
+   `-O0` mandatory" is a valid and important result, not a failure to report.
 2. Wire the runtime loader in `pc_assets.c` to `assets.pak` (lever 1). Two
    loader rules from the pack author: **log window faults, never swallow
    them** (a regenerated `pc_assets.c` that reorders calls silently degrades
