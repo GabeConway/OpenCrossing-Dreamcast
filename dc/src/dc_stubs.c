@@ -8,6 +8,14 @@
  * line for them would only bury the real findings.
  */
 #include "dc_platform.h"
+#include "SDL.h"                 /* dc/include/SDL.h — the 6-symbol shim, not SDL */
+#include "dolphin/os/OSCache.h"  /* DCStoreRangeNoSync etc. */
+
+/* msleep() lives in dc_os.c. Declared by hand rather than via
+ * <libc64/sleep.h>, because that header pulls <dolphin/os.h> and the real
+ * Dolphin prototypes conflict with the deliberately-placeholder (void*)
+ * signatures this file uses for the thread/DVD-dir stubs below. */
+void msleep(int ms);
 
 typedef s32 OSPriority;
 

@@ -82,15 +82,21 @@ static int         s_inited = 0;
 static int         s_wrap_active = 0;  /* set by __wrap_malloc when linked in */
 
 /* --- linker symbols --------------------------------------------------------
- * VERIFY (M0): sh-elf/KOS linker script symbol names. GNU ld emits `etext`,
- * `edata` and `end`; `_executable_start` is provided by the default script.
- * If any of these do not resolve, the image measurement silently reports 0 —
- * dc_mem_report() says so rather than lying. */
+ * RESOLVED (M1): KOS declares all four of these itself, so we must NOT
+ * re-declare them — GCC 14+ makes a type mismatch a hard error, and KOS spells
+ * two of them as scalars rather than arrays:
+ *     arch/arch.h  : extern char    _executable_start;   extern char _etext;
+ *     kos/linker.h : extern uint8_t _bss_start[];        extern uint8_t end[];
+ * (Both headers arrive via <kos.h> in dc_platform.h.)
+ *
+ * `_bss_start` replaces the `edata` this originally used: KOS's shlelf.xc is
+ * not the GNU default script and does not guarantee an `edata`, whereas
+ * `_bss_start` is exactly the data/bss boundary we want. */
 #ifndef DC_HOST_STUB
-extern char _executable_start[] __attribute__((weak));
-extern char etext[]             __attribute__((weak));
-extern char edata[]             __attribute__((weak));
-extern char end[]               __attribute__((weak));
+#define DC_IMG_TEXT_LO  ((const char*)&_executable_start)
+#define DC_IMG_TEXT_HI  ((const char*)&_etext)
+#define DC_IMG_DATA_HI  ((const char*)_bss_start)
+#define DC_IMG_BSS_HI   ((const char*)end)
 #endif
 
 static size_t dc_span(const char* a, const char* b) {
@@ -100,9 +106,9 @@ static size_t dc_span(const char* a, const char* b) {
 
 static void dc_measure_image(void) {
 #ifndef DC_HOST_STUB
-    size_t text = dc_span(_executable_start, etext);
-    size_t data = dc_span(etext, edata);
-    size_t bss  = dc_span(edata, end);
+    size_t text = dc_span(DC_IMG_TEXT_LO, DC_IMG_TEXT_HI);
+    size_t data = dc_span(DC_IMG_TEXT_HI, DC_IMG_DATA_HI);
+    size_t bss  = dc_span(DC_IMG_DATA_HI, DC_IMG_BSS_HI);
     s_bucket[DCMEM_IMAGE_TEXT].noted = (ptrdiff_t)text;
     s_bucket[DCMEM_IMAGE_DATA].noted = (ptrdiff_t)data;
     s_bucket[DCMEM_IMAGE_BSS ].noted = (ptrdiff_t)bss;
@@ -112,8 +118,8 @@ static void dc_measure_image(void) {
 
     /* Also publish the image range for the seg2k0 pointer heuristic. On PC
      * this came from dladdr(); on DC the linker symbols are exact. */
-    pc_image_base = (unsigned int)(uintptr_t)_executable_start;
-    pc_image_end  = (unsigned int)(uintptr_t)end;
+    pc_image_base = (unsigned int)(uintptr_t)DC_IMG_TEXT_LO;
+    pc_image_end  = (unsigned int)(uintptr_t)DC_IMG_BSS_HI;
 #endif
 }
 

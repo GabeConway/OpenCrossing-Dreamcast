@@ -1852,6 +1852,15 @@ void GXLoadTlut(void* obj, u32 idx) {
     g_gx.tlut[idx].is_be = 1;   /* default BE (ROM/JSystem data) */
 }
 
+/* TLUT upload-dedup cache. emu64.c:3820 declares this `extern "C" u16
+ * s_tlut_first_word[16]` and uses it to skip re-uploading a palette whose
+ * first word is unchanged (emu64.c:3851,3879,3908). On PC it lives in
+ * pc_gx_texture.c:17; that file is a rewrite-from-scratch on DC
+ * (kb/design-platform-api.md §2c), so the array has to be owned here or the
+ * link does not close. Value semantics are pure cache — zero means "nothing
+ * uploaded yet", which is the correct cold state. */
+u16 s_tlut_first_word[16];
+
 /* emu64's tlutconv produces native-LE palettes; this marks the slot. The
  * distinction carries to DC unchanged (§3.6). */
 void pc_gx_tlut_set_native_le(unsigned int idx) {

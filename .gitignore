@@ -13,6 +13,7 @@ orig/
 !**/tools/**/*.bin
 
 # Build output
+dc/build/
 build/
 build-*/
 *.elf

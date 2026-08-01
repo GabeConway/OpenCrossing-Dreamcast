@@ -29,7 +29,7 @@
 #include <setjmp.h>
 
 /* --- KallistiOS ------------------------------------------------------------
- * Kept behind DC_HOST_STUB so the individual dc/src/*.c files can also be
+ * Kept behind DC_HOST_STUB so the individual dc/src .c files can also be
  * syntax-checked on the host without a sh-elf toolchain. The real build never
  * defines DC_HOST_STUB. */
 #ifndef DC_HOST_STUB

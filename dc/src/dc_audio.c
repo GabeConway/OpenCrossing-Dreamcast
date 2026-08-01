@@ -1,6 +1,6 @@
 /* dc_audio.c - AI (Audio Interface) + DSP surface for Dreamcast.
  *
- * Replaces pc/src/pc_audio.c (SDL2). The ring buffer and the AI*/DSP* surface
+ * Replaces pc/src/pc_audio.c (SDL2). The ring buffer and the AI / DSP surface
  * are portable and kept verbatim in shape; the SDL device becomes KOS
  * snd_stream, fed from AICA.
  *

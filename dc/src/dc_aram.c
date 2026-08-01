@@ -26,6 +26,7 @@
  */
 #include "dc_platform.h"
 #include "dc_mem_ledger.h"
+#include "dolphin/os/OSCache.h"  /* DCStoreRangeNoSync — implemented in dc_os.c */
 
 /* The resident window. NOT 16 MB — see DC_ARAM_WINDOW_SIZE in dc_platform.h
  * (mem-budget bucket 8, 512,000 B, UNMEASURED: probe 3 at M1). */
