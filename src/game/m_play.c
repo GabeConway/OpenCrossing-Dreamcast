@@ -51,7 +51,18 @@ static fbdemo_c fbdemo;
 static u16 S_back_title_timer = 0;
 static u16 S_se_endcheck_timeout = 0;
 static u8 gxbuf[0x140] ATTRIBUTE_ALIGN(32);
+#ifdef TARGET_DC
+/* Dreamcast: 2 bytes per pixel, not 4. VERIFIED by inspection of both ends —
+ * the only writer is copy_efb_to_texture() below, which does
+ * GXSetTexCopyDst(SCREEN_WIDTH*2, SCREEN_HEIGHT*2, GX_TF_RGB565, 0), and
+ * GX_TF_RGB565 is 2 B/px; the only reader is the
+ * gDPSetTextureImage_Dolphin(..., G_IM_SIZ_16b, ...) at line ~748. The
+ * sizeof(u32) is a 2x over-allocation that is dead on GameCube too.
+ * Saves 614,400 B of .bss on a 16 MB machine (kb/mem-budget.md §8). */
+static u8 prbuf[(2*SCREEN_WIDTH) * (2*SCREEN_HEIGHT) * sizeof(u16)] ATTRIBUTE_ALIGN(32); // 0x96000
+#else
 static u8 prbuf[(2*SCREEN_WIDTH) * (2*SCREEN_HEIGHT) * sizeof(u32)] ATTRIBUTE_ALIGN(32); // 0x12C000
+#endif
 
 static void Game_play_fbdemo_wipe_init(GAME_PLAY* play);
 static void Gameplay_Scene_Read(GAME_PLAY* play, s16 scene_no);

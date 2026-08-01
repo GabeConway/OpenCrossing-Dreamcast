@@ -57,18 +57,53 @@ endif
 #   -O2 -> wild-pointer CRASH loop from boot (black screen with music)
 #   -O1 -> hard SIGBUS on the intro train scene
 #   no -O -> stable.
-# Both of those data points are CONFOUNDED (§1.2: a missing static-member
-# definition upstream had to add for -O2, and a simultaneous -mfpu=neon-vfpv4
-# switch), and §3.4 measured -O2 cutting .text by 48% — which on a 16 MB
-# machine is ~3 MB of RAM, i.e. -O0 may not be affordable at all on this
-# hardware. But M1's job is "it compiles and links", not "it is fast", so we
-# start where the base port is known-stable and flip this deliberately, with a
-# full new-game intro run (KK Slider -> train -> town arrival) as the gate.
+# *** POLICY (2026-08-01, user decision): DECOMP GAME CODE STAYS AT -O0. ***
+#
+# This is SETTLED, not a tuning parameter. The armhf history above is treated
+# as authoritative: the port is broken with optimization on. Do not raise
+# DECOMP_OPT, and do not propose raising it as a way to meet the RAM budget.
+#
+# For the record, measured on this tree at M1 (whole-tree rebuilds, sizes in
+# bytes) so nobody has to re-run it — these are REJECTED BY POLICY, recorded
+# only so the number is not mistaken for unknown:
+#     -O0  text 6,318,568   data 2,638,852   bss 13,526,548   total 22,483,968
+#     -O1  text 3,697,460   data 2,525,704   bss 13,526,164   total 19,749,328
+#     -Os  text 3,477,188   data 2,525,704   bss 13,526,132   total 19,529,024
+#     -O2  text 3,825,312   data 2,525,672   bss 13,526,132   total 19,877,116
+# Note that even -Os does NOT get under 16,777,216 — so optimization was never
+# sufficient on its own anyway. The budget has to come out of .bss.
 #
 # NOTE: -O0 (not "empty") is required, because $KOS_CFLAGS already contains
 # -O2 and the LAST -O on the command line wins.
 DECOMP_OPT ?= -O0
 DC_OPT     ?= -O2
+
+# =============================================================================
+# Link-time dead-section elimination (KILL SWITCH: DC_GC_SECTIONS=0)
+# =============================================================================
+# This is NOT a codegen change. -ffunction-sections/-fdata-sections only alter
+# which named section each function/object is emitted into; instruction
+# selection inside a surviving function is bit-identical. --gc-sections then
+# drops sections nothing references. Safe under the -O0 policy above.
+# VERIFIED on this tree by disassembling a surviving function with and without
+# the flags and diffing (see BUILDING-DC.md).
+#
+# $KOS_CFLAGS already carries -ffunction-sections -fdata-sections and
+# $KOS_LDFLAGS already carries -Wl,--gc-sections, so DC_GC_SECTIONS=1 is a
+# no-op that documents intent; DC_GC_SECTIONS=0 actively countermands them
+# (last flag wins for both the -f pair and --gc-sections/--no-gc-sections).
+DC_GC_SECTIONS ?= 1
+ifeq ($(DC_GC_SECTIONS),1)
+  GC_CFLAGS  := -ffunction-sections -fdata-sections
+  GC_LDFLAGS := -Wl,--gc-sections
+else
+  GC_CFLAGS  := -fno-function-sections -fno-data-sections
+  GC_LDFLAGS := -Wl,--no-gc-sections
+endif
+# DC_GC_PRINT=1 lists every section the linker dropped (very verbose).
+ifeq ($(DC_GC_PRINT),1)
+  GC_LDFLAGS += -Wl,--print-gc-sections
+endif
 
 # UB guards. Same set as pc/CMakeLists.txt lines 9-31 plus the two KOS/SH-4
 # additions justified in design-shelf-hazards §3.1.
@@ -320,7 +355,7 @@ DEPS := $(OBJS:.o=.d)
 # =============================================================================
 # Per-object flag variables (target-specific; defaults below, overrides after)
 # =============================================================================
-COMMON  = $(INCLUDES) $(PRELUDE) $(DEFINES)
+COMMON  = $(INCLUDES) $(PRELUDE) $(DEFINES) $(GC_CFLAGS)
 
 # Defaults: decomp C at gnu89, unoptimized, full UB guard set.
 $(OBJS): TU_CC    = $(KCC)
@@ -404,7 +439,7 @@ $(TARGET): $(OBJS)
 	$(foreach _o,$(OBJS),$(file >>$(RSP),$(_o)))
 	@echo "  LD  $@"
 	$(Q)$(KCXX) -o $@ @$(RSP) -lGL -lz \
-		-Wl,--allow-multiple-definition -Wl,--gc-sections \
+		-Wl,--allow-multiple-definition $(GC_LDFLAGS) \
 		-Wl,-Map,$(BUILD)/AnimalCrossing.map
 	@sh-elf-size $@ || true
 

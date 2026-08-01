@@ -255,15 +255,26 @@ as host code.
 
 ## Where this build currently stands
 
-`make all` links and `mkdcdisc` produces a CDI. It does **not** fit in RAM yet:
+`make all` links and `mkdcdisc` produces a CDI. **It does not boot — it is too
+big to load.**
 
 ```
-   text      data       bss      total
-6318568   2638852  13526548   22483968   (22.5 MB)
+   text      data       bss    allocated   image end
+6318568   2638852  12415508   21374996   0x8d472814
 ```
 
-KOS's `_arch_mem_top` for a stock console is `0x8d000000`, and the image ends
-at `0x8d581c14`. Nothing here has been booted.
+KOS's `_arch_mem_top` for a stock console is `0x8d000000`, so the image ends
+4,663,316 B past the top of RAM before any heap.
+
+`harness/dc/smoke.sh dc/build/OpenCrossing.cdi` returns `timeout` with **zero
+bytes of console output** — no KOS banner at all. Attributed by experiment
+(`kb/mem-budget.md` §8.7): a KOS hello-world containing nothing but a 21 MB
+`.bss` array fails identically at essentially the same image end, while the
+same hello-world with 4.7 MB (end under `_arch_mem_top`) passes in 3.08 s, and
+the harness's own `selftest.cdi` passes in 3.10 s. **The guest never executes
+an instruction, so there is no PC to symbolise**, and
+`-DDC_NO_CRASH_PROTECTION` cannot distinguish anything here. Nothing about the
+port's correctness is testable until the image fits.
 
 Being under `_arch_mem_top` is **not** the bar. KOS's `mm_sbrk()` starts at the
 ELF `end` symbol, with no MMU and no lazy commit, so every `.bss` byte destroys

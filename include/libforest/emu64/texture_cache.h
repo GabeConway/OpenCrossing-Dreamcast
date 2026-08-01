@@ -10,7 +10,13 @@ extern "C" {
 
 #define TEX_CACHE_ALIGNMENT (32 - 1) /* 32 byte alignment */
 #define NUM_TEXTURE_CACHE_DATA 10
-#ifdef TARGET_PC
+#if defined(TARGET_DC)
+/* Dreamcast: revert to the RETAIL GAMECUBE value. The PC port inflated these
+ * because it had gigabytes; a stock DC has 16 MB total, less than the GC's
+ * 24 MB MEM1. Sufficiency of the retail numbers is proven by the shipped
+ * product. See kb/mem-budget.md §8. */
+#define TEXTURE_CACHE_LIST_SIZE 256
+#elif defined(TARGET_PC)
 #define TEXTURE_CACHE_LIST_SIZE 1024  /* PC: larger list for more textures */
 #else
 #define TEXTURE_CACHE_LIST_SIZE 256
@@ -66,7 +72,12 @@ typedef struct texture_cache_s {
 /* TMEM map */
 // static tmem_t tmem_map[TMEM_ENTRIES];
 
-#ifdef TARGET_PC
+#if defined(TARGET_DC)
+/* Dreamcast: retail GameCube sizes (see TEXTURE_CACHE_LIST_SIZE above).
+ * 0x80000 -> 0xC000 is -475,136 B of .bss; 0x4000 -> 0x400 is -15,360 B. */
+#define TEX_BUFFER_DATA_SIZE 0xC000
+#define TEX_BUFFER_BSS_SIZE 0x400
+#elif defined(TARGET_PC)
 /* PC has plenty of RAM - use larger texture cache */
 #define TEX_BUFFER_DATA_SIZE 0x80000   /* 512 KB (was 48 KB) */
 #define TEX_BUFFER_BSS_SIZE 0x4000     /* 16 KB (was 1 KB) */
