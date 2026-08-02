@@ -72,6 +72,8 @@ ENVARGS=(
     -e DC_FB_PROBE="${DC_FB_PROBE:-}"
     -e DC_ARENA_PROBE="${DC_ARENA_PROBE:-}"
     -e DC_ASSET_CENSUS="${DC_ASSET_CENSUS:-}"
+    -e DC_ARAM_LRU="${DC_ARAM_LRU:-}"
+    -e DC_ARAM_TRACE="${DC_ARAM_TRACE:-}"
 )
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default

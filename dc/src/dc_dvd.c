@@ -24,6 +24,7 @@
  */
 #include "dc_platform.h"
 #include "dc_mem_ledger.h"
+#include "dc_aram_lru.h"
 
 /* ==========================================================================
  * Disc ID
@@ -63,6 +64,180 @@ static int  dvd_pool_used = 0;
 static const char* dvd_entry_path(int idx) {
     if (idx < 0 || idx >= dvd_entry_count) return NULL;
     return dvd_path_pool + dvd_path_off[idx];
+}
+
+/* ==========================================================================
+ * Provenance ring + the pager's own file handles  (PLAN §3.1, dc_aram_lru.h)
+ * ==========================================================================
+ * The graph-ARAM pager needs to answer one question: "the bytes this DMA is
+ * about to push into ARAM — where on the disc did they come from?" It can,
+ * because JKRAramStream::writeToAram() (JKRAramStream.cpp:92-103) reads into a
+ * buffer and DMAs from that same buffer on the very next statement, with no
+ * intervening disc traffic. Recording the last few DVDRead destinations is
+ * therefore enough to recover an exact (file, offset) for every archive byte,
+ * and the pager can then re-read a range instead of holding it resident.
+ *
+ * Four slots, not one, because DVDReadAsyncPrio's callback can issue another
+ * read before the caller's DMA. Four is arbitrary but generous; a miss is not
+ * a correctness bug, it only means the pager treats that write as anonymous
+ * and has to store it, which it counts.
+ */
+#define DC_DVD_PROV_SLOTS 4
+
+/* defined below with the rest of the KOS VFS glue */
+static void dc_dvd_make_path(char* out, size_t outsz, const char* path);
+
+typedef struct {
+    const u8* buf;      /* destination the read landed in */
+    u32       len;      /* bytes actually read */
+    u32       off;      /* byte offset within the file */
+    s32       entry;    /* DVDConvertPathToEntrynum index, -1 if unknown */
+} dc_dvd_prov;
+
+static dc_dvd_prov dvd_prov[DC_DVD_PROV_SLOTS];
+static int         dvd_prov_next = 0;
+
+/* handle -> entrynum. DVDFastOpen knows the entrynum, dc_dvd_read_impl only
+ * sees the DVDFileInfo, and the 0x3C-byte struct's spare fields belong to the
+ * game (contract point 3) — so keep the association on our side. */
+#define DC_DVD_FDMAP_SLOTS 8
+static u32 dvd_fdmap_handle[DC_DVD_FDMAP_SLOTS];
+static s32 dvd_fdmap_entry[DC_DVD_FDMAP_SLOTS];
+static int dvd_fdmap_next = 0;
+
+static void dc_dvd_fdmap_set(u32 handle, s32 entry) {
+    int i;
+    for (i = 0; i < DC_DVD_FDMAP_SLOTS; i++)
+        if (dvd_fdmap_handle[i] == handle) { dvd_fdmap_entry[i] = entry; return; }
+    dvd_fdmap_handle[dvd_fdmap_next] = handle;
+    dvd_fdmap_entry[dvd_fdmap_next] = entry;
+    dvd_fdmap_next = (dvd_fdmap_next + 1) % DC_DVD_FDMAP_SLOTS;
+}
+
+static s32 dc_dvd_fdmap_get(u32 handle) {
+    int i;
+    for (i = 0; i < DC_DVD_FDMAP_SLOTS; i++)
+        if (dvd_fdmap_handle[i] == handle) return dvd_fdmap_entry[i];
+    return -1;
+}
+
+static void dc_dvd_fdmap_clear(u32 handle) {
+    int i;
+    for (i = 0; i < DC_DVD_FDMAP_SLOTS; i++)
+        if (dvd_fdmap_handle[i] == handle) { dvd_fdmap_handle[i] = 0;
+                                             dvd_fdmap_entry[i] = -1; }
+}
+
+int dc_dvd_provenance(const void* buf, unsigned int len,
+                      int* out_entry, unsigned int* out_off) {
+#if DC_ARAM_LRU
+    const u8* p = (const u8*)buf;
+    int k;
+    if (!p || len == 0) return 0;
+    /* MOST RECENT FIRST, and this is not a nicety.
+     * JKRAramStream::writeToAram() reuses ONE transfer buffer for every 32 KB
+     * chunk of an archive, so all four ring slots hold the same `buf` with
+     * different file offsets. Scanning forwards returns whichever stale offset
+     * happens to sit in slot 0 — MEASURED 2026-08-02: it mapped every chunk of
+     * forest_1st/forest_2nd to the wrong place in the file, none of the
+     * extents coalesced, the 32-slot extent table overflowed after 32
+     * transfers, and the rest of forest_2nd was counted LOST. Walk backwards
+     * from the newest entry. */
+    for (k = 0; k < DC_DVD_PROV_SLOTS; k++) {
+        int i = (dvd_prov_next - 1 - k + 2 * DC_DVD_PROV_SLOTS) % DC_DVD_PROV_SLOTS;
+        const dc_dvd_prov* r = &dvd_prov[i];
+        if (!r->buf || r->entry < 0 || r->len == 0) continue;
+        if (p >= r->buf && (u32)(p - r->buf) + len <= r->len) {
+            if (out_entry) *out_entry = (int)r->entry;
+            if (out_off)   *out_off   = (unsigned int)(r->off + (u32)(p - r->buf));
+            return 1;
+        }
+    }
+#else
+    (void)buf; (void)len; (void)out_entry; (void)out_off;
+#endif
+    return 0;
+}
+
+/* The pager's own handles. The game deletes its JKRDvdFile when the archive
+ * unmounts, and the whole point of the pager is to still be able to fault a
+ * range in afterwards, so it opens its own. Two slots covers the two archives
+ * that are mounted simultaneously (forest_1st + forest_2nd); a third mount
+ * evicts LRU-by-use and costs one fs_open. */
+#define DC_DVD_PAGER_FDS 3
+static s32  dvd_pager_entry[DC_DVD_PAGER_FDS];
+static u32  dvd_pager_fd[DC_DVD_PAGER_FDS];
+static u32  dvd_pager_use[DC_DVD_PAGER_FDS];
+static u32  dvd_pager_clock = 0;
+static int  dvd_pager_inited = 0;
+
+static unsigned int dvd_pager_reads = 0;
+static unsigned int dvd_pager_bytes = 0;
+static unsigned int dvd_pager_opens = 0;
+static unsigned int dvd_pager_usec = 0;
+
+int dc_dvd_pager_read(int entry, unsigned int off, void* dst, unsigned int len) {
+#if DC_ARAM_LRU && !defined(DC_HOST_STUB)
+    const char* path;
+    char full[320];
+    int i, victim;
+    file_t fd = FILEHND_INVALID;
+    u64 t0;
+    s32 got;
+
+    if (entry < 0 || !dst || len == 0) return -1;
+    path = dvd_entry_path(entry);
+    if (!path) return -1;
+
+    if (!dvd_pager_inited) {
+        for (i = 0; i < DC_DVD_PAGER_FDS; i++) dvd_pager_entry[i] = -1;
+        dvd_pager_inited = 1;
+    }
+
+    t0 = dc_time_us();
+
+    for (i = 0; i < DC_DVD_PAGER_FDS; i++)
+        if (dvd_pager_entry[i] == entry) { fd = (file_t)dvd_pager_fd[i]; break; }
+
+    if (fd == FILEHND_INVALID) {
+        dc_dvd_make_path(full, sizeof(full), path);
+        fd = fs_open(full, O_RDONLY);
+        if (fd == FILEHND_INVALID) {
+            DC_LOGE("[DC/ARAM] pager cannot open %s\n", full);
+            return -1;
+        }
+        victim = 0;
+        for (i = 0; i < DC_DVD_PAGER_FDS; i++) {
+            if (dvd_pager_entry[i] < 0) { victim = i; break; }
+            if (dvd_pager_use[i] < dvd_pager_use[victim]) victim = i;
+        }
+        if (dvd_pager_entry[victim] >= 0) fs_close((file_t)dvd_pager_fd[victim]);
+        dvd_pager_entry[victim] = entry;
+        dvd_pager_fd[victim] = (u32)fd;
+        i = victim;
+        dvd_pager_opens++;
+    }
+    dvd_pager_use[i] = ++dvd_pager_clock;
+
+    if (fs_seek(fd, (s32)off, SEEK_SET) < 0) return -1;
+    got = (s32)fs_read(fd, dst, (size_t)len);
+
+    dvd_pager_reads++;
+    if (got > 0) dvd_pager_bytes += (unsigned int)got;
+    dvd_pager_usec += (unsigned int)(dc_time_us() - t0);
+    return (int)got;
+#else
+    (void)entry; (void)off; (void)dst; (void)len;
+    return -1;
+#endif
+}
+
+void dc_dvd_pager_stats(unsigned int* out_reads, unsigned int* out_bytes,
+                        unsigned int* out_opens, unsigned int* out_usec) {
+    if (out_reads) *out_reads = dvd_pager_reads;
+    if (out_bytes) *out_bytes = dvd_pager_bytes;
+    if (out_opens) *out_opens = dvd_pager_opens;
+    if (out_usec)  *out_usec  = dvd_pager_usec;
 }
 
 s32 DVDConvertPathToEntrynum(const char* path) {
@@ -138,6 +313,7 @@ BOOL DVDFastOpen(s32 entrynum, void* fileInfo) {
         *dvd_fi_handle(fileInfo) = (u32)fd;
         *dvd_fi_start(fileInfo)  = 0;
         *dvd_fi_length(fileInfo) = (u32)fs_total(fd);
+        dc_dvd_fdmap_set((u32)fd, entrynum);   /* provenance, PLAN §3.1 */
         return TRUE;
     }
 #endif
@@ -151,6 +327,7 @@ BOOL DVDOpen(const char* filename, void* fileInfo) {
 
 BOOL DVDClose(void* fileInfo) {
     u32 h = *dvd_fi_handle(fileInfo);
+    dc_dvd_fdmap_clear(h);
 #ifndef DC_HOST_STUB
     if (h && h != (u32)FILEHND_INVALID) fs_close((file_t)h);
 #endif
@@ -184,6 +361,21 @@ s32 DVDReadPrio(void* fileInfo, void* buf, s32 length, s32 offset, s32 prio) {
      * falling through to the blocking read. It must remain invisible to the
      * caller — DVDRead stays synchronous (contract point 1). */
     r = dc_dvd_read_impl(fileInfo, buf, length, offset);
+
+#if DC_ARAM_LRU
+    /* Record where these bytes came from. The graph-ARAM pager reads this ring
+     * on the very next statement of JKRAramStream::writeToAram() to learn the
+     * (file, offset) behind an ARAM write, which is what lets it drop the
+     * bytes instead of holding them resident. See dc_aram_lru.h. */
+    if (r > 0 && buf) {
+        dc_dvd_prov* slot = &dvd_prov[dvd_prov_next];
+        slot->buf   = (const u8*)buf;
+        slot->len   = (u32)r;
+        slot->off   = (u32)offset;
+        slot->entry = dc_dvd_fdmap_get(*dvd_fi_handle(fileInfo));
+        dvd_prov_next = (dvd_prov_next + 1) % DC_DVD_PROV_SLOTS;
+    }
+#endif
 
     {
         u64 dt = dc_time_us() - t0;

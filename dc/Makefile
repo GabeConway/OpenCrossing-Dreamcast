@@ -364,6 +364,25 @@ endif
 #
 # Costs ~110 KB of .bss for the address set and the batch table, which is why
 # it is off by default.
+# DC_ARAM_LRU=0 — kill switch for PLAN §3.1's disc-backed graph-ARAM pager
+# (dc/include/dc_aram_lru.h + dc/src/dc_aram.c + the provenance ring in
+# dc_dvd.c). Default 1, as an #ifndef in that header, so the code builds
+# without this block; 0 reverts to the 2026-08-02 single anchored window
+# (verified byte-for-byte: rebases=14, same anchor offsets) and is kept for
+# bisecting. NB the two knobs interact: with the pager ON the window is a
+# CACHE and 131072 is the measured setting; with it OFF the floor is 851968.
+ifneq ($(DC_ARAM_LRU),)
+DEFINES += -DDC_ARAM_LRU=$(DC_ARAM_LRU)
+endif
+
+# DC_ARAM_TRACE=1 — log every ARAM DMA (type, offset, length, provenance).
+# Off by default: one archive mount is ~150 lines and SCIF is the bottleneck
+# on hardware (kb/traps.md). The rate-limited [DC/ARAM] LRU summary is always
+# on and is what you normally want.
+ifneq ($(DC_ARAM_TRACE),)
+DEFINES += -DDC_ARAM_TRACE=$(DC_ARAM_TRACE)
+endif
+
 ifneq ($(DC_ASSET_CENSUS),)
 DEFINES += -DDC_ASSET_CENSUS=$(DC_ASSET_CENSUS)
 endif

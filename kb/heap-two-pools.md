@@ -37,7 +37,21 @@ no arena-side OOM has ever been observed, which is weak evidence that 2,705,504
 is generous, not proof. New knobs: `DC_ARENA_BYTES`, `DC_ARAM_WINDOW`,
 `DC_DIAG`, `DC_FB_PROBE` (all in `dc/Makefile`, forwarded by `dc/build-dc.sh`).
 
-⚠️ **851,968 is a floor for the ARAM window, not a preference:**
+⚠️ ~~**851,968 is a floor for the ARAM window, not a preference:**
 `forest_1st.arc` arrives as one 851,744 B transfer, and a window smaller than
-that drops the whole archive on the floor.
+that drops the whole archive on the floor.~~
+**SUPERSEDED 2026-08-02 by PLAN §3.1's disc-backed pager, and the premise was
+wrong anyway.** `forest_1st.arc` does NOT arrive as one 851,744 B transfer: it
+arrives as 26 transfers of ≤32,768 B (`JKRAramStream::writeToAram`, 0x8000
+chunks) covering one *contiguous* 851,744 B ARAM extent. The floor was about
+the old window having to be one contiguous span, not about any single DMA.
+
+With `DC_ARAM_LRU=1` the window is no longer a window — it is a block cache in
+front of an extent map that re-reads archive ranges from `/cd`, so it does not
+have to hold anything. **The measured setting is `DC_ARAM_WINDOW=131072`**
+(4 × 32 KB blocks): a full title-screen run maps all 4,982,400 B of graph-half
+writes, loses 0 B, zero-fills 0 B, and never pins a block. Read the
+`[DC/ARAM] LRU …` console line before changing it — `LOST=` must be 0 and
+`pin_peak=` is what sizes the pool. The old floor still applies with
+`DC_ARAM_LRU=0`.
 

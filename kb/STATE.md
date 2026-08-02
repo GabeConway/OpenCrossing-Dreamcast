@@ -83,10 +83,16 @@ constraint. `dc_mem_ledger.c` prints this line at boot as `MEMLEDGER FIT …`.
 one when flags change; before that fix a stale `dc_main.c.o` made a non-stub
 ELF read 356,776 B too small.
 
-⚠️ The ARAM window's floor is **851,968** — `forest_1st.arc` arrives as one
-851,744 B transfer and a smaller window drops the whole archive. It grew from
-512,000 on 2026-08-01 and that is a debt: PLAN §3.1's disc-backed LRU pays back
-536,576 B of the gap.
+⚠️ **The ARAM debt is paid. `DC_ARAM_WINDOW=131072`.** PLAN §3.1's disc-backed
+pager landed 2026-08-02 (`dc/src/dc_aram.c`, `dc/include/dc_aram_lru.h`, the
+provenance ring in `dc_dvd.c`, kill switch `DC_ARAM_LRU=0`). The window is no
+longer a window: an extent map learned from the write stream maps ARAM ranges
+onto byte ranges of `/cd` files, and a read miss is one `fs_read` into the
+caller's buffer. The pool is a 4 × 32 KB LRU cache. **−720,896 B of additive
+heap, +4,604 B of image span, net −716,292 B off the gap**; `MEMLEDGER FIT`
+additive_heap 3,079,648 → **2,358,752**, verified in this tree. The old 851,968
+"floor" rested on a wrong measurement — `forest_1st.arc` arrives as 26 transfers
+of ≤32,768 B over one *contiguous* 851,744 B extent, not as one transfer.
 
 ## Latest measurements (2026-08-02) — full narrative in `kb/state-log.md`
 
@@ -130,23 +136,6 @@ Its other cheap wins, both measured: **85 % of every console log** is jaudio's
 rate-limit), and **`OSGetSoundMode()` returns 0 = mono** (`dc_stubs.c:118`),
 which silently locks the game to mono and contradicts the audio plan of record
 — a one-line fix.
-
-### Work that was in flight when this was parked
-
-Five agents were running in git worktrees under `.claude/worktrees/`. Each
-worktree holds uncommitted changes; **merge by path, not by `git diff`** — at
-least one worktree had a stale HEAD, so its diff is enormous and meaningless.
-Verify every merged change with a clean rebuild in the main tree before
-believing its numbers; P7's did not reproduce exactly.
-
-| worktree | task | owns |
-|---|---|---|
-| `agent-ab7b5a9310ecbe98d` | ARAM disc-backed LRU (PLAN §3.1) | `dc/src/dc_aram.c`, `dc_dvd.c` |
-| `agent-a027be752134b705b` | P7 — ✅ **already merged** (`528900a`), safe to delete | — |
-
-The ARAM agent was told to default its kill switch in its own header because
-`dc/Makefile` was owned by another agent; **it owes a Makefile knob** — look for
-it in its report or its header's `#ifndef`.
 
 ### The number the plan was waiting on — answered
 
@@ -259,9 +248,19 @@ measured −598,424 B, not −821,569.
 
 - `SendStart::Mesg Full Queue` spams the console ~1,000 times per run. It is
   jaudio, it is not fatal, and it makes logs hard to read. Worth silencing.
-- The ARAM window still thrashes (`rebases=13` mounting `forest_2nd.arc`).
-  PLAN §3.1's disc-backed LRU is still owed and is now the thing standing
-  between the game and real archive content.
+- **The ARAM window no longer thrashes** — `rebases=14` → the concept is gone.
+  Verified in this tree: all 4,982,400 B of graph-half writes mapped
+  (`forest_1st` + `forest_2nd` exactly), **`LOST=0`, 0 reads zero-filled** (was
+  ≥5,121), 2 extents, `pin_peak=0`. Grep `[DC/ARAM] LRU` — `LOST=` must be 0.
+  ⚠️ **Real archive content now reaches the renderer, and it costs: 29.3 →
+  12.6 FPS**, `cmds` 851 → ~3,600, textures 78/301,312 B → 173/676,608 B.
+  Measured *not* to be disc — at the same frame index under `--no-fast-gdrom`
+  the frame is 100.6 vs 66.5 ms with `gx` only 29.0 vs 26.0, so ~31 ms/frame is
+  SH-4/emu64 work on content the port used to throw away. **That is the next
+  performance question and it is a new one.**
+  ⚠️ `pin_peak=0` only because the save path never runs. `m_card.c:1607`'s three
+  ARAM save blocks are 147,782 B of writes with no disc provenance; raise
+  `DC_ARAM_WINDOW` to 262,144 when the VMU write path is wired up (N2b).
 
 
 ## Toolchain
