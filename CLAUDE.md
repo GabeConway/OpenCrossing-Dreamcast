@@ -125,6 +125,7 @@ already produced two wrong numbers.
 | `tools/dcasset/README.md` | the extraction/pack tool: what it does, usage, what remains |
 | `tools/dcstub/make_stub_data.py` | the `DC_ASSET_STUB` rewriter (S1). Header comment is the doc |
 | `tools/dcstub/measure_dedup.py` | the L6 dedup measurement (S2). Header comment is the doc |
+| `tools/dcstub/census_resolve.py` | resolves a `DC_ASSET_CENSUS=1` console log into the scene's real working set (symbol, size, kind). The only way to learn what a scene touches — acres and NPCs are named by index, not by symbol |
 | `dc/stage-disc.sh` | flatten a `dcasset extract` tree into a disc root for `DC_DISC_ROOT` |
 | `kb/save-budget.md` | 295,910 B of save into a 100 KB VMU. Harness: `tools/savebench/` |
 | `tools/savebench/README.md` | save-size measurement harness |

@@ -785,6 +785,10 @@ void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
 
 void GXSetArray(u32 attr, const void* data, u32 size, u8 stride) {
     (void)size;
+    /* Working-set census (dc_asset_census.c). Every indexed draw names its
+     * source array here, so this is where a scene's vertex/normal/colour
+     * assets become observable by address. No-op unless DC_ASSET_CENSUS. */
+    dc_asset_census_note(data, 'V');
     if (attr < GX_VA_MAX_ATTR) {
         g_gx.array_base[attr] = data;
         g_gx.array_stride[attr] = stride;
@@ -1973,6 +1977,11 @@ void GXLoadTexObj(void* obj, u32 id) {
     u32* o;
     if (id >= 8) return;
     o = (u32*)obj;
+
+    /* Census the bind, not the GXInitTexObj: a texture object that is built
+     * and never bound is not part of the working set. No-op unless
+     * DC_ASSET_CENSUS. */
+    dc_asset_census_note((const void*)(uintptr_t)o[TEXOBJ_IMAGE_PTR], 'T');
 
     if (o[TEXOBJ_BACKEND_TEX] && !dc_pvr_tex_get(o[TEXOBJ_BACKEND_TEX]))
         o[TEXOBJ_BACKEND_TEX] = 0;

@@ -12,6 +12,84 @@ knowledge lives in three companions, read on demand:
 
 `CLAUDE.md` is the index to everything else.
 
+## ⭐ 2026-08-02 (later) — the framebuffer probe works, and the arena is 5.5× oversized at title
+
+Three of the five next actions moved. All numbers below are from two runs of
+one instrumented image (`DC_ARENA_PROBE=60 DC_FB_PROBE=120 DC_ASSET_CENSUS=1`),
+plus one clean full-size rebuild.
+
+**N2 is SOLVED — the probe was right and Flycast was the problem.**
+`config:rend.EmulateFramebuffer=yes` (now `harness/dc/smoke.sh --fb-writeback`)
+turns on Flycast's full VRAM framebuffer emulation, and `FBHASH` immediately
+went from a constant `00000000` to real, frame-varying values
+(`bae41dc5`, `25789d43`). Flycast's hardware renderer draws into a host GPU
+surface and never writes back to emulated VRAM, so *no* guest-side read —
+`vram_s`, `pvr_get_front_buffer()`, anything — could have seen a pixel. Cost:
+24.8 → 16.8 FPS, so it stays opt-in. ⚠️ `FBTHUMB` still sampled all-zero on the
+runs above; the 16×12 grid may simply be missing the logo, but **the thumbnail
+is not yet corroborated and the hash is.** Do not treat a black thumb as
+evidence of a black frame until one probe is checked against a human-visible
+frame.
+
+**N4 has its first real measurement.** The arena is not where the pressure is:
+
+```
+[DC/ARENA] touched=54,272  peak=54,272  of 1,900,000 B | brk_used=2,666,496
+[DC/ARENA] zelda used=256,192  free=1,156,512  largest_free=1,156,512
+```
+
+At the title screen the game's own allocator reports **256,192 B in use out of
+a 1,412,704 B zelda arena** — the arena is 5.5× what bucket 6 is actually
+holding, and libc has taken 2,666,496 B from sbrk over the same period.
+`zelda_InitArena` is handed `game_getFreeBytes()` (`m_play.c:494`), so the
+arena knob scales the game's heap directly and every byte cut goes to libc.
+⚠️ **This is the title scene only.** A loaded town is unmeasured and will be
+much larger, so this licenses a smaller *bring-up* arena, not a smaller
+shipping one. The touched-byte scan (54,272 B) is a floor, not the answer —
+zero-filled allocations are invisible to it; the zelda line is the real number.
+
+**N1 could not be answered statically, so it is answered at runtime now.**
+A subagent traced `m_titledemo.c` / `title_demo.c` / `ac_animal_logo.c` and
+stopped at the ten logo TUs (8,824 B): the title demo names its acres through
+`BLOCK_COMBI_GRD_*` indices into `l_combiID[]` and its 15 NPCs through profile
+IDs, and neither is statically resolvable. `DC_ASSET_CENSUS=1`
+(`dc/src/dc_asset_census.c`) records every asset address the GX layer is handed
+and `tools/dcstub/census_resolve.py` resolves them against the ELF:
+
+```
+working set: 63 distinct addresses -> 50 symbols (0 unresolved)
+total (real sizes): 111,136 B, all textures
+```
+
+The list is exactly what static tracing missed: the logo glyphs, all seven
+`obj_train1_t*` textures, `grl_1_*` (skin/hair/shoe/bottom), and the
+`mnk_/mob_/mol_/mos_1_*` eye-and-mouth TA textures of the animals on screen —
+plus one 49,152 B `texture_buffer_data`, which is emu64 scratch and not an
+asset. **So the title screen's entire real texture working set is ~62 KB
+against the 4.6 MB of texture destinations the image keeps in `.bss`.** That is
+the strongest evidence yet for `kb/research-creative-ram.md` T1.
+
+⚠️ **The census sees textures only.** `GXSetArray` recorded **zero** hits — the
+title path does not use indexed vertex fetch, and emu64 dereferences `Vtx` and
+`Gfx` pointers inside `src/`, where there is no seam to hook without editing
+it. The model/vertex half of the working set is still unmeasured, and it is the
+half that decides whether the town draws.
+
+**The span was re-measured on a clean full-size rebuild** (no probes, no stub,
+`DC_SRC_SHRINK=1`): text 5,749,944 / data 2,638,872 / bss 10,837,376, `_end` at
+`0x8d265f60` ⇒ **span 18,997,600** (the block further down says 19,564,308 and
+is stale). Against the knobs the running image actually uses:
+
+```
+span 18,997,600 + additive 3,079,648 (KOS 262,144 + arena 1,900,000
+                 + ARAM 851,968 + threads 65,536) = 22,077,248
+                                        usable    = 16,646,144
+                                        ⇒ over by    5,431,104
+```
+
+At the policy knobs (arena 2,705,504 + ARAM 1,048,576) it is over by
+6,433,216. Either way the old 6,999,924 is no longer the number.
+
 ## ⭐ 2026-08-02 — THE TITLE SCREEN RENDERS
 
 **The port draws pixels.** A `DC_ASSET_STUB` image boots in Flycast, runs the
@@ -317,26 +395,31 @@ point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`. Details:
 The old S1→S4 plan below is still the RAM strategy and is not superseded. These
 are the concrete next moves now that pixels exist.
 
-### N1. Get the town to draw — extend the keep list scene by scene. [cheap, high signal]
+### N1. Get the town to draw. [reframed 2026-08-02 — the texture half is measured, the vertex half is not]
 
-The title screen works because ten TUs carry real bytes. The obvious next
-experiment is to add the title-demo field's assets to `DC_STUB_KEEP` and see
-how far the image gets before it stops fitting. It will not all fit —
-`src/data/field/bg/acre` alone is 5.68 MB — but the *shape* of the failure is
-the measurement S4's pool sizing needs, and it is a one-line change per
-attempt. Start with the acres `src/data/scene/title_demo.c` actually
-references, not all 268.
+The keep-list-by-hand plan is dead: the title demo's acres and animals are
+named by index and profile ID, so there is no static list to extend from.
+`DC_ASSET_CENSUS=1` replaces it and already answered the texture side (50
+symbols, 111,136 B — see the top of this file). Two follow-ups, in order:
 
-### N2. Fix the framebuffer probe, or replace it. [blocks all unattended visual work]
+1. **Census the vertex/model side.** `GXSetArray` sees nothing because emu64
+   walks `Gfx`/`Vtx` pointers inside `src/`. Options, cheapest first: census
+   the `Gfx` pointer at the emu64→GX boundary that `dc_gx.c` already sees
+   (`dc_gx.c:673`'s indexed-fetch path documents what does arrive); or hook
+   `pc_load_asset`'s stub redirect; or accept a `#if defined(TARGET_DC)`
+   branch — but that spends one of the four licences in `src/` and needs a
+   reason better than instrumentation.
+2. **Then extend `DC_STUB_KEEP` from the measured list, not by guessing.**
+   111 KB of textures fits trivially; the models will not, and *that* boundary
+   is the S4 pool-sizing measurement N1 was always after.
 
-Right now nobody can verify a rendering change without a human watching
-Flycast, which is both slow and unreliable (the emulator sometimes stalls on a
-black window). `DC_FB_PROBE` exists and speaks `harness/dc/screenshot.sh`'s
-protocol but reads all-zero. Find out where Flycast is actually scanning out
-from — try `pvr_get_back_buffer()`, the `PVR_FB_R_SOF1` register, and hashing
-a wide VRAM sweep — or add a `pvr_scene_begin_txr()` render-to-texture path
-whose destination the guest definitely owns. Until this works, every visual
-claim in this file rests on one person's eyes.
+### N2. ✅ DONE 2026-08-02 — `smoke.sh --fb-writeback`.
+
+Flycast never wrote the rendered frame back to emulated VRAM; `FBHASH` is real
+with `config:rend.EmulateFramebuffer=yes`. Details at the top of this file,
+trap in `kb/traps.md`. **Left open:** `FBTHUMB` still samples all-zero, so the
+human-readable half of the protocol is unconfirmed — check one thumbnail
+against a frame a human can see before relying on it.
 
 ### N3. Correct the TEV mapping. [the logo renders; is it renders *right*?]
 
@@ -347,14 +430,18 @@ screen, this is measurable for the first time: instrument which of the 101
 configs the title screen and the field actually request, and implement by
 frequency rather than by enum order.
 
-### N4. Measure bucket 6 properly, now that the game runs. [the margin's biggest claimant]
+### N4. Measure bucket 6 properly. [PARTLY DONE 2026-08-02 — title scene measured, gameplay is not]
 
-`kb/ram-plan.md` experiment 7 says "schedule it the moment S4 boots". The game
-boots and runs frames *now*, and the arena is a build knob
-(`DC_ARENA_BYTES`). Bisect it downward until `__osMalloc` itself fails — no
-arena-side OOM has ever been observed, so 2,705,504 may be far more than
-bucket 6 needs, and every byte recovered goes to libc, which is the pool that
-actually ran dry.
+`DC_ARENA_PROBE=60` reports the game's own allocator every 60 presented frames.
+At the title screen: **used 256,192 B of a 1,412,704 B zelda arena**, inside a
+1,900,000 B arena knob, while libc had taken 2,666,496 B. No bisect needed and
+no arena-side OOM is reachable from here.
+
+What is left is the part that decides the shipping number: **the same probe on
+a scene that has a town loaded**, which does not exist yet. Until it does, do
+not cut `DC_MAIN_MEMORY_SIZE` on the strength of the title figure — cut it for
+bring-up images if libc needs the room, and re-run the probe the moment S4
+loads real field data.
 
 ### N5. Then S4 — the asset loader. [unchanged, still the critical path]
 

@@ -66,6 +66,23 @@ for those see `kb/closed.md`.
   `grep ' graph_proc$'` matches nothing even in a healthy ELF and reads as the
   same failure.
 
+## Instrumentation
+
+- **Never gate a periodic probe on `pc_frame_counter`.** `dc_vi.c`'s retrace
+  handler returns early on every frameskipped tick — *after* incrementing
+  `pc_frame_counter` — so a `pc_frame_counter % N == 0` test is evaluated only
+  on presented frames, at counter values that jump by the skip factor.
+  **What it looked like when it bit:** a run that presented 1,769 frames fired
+  the arena probe three times, all inside the first two seconds, then never
+  again; the counter simply stopped landing on a multiple of 60. Both probes
+  now share one local `probe_tick` incremented where they are called.
+- **A `[1]`-sized stub build still censuses correctly.** The addresses the GX
+  layer is handed are link-time constants, so `DC_ASSET_CENSUS` names the same
+  symbols in a stub image as it would in a full one; only the *sizes* are
+  wrong. `tools/dcstub/census_resolve.py --sizes-from <full ELF>` is what
+  turns that into real bytes — quoting the stub column as a working-set total
+  understates it by about 20%.
+
 ## Harness / emulator
 
 - **Guest `scif_flush()` permanently kills the Flycast console. Never call it.**
@@ -79,6 +96,23 @@ for those see `kb/closed.md`.
 - **mkdcdisc padding**: default 740,083,145 B / 15.6 s vs `-N` 1,783,337 B /
   0.021 s. Use `-N` for every emulator run; `DC_CDI_PAD=1` only for burns and
   read-speed-realistic timing.
+- **Flycast's hardware renderer never writes the frame back into emulated
+  VRAM — SOLVED 2026-08-02, use `smoke.sh --fb-writeback`.** The guest-side
+  framebuffer probe read all-zero from both `vram_s` and
+  `pvr_get_front_buffer()` while a human watching the window could see the
+  title logo, because the rendered surface lives on the host GPU and the
+  guest's VRAM is never updated from it. Adding
+  `config:rend.EmulateFramebuffer=yes` (Flycast's "Full Framebuffer
+  Emulation") makes `FBHASH` real and frame-varying. It costs about a third of
+  the frame rate — 24.8 → 16.8 FPS on the title screen — so it is a flag, not
+  a default. **A zero `FBHASH` from a run without that flag says nothing about
+  what was drawn.**
+- **A smoke run of the game "fails" by construction.** The game never returns,
+  so `run_reached_end_marker` / `mark_boot_ok` / `end_rc_zero` can never hold
+  and `smoke.sh` exits 1 with `status=exited_early` even on a perfect run. For
+  game images the console log is the artefact; read `[PERF]`, `[DC/PVR]` and
+  the probe lines, not the exit code. The PASS/FAIL gate is meaningful for
+  `selftest.cdi` and for anything that terminates.
 
 ## Docker / SDK image
 

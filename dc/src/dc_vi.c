@@ -201,12 +201,42 @@ void VIWaitForRetrace(void) {
         }
     }
 
+#if (defined(DC_FB_PROBE) && DC_FB_PROBE > 0) || \
+    (defined(DC_ARENA_PROBE) && DC_ARENA_PROBE > 0) || \
+    (defined(DC_ASSET_CENSUS) && DC_ASSET_CENSUS)
+    /* MEASURED 2026-08-02: this used to gate on `pc_frame_counter % N`, and
+     * that is wrong here. The frameskip path above returns early — after
+     * incrementing pc_frame_counter — so this point is reached only on
+     * *presented* frames, at a counter value that skips arbitrarily. A run
+     * that presented 1,769 frames fired the probe three times, all in the
+     * first two seconds, and then never again. Count presented frames locally
+     * instead; the probes are meant to sample the rendered stream. */
+    {
+        static unsigned int probe_tick = 0;
+
 #if defined(DC_FB_PROBE) && DC_FB_PROBE > 0
-    /* Guest-side screenshot. Placed AFTER the present and BEFORE the next
-     * frame opens, so the front buffer is the finished frame and not a
-     * half-built one. */
-    if ((pc_frame_counter % (DC_FB_PROBE)) == 0)
-        dc_pvr_fb_probe();
+        /* Guest-side screenshot. Placed AFTER the present and BEFORE the next
+         * frame opens, so the front buffer is the finished frame and not a
+         * half-built one. */
+        if ((probe_tick % (DC_FB_PROBE)) == 0)
+            dc_pvr_fb_probe();
+#endif
+#if defined(DC_ARENA_PROBE) && DC_ARENA_PROBE > 0
+        /* Same placement rationale: between frames, so the 1 KB-granule scan
+         * of the whole arena never lands in the middle of a scene build. It
+         * reads DC_MAIN_MEMORY_SIZE bytes, so keep the interval coarse
+         * (60 = about once a second at the measured 29.3 FPS). */
+        if ((probe_tick % (DC_ARENA_PROBE)) == 0)
+            dc_arena_probe();
+#endif
+#if defined(DC_ASSET_CENSUS) && DC_ASSET_CENSUS
+        /* Bounded burst per report, so the serial console is never the thing
+         * that decides how much of the working set gets recorded. */
+        if ((probe_tick % 30u) == 0)
+            dc_asset_census_report();
+#endif
+        probe_tick++;
+    }
 #endif
 
     frame_start_us = dc_time_us();

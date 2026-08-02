@@ -297,6 +297,24 @@ extern u8* pc_arena_end;
 extern unsigned int pc_image_base;
 extern unsigned int pc_image_end;
 
+/* --- Asset working-set census (kb/STATE.md N1) ------------------------------
+ * Records the distinct asset addresses the GX layer is handed — texture images
+ * ('T', from GXLoadTexObj) and vertex-array bases ('V', from GXSetArray) — and
+ * prints them for tools/dcstub/census_resolve.py to turn back into symbols.
+ * This is the only way to learn which acres and NPCs a scene touches: the
+ * title demo names both indirectly, so no static trace can see them.
+ * Compiled to empty functions unless -DDC_ASSET_CENSUS=1. */
+void dc_asset_census_note(const void* addr, int kind);
+void dc_asset_census_report(void);
+
+/* --- Arena high-water probe (kb/STATE.md N4) --------------------------------
+ * Compiled to an empty function unless -DDC_ARENA_PROBE=<frames> (DC_ARENA_PROBE
+ * in dc/Makefile). Prints touched/peak arena bytes and the current libc break,
+ * so the arena's real demand can be read off one run instead of bisected over
+ * one full build per data point. dc_os.c documents what the number does and
+ * does not mean. */
+void dc_arena_probe(void);
+
 /* --- Platform lifecycle ---------------------------------------------------- */
 void dc_platform_init(void);
 void pc_platform_shutdown(void);

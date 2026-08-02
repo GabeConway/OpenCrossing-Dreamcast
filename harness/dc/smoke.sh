@@ -11,6 +11,8 @@
 #   ./smoke.sh --cdi path/to/disc.cdi --timeout 90
 #   ./smoke.sh IMG --no-fast-gdrom          # keep modelled GD-ROM latency
 #   ./smoke.sh IMG --expect 'MARK:TITLE_UP' # extra required console line (repeatable)
+#   ./smoke.sh IMG --fb-writeback           # VRAM framebuffer emulation, so a
+#                                           # DC_FB_PROBE build can see pixels
 #   ./smoke.sh IMG --no-crash-triage        # don't auto-run crash.sh on a dump
 #
 # On a failure whose console contains a KOS register dump or assertion, this
@@ -66,6 +68,7 @@ TIMEOUT=60
 RUN_DIR=""
 FAST_GDROM=1
 AUTO_CRASH=1
+FB_WRITEBACK=0
 EXPECT=()
 EXTRA=()
 
@@ -77,6 +80,7 @@ while [ $# -gt 0 ]; do
         --no-fast-gdrom) FAST_GDROM=0; shift ;;
         --expect)        EXPECT+=("$2"); shift 2 ;;
         --no-crash-triage) AUTO_CRASH=0; shift ;;
+        --fb-writeback)  FB_WRITEBACK=1; shift ;;
         -c|--config)     EXTRA+=(-c "$2"); shift 2 ;;
         -h|--help)       sed -n '2,58p' "$0"; exit 0 ;;
         -*)              echo "unknown arg: $1" >&2; exit 2 ;;
@@ -98,6 +102,20 @@ fail_hard() {  # reason
 
 [ -n "$RUN_DIR" ] || RUN_DIR="$RUNROOT/smoke-$(basename "${IMAGE%.*}")-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$RUN_DIR"
+
+# --fb-writeback: make DC_FB_PROBE's guest-side screenshot actually see pixels.
+#
+# MEASURED 2026-08-02. Flycast's hardware renderer draws into a host GPU
+# surface and does NOT write the result back into emulated VRAM, so a guest
+# that reads vram_s (or pvr_get_front_buffer()) hashes an all-zero frame while
+# the window on screen plainly shows the title logo. That false negative cost a
+# debugging cycle and is written up in kb/traps.md. `rend.EmulateFramebuffer`
+# turns on full VRAM framebuffer emulation and the hashes become real and
+# frame-varying — at roughly two thirds of the frame rate (24.8 -> 16.8 FPS
+# measured), which is why it is opt-in rather than on for every run.
+if [ "$FB_WRITEBACK" -eq 1 ]; then
+    EXTRA+=(-c config:rend.EmulateFramebuffer=yes)
+fi
 
 # FastGDRomLoad skips modelled GD-ROM read latency: correct for a boot gate,
 # wrong for the read-ahead/streaming tests where the latency is under test.

@@ -311,9 +311,14 @@ endif
 # (2,705,504 / 1,048,576). Both are 32-byte aligned by contract.
 #
 # MEASURED 2026-08-02: the title-demo scene OOM'd by exactly 2,265,088 B
-# against the 2,705,504 B default, so bucket 6's floor at that scene is
-# 4,970,592 B. The MEMLEDGER FIT line is the detector — raise these past what
-# the image span leaves and the boot fails loudly instead of thrashing.
+# against the 2,705,504 B default. That was KOS's *sbrk*, not the arena —
+# the two pools are carved from the same region, so raising the arena to
+# 4,980,736 to "fix" it made the run get LESS far. Lowering the arena to
+# 1,900,000 removed the OOM entirely. Read the direction off that: when the
+# sbrk OOM fires, shrink these. DC_ARENA_PROBE below is how the arena's own
+# demand gets measured instead of guessed. The MEMLEDGER FIT line is the
+# detector — raise these past what the image span leaves and the boot fails
+# loudly instead of thrashing.
 ifneq ($(DC_ARENA_BYTES),)
 DEFINES += -DDC_MAIN_MEMORY_SIZE=$(DC_ARENA_BYTES)u
 endif
@@ -330,6 +335,27 @@ endif
 # each probe reads 614,400 B back out of VRAM, which is not free.
 ifneq ($(DC_FB_PROBE),)
 DEFINES += -DDC_FB_PROBE=$(DC_FB_PROBE)
+endif
+
+# DC_ARENA_PROBE=<N> — print the arena's touched high-water and the current
+# libc break every N frames (kb/STATE.md N4). OSInit() zeroes the arena, so a
+# nonzero 1 KB granule is a granule something wrote; the running maximum is the
+# high-water. This exists because DC_MAIN_MEMORY_SIZE has never been measured,
+# only defended by "no arena-side OOM has been seen", and bisecting it costs a
+# full build per data point. Off by default — each probe reads the whole arena.
+ifneq ($(DC_ARENA_PROBE),)
+DEFINES += -DDC_ARENA_PROBE=$(DC_ARENA_PROBE)
+endif
+
+# DC_ASSET_CENSUS=1 — record the distinct asset addresses the GX layer is
+# handed (texture images at GXLoadTexObj, vertex arrays at GXSetArray) and
+# print them for tools/dcstub/census_resolve.py to resolve against the ELF.
+# This is the only way to learn which acres and NPCs a scene touches: the
+# title demo names its acres through BLOCK_COMBI_* indices and its animals
+# through profile IDs, so a static trace of src/data sees neither. Costs
+# 32,768 B of .bss for the address set, which is why it is off by default.
+ifneq ($(DC_ASSET_CENSUS),)
+DEFINES += -DDC_ASSET_CENSUS=$(DC_ASSET_CENSUS)
 endif
 
 # jaudio_NES C files use `nullptr`. C only — C++ has it natively.

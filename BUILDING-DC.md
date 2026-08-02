@@ -98,6 +98,12 @@ colima (4 cores), `-j4`:
 | `DC_DISC_ROOT` | unset | a directory whose files go on the disc **flat** |
 | `DECOMP_OPT` | `-O0` | optimization level for decomp game code |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
+| `DC_ARENA_BYTES` | header | arena size (bucket 6). **Shrink, never grow** — it competes with libc |
+| `DC_ARAM_WINDOW` | header | resident graph-ARAM window. Floor 851,968 (`forest_1st.arc`) |
+| `DC_DIAG` | `0` | `1` → `PC_DIAG()` bring-up tracing inside `graph_proc` |
+| `DC_FB_PROBE` | unset | `<N>` → guest-side screenshot every N presented frames. Needs `smoke.sh --fb-writeback` to see anything |
+| `DC_ARENA_PROBE` | unset | `<N>` → arena touched/used + libc break every N presented frames |
+| `DC_ASSET_CENSUS` | unset | `1` → record the asset addresses the GX layer is handed; resolve with `tools/dcstub/census_resolve.py` |
 | `V` | unset | `V=1` echoes full compiler command lines |
 
 ```bash

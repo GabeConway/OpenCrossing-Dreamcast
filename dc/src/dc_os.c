@@ -40,6 +40,90 @@ static u8* arena_hi = NULL;
 u8* pc_arena_base = NULL;
 u8* pc_arena_end  = NULL;
 
+/* ==========================================================================
+ * Arena high-water probe (kb/STATE.md N4)
+ * ==========================================================================
+ * The arena and KOS's sbrk heap are carved from the SAME region, so every byte
+ * given to the arena is a byte libc can never hand out — and libc is the pool
+ * that actually ran dry. Bucket 6's real peak has never been measured, so
+ * DC_MAIN_MEMORY_SIZE is a guess defended only by "no arena-side OOM has been
+ * seen". Bisecting it costs one full build per data point; this costs one.
+ *
+ * OSInit() memsets the whole arena to zero, so a nonzero byte means something
+ * wrote there. Scanning at 1 KB granularity and keeping the running maximum
+ * gives the touched high-water for free.
+ *
+ * WHAT THIS IS NOT: an allocator census. A block that is allocated and then
+ * only ever written with zeroes reads as untouched, and freed memory keeps
+ * counting as touched. So `peak` is a LOWER bound on the arena's high-water
+ * and an UPPER bound on what can safely be handed back to libc only if it is
+ * treated with margin. Report it as measured, not as a licence.
+ *
+ * brk is reported on the same line because the two pools are one inequality:
+ * the interesting number is arena slack against libc's peak demand, not either
+ * alone. */
+#ifndef DC_ARENA_PROBE
+#define DC_ARENA_PROBE 0
+#endif
+
+#if DC_ARENA_PROBE > 0
+#include <unistd.h>   /* sbrk — the libc side of the two-pool inequality */
+
+/* src/game/m_malloc.c. Declared here rather than through the decomp headers:
+ * this file is platform code and must not start depending on game headers for
+ * a probe that is normally compiled out. */
+extern int  zelda_MallocIsInitalized(void);
+extern void zelda_GetFreeArena(size_t* max_free, size_t* free_total,
+                               size_t* used);
+
+void dc_arena_probe(void) {
+    static u32 peak_granules = 0;
+    static u32 probe_no = 0;
+    static u8* brk_base = NULL;
+    const u32 granule = 1024u;
+    u32 n = DC_MAIN_MEMORY_SIZE / granule;
+    u32 touched = 0, top = 0, i;
+    u8* brk_now;
+
+    if (!arena_memory) return;
+
+    for (i = 0; i < n; i++) {
+        const u32* p = (const u32*)(arena_memory + i * granule);
+        const u32* e = p + granule / sizeof(u32);
+        for (; p < e; p++) {
+            if (*p) { touched++; top = i + 1; break; }
+        }
+    }
+    if (touched > peak_granules) peak_granules = touched;
+
+    brk_now = (u8*)sbrk(0);
+    if (!brk_base) brk_base = brk_now;
+
+    DC_LOGE("[DC/ARENA] probe=%u touched=%u peak=%u top=%u of %u B "
+            "| lo_used=%u brk=%p brk_used=%u\n",
+            probe_no++, (unsigned)(touched * granule),
+            (unsigned)(peak_granules * granule), (unsigned)(top * granule),
+            (unsigned)DC_MAIN_MEMORY_SIZE,
+            (unsigned)(arena_lo - arena_memory - DC_ARENA_LOW_RESERVE),
+            (void*)brk_now, (unsigned)(brk_now - brk_base));
+
+    /* The touched scan cannot see an allocation that only ever had zeroes
+     * written into it, and the game zeroes a lot of what it allocates. The
+     * decomp's own allocator does know, so ask it: __osGetFreeArena via
+     * m_malloc.c reports used / free / largest-free across the zelda arena.
+     * These two numbers disagreeing is informative — used >> touched means
+     * the arena is full of zero-filled blocks, which are real occupancy. */
+    if (zelda_MallocIsInitalized()) {
+        size_t max_free = 0, free_total = 0, used = 0;
+        zelda_GetFreeArena(&max_free, &free_total, &used);
+        DC_LOGE("[DC/ARENA] zelda used=%u free=%u largest_free=%u\n",
+                (unsigned)used, (unsigned)free_total, (unsigned)max_free);
+    }
+}
+#else
+void dc_arena_probe(void) { }
+#endif
+
 void* OSGetArenaLo(void) { return arena_lo; }
 void* OSGetArenaHi(void) { return arena_hi; }
 void  OSSetArenaLo(void* lo) { arena_lo = (u8*)lo; }
