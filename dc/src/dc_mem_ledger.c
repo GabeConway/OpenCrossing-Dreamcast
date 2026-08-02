@@ -33,10 +33,15 @@
 
 #include <malloc.h>
 
-/* Compile-time enforcement of the budget: over-commit is a build error, the
- * cheapest possible place to catch it (kb §5 step 4). */
-#if DC_BUDGET_TOTAL > DC_RAM_BUDGET_BYTES
-#error "dc_mem_budget.h over-commits: sum of buckets exceeds 16 MB"
+/* Compile-time enforcement, on the CORRECT inequality. The old check summed
+ * every bucket against 16 MB, which cannot detect a double-count: buckets
+ * 3/4/5 are the image span, not heap, so counting them on the heap side and
+ * again as image passes a sum test while over-committing the machine. Only
+ * the additive heap can be checked at compile time — the image span is a link
+ * product, so dc_mem_report() checks the full inequality at runtime against
+ * the linker symbols. */
+#if DC_HEAP_ADDITIVE > DC_RAM_USABLE_BYTES
+#error "dc_mem_budget.h over-commits: additive heap alone exceeds usable RAM"
 #endif
 
 /* DC_MEM_STRICT: default for dev/Flycast builds. An overrun dumps the table
@@ -69,9 +74,12 @@ static dc_bucket_t s_bucket[DCMEM_NBUCKET] = {
     B("JKRHEAP",      DC_BUDGET_JKRHEAP,      1),
     B("ASSET_POOL",   DC_BUDGET_ASSET_POOL,   1),
     B("ARAM_GRAPH",   DC_BUDGET_ARAM_GRAPH,   1),
-    B("AUDIO",        DC_BUDGET_AUDIO,        1),
-    B("DISC_IO",      DC_BUDGET_DISC_IO,      1),
-    B("PVR_STAGING",  DC_BUDGET_PVR_STAGING,  1),
+    /* Retired: 0-budget, non-carveable. See dc_mem_budget.h — the bytes these
+     * claimed to reserve are .bss already counted by IMAGE_BSS. Nothing ever
+     * allocated from them, so this is a bookkeeping correction, not a cut. */
+    B("AUDIO",        DC_BUDGET_AUDIO,        0),
+    B("DISC_IO",      DC_BUDGET_DISC_IO,      0),
+    B("PVR_STAGING",  DC_BUDGET_PVR_STAGING,  0),
     B("STACKS",       DC_BUDGET_STACKS,       0),
 };
 
@@ -298,6 +306,22 @@ void dc_mem_report(int verbose) {
     if (budget != DC_BUDGET_TOTAL)
         DC_LOGE("MEMLEDGER WARN table-sum=%u header-sum=%u (drift)\n",
                 (unsigned)budget, (unsigned)DC_BUDGET_TOTAL);
+
+    /* The inequality that actually decides whether the machine fits. Reported
+     * from the linker symbols so a new .bss array shows up on the next boot,
+     * and split so it is obvious which side is over. */
+#ifndef DC_HOST_STUB
+    {
+        size_t span = dc_span(DC_IMG_TEXT_LO, DC_IMG_BSS_HI);
+        long   fit  = (long)DC_RAM_USABLE_BYTES
+                    - (long)span - (long)DC_HEAP_ADDITIVE;
+        DC_LOGE("MEMLEDGER FIT image_span=%u additive_heap=%u usable=%u "
+                "margin=%ld %s\n",
+                (unsigned)span, (unsigned)DC_HEAP_ADDITIVE,
+                (unsigned)DC_RAM_USABLE_BYTES, fit,
+                fit >= 0 ? "OK" : "OVER");
+    }
+#endif
     if (!s_wrap_active)
         DC_LOGE("MEMLEDGER WARN no-malloc-wrap KOS/GLdc allocations "
                 "NOT counted; totals are a lower bound\n");

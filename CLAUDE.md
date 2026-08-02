@@ -88,12 +88,23 @@ agents run from varying cwds.
 ## Status (2026-08-01)
 
 **M0 and M1 met. M2 blocked on RAM.** All 3917 TUs compile and link for
-sh-elf; the harness is verified against real CDIs. The linked image is
-**22.5 MB against a 16 MB machine** (text 6.3 / data 2.6 / bss 13.5), so it
-links but will not boot. **~14.45 MB must come out using layout levers only**
-— KOS's `mm_sbrk()` starts at the ELF `end` symbol with no MMU and no lazy
-commit, so every `.bss` byte destroys a heap byte, making the real image budget
-8,035,072 B rather than 16 MB.
+sh-elf; the harness is verified against real CDIs. The linked image spans
+**21,374,068 B against a 16 MB machine** (text 6,318,552 / data 2,638,852 /
+bss 12,415,508), so it links but will not boot — the failure is size alone,
+proven by controlled experiment.
+
+State the fit as **one inequality**, never as two pools; splitting it has
+already produced two wrong numbers:
+
+```
+(image span) + (genuinely additive heap) ≤ 16,646,144
+  21,374,068  +  3,545,184   ⇒ over by 8,273,108 B
+```
+
+**8,273,108 B must come out using layout levers only.** KOS's `mm_sbrk()`
+starts at the ELF `end` symbol with no MMU and no lazy commit, so every `.bss`
+byte destroys a heap byte. The one lever big enough is demand-loading the
+8,771,358 B of asset destination arrays out of `.bss`.
 
 **Read `kb/STATE.md` first** — it carries current numbers, the ranked RAM
 levers, and a list of traps already paid for (the `fsqrt` collision, POSIX

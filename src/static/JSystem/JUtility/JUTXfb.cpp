@@ -67,6 +67,31 @@ void JUTXfb::initiate(u16 w, u16 h, JKRHeap* heap, JUTXfb::EXfbNumber number) {
 
     u32 size = (u16)ALIGN_NEXT((u16)w, 16) * h;
 
+#if defined(TARGET_DC)
+    /* Dreamcast: the external framebuffers are allocated, zeroed and never
+     * read. Every consumer of these pointers terminates at
+     * VISetNextFrameBuffer() (dc/src/dc_vi.c), GXCopyDisp() (dc/src/dc_gx.c,
+     * ignores `dest`) or JUTChangeFrameBuffer() -- the PVR owns the real
+     * framebuffer and it lives in VRAM. At GXNtsc480IntDf that is
+     * 2 * 640 * 480 * 2 = 1,228,800 B of system heap for nothing.
+     *
+     * NULL is a state the code already handles by construction: SingleBuffer
+     * mode leaves mBuffer[1]/[2] NULL, JUTXfb::getDrawnXfb() already returns
+     * nullptr when the index is negative, and JUTDirectPrint's constructor
+     * calls changeFrameBuffer(nullptr, 0, 0) -- so a NULL frame memory simply
+     * disables direct print, which cannot work on DC anyway. The buffer
+     * *indices* (which drive JFWDisplay's rotation) are untouched.
+     * kb/research-budget-premises.md 2.2(a). */
+    (void)size;
+    (void)number;
+    mBuffer[0] = nullptr;
+    mBuffer[1] = nullptr;
+    mBuffer[2] = nullptr;
+    mXfbAllocated[0] = false;
+    mXfbAllocated[1] = false;
+    mXfbAllocated[2] = false;
+    return;
+#else
     mBuffer[0] = new (heap, 32) u16[size];
     mXfbAllocated[0] = true;
     if (number >= DoubleBuffer) {
@@ -84,6 +109,7 @@ void JUTXfb::initiate(u16 w, u16 h, JKRHeap* heap, JUTXfb::EXfbNumber number) {
         mBuffer[2] = nullptr;
         mXfbAllocated[2] = false;
     }
+#endif
 }
 
 u32 JUTXfb::accumeXfbSize() {

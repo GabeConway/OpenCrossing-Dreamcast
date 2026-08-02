@@ -12,8 +12,13 @@
 
 #define DC_RAM_BUDGET_BYTES        (16u * 1024u * 1024u)   /* 16,777,216 */
 
-/* Bucket 1  — KOS kernel + newlib + drivers.            [?] measure at M0 */
-#define DC_BUDGET_KOS              1000000u
+/* Bucket 1  — KOS runtime heap ONLY.
+ *             CORRECTED: KOS/newlib/libstdc++ CODE is statically linked INTO
+ *             our ELF (304,829 B in AnimalCrossing.map), so it is already
+ *             counted by buckets 3-5. Reserving 1,000,000 here double-counted
+ *             it. Only KOS's own runtime allocations are additive.
+ *             kb/research-budget-premises.md 3.2. */
+#define DC_BUDGET_KOS               262144u
 /* Bucket 2  — reserved low RAM 0x8C000000-0x8C010000. Not spendable.      */
 #define DC_BUDGET_LOWRAM             65536u
 /* Bucket 3  — game+platform .text.                      [?] measure at M1 */
@@ -23,20 +28,38 @@
 /* Bucket 5  — game+platform .bss (true runtime state)                    */
 #define DC_BUDGET_IMAGE_BSS        1950000u
 /* Bucket 6  — JKRHeap system heap + __osMalloc game arena.
- *             THE SINGLE BIGGEST UNKNOWN IN THE BUDGET (kb §4.2).         */
-#define DC_BUDGET_JKRHEAP          4000000u
+ *             STILL THE SINGLE BIGGEST UNKNOWN (kb §4.2): the __osMalloc
+ *             high-water mark has never been measured; see
+ *             kb/research-budget-premises.md §2.4 for the recipe. What HAS
+ *             been settled is that 1,294,496 B of it was dead weight (XFB +
+ *             GX FIFO, both now killed at source under TARGET_DC), so this
+ *             cut leaves __osMalloc's usable pool exactly where it was.
+ *             MUST equal DC_MAIN_MEMORY_SIZE — dc_os.c static-asserts it.  */
+#define DC_BUDGET_JKRHEAP          2705504u
 /* Bucket 7  — asset residency pool (replaces 8.77 MB of static BSS)       */
 #define DC_BUDGET_ASSET_POOL       1500000u
 /* Bucket 8  — graph-ARAM (RARC) LRU window.             [?] probe 3 at M1 */
 #define DC_BUDGET_ARAM_GRAPH        512000u
-/* Bucket 9  — audio work RAM, SH-4 side                                  */
-#define DC_BUDGET_AUDIO             700000u
-/* Bucket 10 — disc read-ahead ring + KOS VFS buffers (3 x 128 KB)         */
-#define DC_BUDGET_DISC_IO           384000u
-/* Bucket 11 — PVR vertex staging / TA buffers in main RAM                 */
-#define DC_BUDGET_PVR_STAGING       384000u
-/* Bucket 12 — thread stacks (main 64K, audio 32K, read-ahead 16K, KOS)    */
-#define DC_BUDGET_STACKS            131072u
+/* Buckets 9/10/11 — RETIRED, and they were never real.
+ *
+ * All three were phantom reservations: nothing ever called
+ * dc_mem_alloc(DCMEM_AUDIO/DISC_IO/PVR_STAGING), so their extents were never
+ * carved and they cost 0 runtime bytes — while the storage they claimed to
+ * budget for is already .bss inside the image, i.e. already counted by
+ * bucket 5. Reserving for them a second time is exactly the double-count that
+ * made the old ledger report 8,035,072 B of image budget instead of
+ * 10,306,464 B. Kept as 0-valued names so the DCMEM_* enum in dc_mem_ledger.h
+ * and the s_bucket[] table do not have to be renumbered.
+ *   9  audio      -> jaudio_NES, 1,265,101 B of .bss
+ *   10 disc I/O   -> dc_dvd.c.o, 13,320 B of .bss (no read-ahead ring exists)
+ *   11 PVR stage  -> g_gx in dc_gx.c.o, 334,764 B of .bss
+ * kb/research-budget-premises.md §3.4. */
+#define DC_BUDGET_AUDIO                  0u
+#define DC_BUDGET_DISC_IO                0u
+#define DC_BUDGET_PVR_STAGING            0u
+/* Bucket 12 — thread stacks. KOS's own 64 KB kernel stack is already inside
+ *             bucket 2's reserved low RAM, so only our threads are additive. */
+#define DC_BUDGET_STACKS             65536u
 
 #define DC_BUDGET_TOTAL (                       \
       DC_BUDGET_KOS          + DC_BUDGET_LOWRAM \
@@ -45,6 +68,25 @@
     + DC_BUDGET_ASSET_POOL   + DC_BUDGET_ARAM_GRAPH \
     + DC_BUDGET_AUDIO        + DC_BUDGET_DISC_IO    \
     + DC_BUDGET_PVR_STAGING  + DC_BUDGET_STACKS)
-/* kb §4 total: 15,026,608 B (89.6 %), margin 1,750,608 B (10.4 %) */
+/* DC_BUDGET_TOTAL is NOT the fit criterion and never was — summing all
+ * buckets is what allowed buckets 9/10/11 to be counted twice. The real
+ * inequality, which dc_mem_ledger.c now checks at runtime against the linker
+ * symbols, is:
+ *
+ *     (image span: _executable_start .. end) + (genuinely additive heap)
+ *         <= DC_RAM_USABLE_BYTES
+ *
+ * where "additive heap" is buckets 1 + 6 + 8 + 12 only. Buckets 3/4/5 ARE the
+ * image span, so adding them to the heap side double-counts them.
+ *
+ *   usable      16,646,144   (16 MB - 64 KB low RAM - 65 KB KOS reserve)
+ *   image span  21,374,996   as linked today  -> OVER by 9,568,532 B
+ *
+ * kb/STATE.md carries the current numbers and the ranked levers. */
+#define DC_RAM_USABLE_BYTES        16646144u
+
+#define DC_HEAP_ADDITIVE (                      \
+      DC_BUDGET_KOS + DC_BUDGET_JKRHEAP         \
+    + DC_BUDGET_ARAM_GRAPH + DC_BUDGET_STACKS)
 
 #endif /* DC_MEM_BUDGET_H */

@@ -99,7 +99,14 @@ extern "C" {
 /* The WHOLE arena block. Must equal DC_BUDGET_JKRHEAP (dc_os.c static-asserts
  * it) because JW_Init computes SystemHeapSize = arenaHi - arenaLo - 0xD0: the
  * arena size IS the system heap size, there is no separate knob (§3.1). */
-#define DC_MAIN_MEMORY_SIZE     4000000u
+/* 4,000,000 was a round number nobody measured. The XFB double buffer
+ * (1,228,800 B) and the GX FIFO (65,697 B) are now killed at their source on
+ * DC (JUTXfb.cpp / jsyswrap.cpp, both #if TARGET_DC), so the arena is cut by
+ * exactly what they used to consume: __osMalloc's usable pool is UNCHANGED at
+ * ~2.6 MB while 1,294,496 B of real RAM comes back. 32-byte aligned.
+ * Bucket 6's true high-water mark is still unmeasured — see
+ * kb/research-budget-premises.md 2.4 for the recipe. */
+#define DC_MAIN_MEMORY_SIZE     2705504u
 #define DC_SYSTEM_HEAP_SIZE     (DC_MAIN_MEMORY_SIZE - DC_ARENA_LOW_RESERVE)
 
 /* ARAM is an ADDRESS SPACE, not an allocation. dc_aram.c never reserves

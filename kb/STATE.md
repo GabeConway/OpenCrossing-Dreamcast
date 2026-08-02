@@ -1,6 +1,6 @@
 # Session state — resume here
 
-Last updated 2026-08-01, end of the second execution session. Written so a
+Last updated 2026-08-01, end of the third execution session. Written so a
 fresh context can pick up without replaying anything. Read this first, then
 `CLAUDE.md`, then `PLAN.md`.
 
@@ -10,26 +10,52 @@ fresh context can pick up without replaying anything. Read this first, then
 not yet known to be viable.**
 
 - **3917 / 3917 translation units compile and link for sh-elf**, zero
-  exclusions. `src/` carries only two small `#if defined(TARGET_DC)` branches
-  (below); every *compat* fix lives in `dc/include/dc_prelude.h` as a
-  force-include.
+  exclusions. `src/` carries only **four** small `#if defined(TARGET_DC)`
+  branches (two pre-existing, plus `JUTXfb.cpp` and `jsyswrap.cpp` added this
+  session); every *compat* fix lives in `dc/include/dc_prelude.h` as a
+  force-include. That list is the whole licence to touch `src/` — a compat fix
+  belongs in the prelude, never here.
 - **The harness works and is verified against real CDIs**, not asserted.
-- **The image is 21,374,996 B** (text 6,318,568 / data 2,638,852 / bss
-  12,415,508), ending at `0x8d472814`.
-- **The image budget is 10,306,464 B** (corrected — see below), so
-  **~11,068,532 B must still be shed.**
+- **The image is 21,372,912 B** (text 6,318,552 / data 2,638,852 / bss
+  12,415,508); span `0x8c010000` → `0x8d472874` = **21,374,068 B**.
+- **The additive heap is 3,545,184 B** (was 4,839,680 — bucket 6 cut this
+  session, §"Applied this session"), so against the 16,646,144 B of usable RAM
+  the image is **over by 8,273,108 B**.
+
+### The one inequality
+
+```
+(image span) + (genuinely additive heap) ≤ 16,646,144
+  image span today  21,374,068   (0x8c010000 → 0x8d472874)
+  additive heap      3,545,184   (KOS 262,144 + arena 2,705,504
+                                  + ARAM window 512,000 + threads 65,536)
+  ⇒ over by          8,273,108
+```
+
+Do **not** restate this as two pools (an "image budget" vs a "heap budget").
+Splitting it is what produced the original 14,451,476 B error and then the
+10,306,464 B one. `dc_mem_ledger.c` now prints exactly this line as
+`MEMLEDGER FIT …` from the linker symbols, and the compile-time check in that
+file was rewritten to test `DC_HEAP_ADDITIVE ≤ DC_RAM_USABLE_BYTES` instead of
+summing every bucket — the old sum could not detect a double-count.
 
 ## The one paragraph that matters
 
-`.text` (6,318,568) + `.data` (2,638,852) = **8,957,420 B.** Against the
-corrected image budget of 10,306,464 B that leaves **1,349,044 B of headroom
-for all of `.bss`** — which is 12,415,508 B today. Every plan written so far
-targets `.bss`, and `.bss` must shrink by **89%** for the image to fit. Since
-`-O0` is mandatory, `.text` cannot shrink; it can only be relocated, and the
-only mechanism for that (MMU paging) came back **DEAD** — see below.
+`.text` (6,318,552) + `.data` (2,638,852) = **8,957,404 B**, and neither can
+shrink: `-O0` is mandatory, so `.text` can only be *relocated*, and the only
+general mechanism for that (MMU paging) came back **DEAD**. Subtract the image
+span's fixed part and the additive heap from the 16,646,144 B of usable RAM and
+**`.bss` may be at most ~4.14 MB** — it is 12,415,508 B today, so it must fall
+by **~67%**.
 
-**Required cut: ~11,068,532 B** (was reported as 14,451,476; see the budget
-correction below for why that was wrong in kind, not just magnitude).
+**Required cut: 8,273,108 B.** The single lever that covers most of it is the
+asset destination arrays (8,771,358 B, 64.5% of `.bss`) via demand-loading —
+lever 1 below. Nothing else is close.
+
+Two earlier figures for this number were wrong *in kind*, not just magnitude:
+14,451,476 (stale, pre-`.bss` fixes) and 11,068,532 (correct arithmetic, but
+before bucket 6's dead weight was removed). Trust the inequality above, not any
+prose restatement of it.
 
 ## Budget corrected — ~3.4 MB found, none of it by shrinking anything
 
@@ -46,20 +72,17 @@ already inside the image — and a fourth counts bytes twice.
 | Bucket 12 stacks | −131,072 | −65,536 | KOS's 64 KB kernel stack was already subtracted |
 | **image budget** | **8,035,072** | **10,306,464** | |
 
-State the fit as one inequality rather than two pools — splitting it is what
-caused the error:
+These corrections are now **applied in code**, not just documented:
+`dc/include/dc_mem_budget.h` carries bucket 1 at 262,144, buckets 9/10/11 at
+0 (kept as names so the `DCMEM_*` enum need not be renumbered), bucket 12 at
+65,536, and a new `DC_HEAP_ADDITIVE` / `DC_RAM_USABLE_BYTES` pair that encodes
+the inequality above. Buckets 9/10/11 cost **0 runtime bytes even before this**
+— nothing ever called `dc_mem_alloc()` on them, so their extents were never
+carved. Retiring them is bookkeeping, not a cut.
 
-```
-(image span) + (genuinely additive heap) ≤ 16,646,144
-  image span today  21,374,996   (0x8c010000 → _end 0x8d472814)
-  additive heap      4,839,680   (KOS 262,144 + arena 4,000,000
-                                  + ARAM window 512,000 + threads 65,536)
-  ⇒ over by          9,568,532
-```
-
-Bucket 6 (the 4,000,000 B `__osMalloc` arena) is **still unmeasured**, but
-**≥1,294,497 B of it is provably dead** — remove the dead XFB/FIFO allocations
-and the required cut falls to **9,774,035 B**.
+Bucket 6's true high-water mark is **still unmeasured** (recipe:
+`kb/research-budget-premises.md` §2.4), but its 1,294,497 B of dead weight is
+now gone — see below.
 
 ## Why `.bss` is not free
 
@@ -99,7 +122,7 @@ output.** Attributed by controlled experiment, not inference:
 | `selftest.cdi` (control) | 22,728 | `0x8c048948` | PASS 3.10 s |
 | hello-world + 4.7 MB bss | 4,722,728 | `0x8c4c40a8` | PASS 3.08 s |
 | hello-world + 21 MB bss | 21,022,728 | `0x8d44f888` | **FAIL, 0 bytes** |
-| `OpenCrossing.cdi` | 12,415,508 | `0x8d472814` | **FAIL, 0 bytes** |
+| `OpenCrossing.cdi` | 12,415,508 | `0x8d472874` | **FAIL, 0 bytes** |
 
 A stock KOS hello-world containing *nothing but* a big array fails identically
 at the same image end. **The silence is size alone** — not a game fault, and
@@ -125,10 +148,17 @@ merely not implicated.
    data — the same resident bytes moved from `.bss` to `.data`, plus disc bytes.
    On a no-MMU sbrk machine that is neutral at best. It may still be true as a
    description of history. **The saving comes from demand-loading, not from
-   flipping the define.** Also unverified: whether `src/data/**/assets/*.inc`
-   even exist in the repo — a partial check suggested **only 4 `.inc` files
-   exist repo-wide**, which if true means the non-`TARGET_PC` branch does not
-   build at all and reverting is not an available option. One `ls` settles it.
+   flipping the define.**
+
+   ✅ **The `.inc` question is now SETTLED and the answer closes the branch.**
+   `find src -name '*.inc'` returns exactly **three** files repo-wide —
+   `src/game/m_huusui_room_ovl_data.inc`, `src/actor/npc/ac_npc_rtc_think.c.inc`,
+   `src/actor/npc/ac_npc_rtc_talk.c.inc` — and `find src/data -type d -name
+   assets` returns **nothing**. There is no `src/data/**/assets/*.inc` tree, so
+   the non-`TARGET_PC` branch **cannot build at all**. "Revert to the GameCube
+   path" was never an available option. Do not re-open it, and do not spend
+   another pass on the `-DTARGET_PC` audit's question 2a
+   (`kb/research-budget-premises.md` §6.2) — this is its answer.
 2. **Resident REL blob — 16.56 MB peak. SOLVED, tool built and verified.**
    `dcasset pack` emits `assets.pak` (8,917,568 B) + a 51,104 B resident index,
    replacing the resident `foresta.rel` + `main.dol` (16,558,776 B). Round trip
@@ -139,13 +169,45 @@ merely not implicated.
    replaces `foresta.rel` on disc (−6.7 MB, no Yaz0 at boot). **Remaining work
    is the runtime loader in `pc_assets.c`** — and that same loader is what
    unlocks lever 1. See `kb/asset-pack.md`.
-3. **Applied this session, −1,111,040 B** (measured delta equals the sum
-   exactly): `prbuf` `sizeof(u32)`→`u16` −614,400 · `TEX_BUFFER_DATA_SIZE`
+3. **Applied THIS session, −1,294,496 B of additive heap.** Bucket 6's dead
+   weight, killed at source. This is real memory that is no longer `memalign`ed
+   at boot, not a ledger edit.
+   - **XFB double buffer, −1,228,800 B.** `JUTXfb::initiate`
+     (`src/static/JSystem/JUtility/JUTXfb.cpp`) now has a
+     `#if defined(TARGET_DC)` branch leaving all three `mBuffer[]` **NULL**.
+     Every consumer terminates at `VISetNextFrameBuffer` (`dc_vi.c`, a no-op),
+     `GXCopyDisp` (`dc_gx.c`, ignores `dest`), or `JUTChangeFrameBuffer` — the
+     PVR owns the real framebuffer and it lives in VRAM. NULL is safe *because
+     the code already handles it by construction*: SingleBuffer mode leaves
+     `mBuffer[1]/[2]` NULL, `getDrawnXfb()` already returns `nullptr` on a
+     negative index, and `JUTDirectPrint`'s own constructor calls
+     `changeFrameBuffer(nullptr, 0, 0)`. The buffer *indices*, which drive
+     `JFWDisplay`'s rotation, are untouched. **Note the earlier research
+     doc's advice to hand back a non-NULL dummy was not followed, deliberately**
+     — a small dummy keeps `JUTDirectPrint` "enabled" and pointed at 32 bytes,
+     which is a heap-corruption trap; NULL disables it, which is correct on DC.
+   - **GX FIFO, −65,696 B.** `jsyswrap.cpp`'s
+     `JC_JFWSystem_setFifoBufSize(0x10001)` → `0x100` under `TARGET_DC`. The
+     token allocation is kept so `JUTGraphFifo`'s ctor, its `GXFifoObj` and the
+     `~JUTGraphFifo` free path stay structurally identical.
+   - **`DC_MAIN_MEMORY_SIZE` 4,000,000 → 2,705,504** (`dc_platform.h`, and
+     `DC_BUDGET_JKRHEAP` to match — `dc_os.c` static-asserts equality). The cut
+     is exactly what the two dead allocations used to consume, so
+     **`__osMalloc`'s usable pool is unchanged at ~2.6 MB.**
+
+   Verified by re-link: builds and links clean, `.text` 6,318,568 → 6,318,552.
+   `.data`/`.bss` unchanged, as expected — these were heap bytes, not image
+   bytes. Image span moved +96 B on alignment, so the net is −1,294,400 B.
+   **Not verified at runtime**: the image still does not boot (size alone), so
+   the new `MEMLEDGER FIT` line has never printed. First thing to check once
+   the image fits.
+4. **Applied in the previous session, −1,111,040 B** of `.bss` (measured delta
+   equals the sum exactly): `prbuf` `sizeof(u32)`→`u16` −614,400 · `TEX_BUFFER_DATA_SIZE`
    `0x80000`→`0xC000` −475,136 · `TEX_BUFFER_BSS_SIZE` `0x4000`→`0x400`
    −15,360 · `TEXTURE_CACHE_LIST_SIZE` 1024→256 −6,144. All four are reversions
    of PC-port inflation back to **retail GameCube values**, so sufficiency is
    proven by the shipped product.
-4. **Still on the ranked list, ~4.3 MB total** (from
+5. **Still on the ranked list, ~4.3 MB total** (from
    `kb/research-size-reduction.md`, measured against the real ELF + map):
    `.data` `src/data` tables to disc −1.94 MB (0.95 MB pointer-free today,
    0.99 MB needs a REL-style reloc pass) · `s_assets[]` name-string pool →
@@ -153,12 +215,12 @@ merely not implicated.
    `texture_buffer_data` → VRAM (partly taken in item 3) · actor overlay
    staging arenas → one shared union arena −0.46 MB · `pc_m_card` −0.28 ·
    `dc_gx` −0.24.
-5. **Not yet costed: offline asset decimation.** The only lever that shrinks
+6. **Not yet costed: offline asset decimation.** The only lever that shrinks
    the destination arrays *themselves* rather than relocating them. Disc is
    5.3% full and the target is 640×480. `src/data/model` alone is 5,682,621 B
    of `.bss`. PLAN §1 already sanctions a documented "DC edition". **This is a
    product decision for the user, not an engineering one.**
-6. **Not yet checked: source-level table dedup.** `--icf` is unavailable on SH,
+7. **Not yet checked: source-level table dedup.** `--icf` is unavailable on SH,
    but `src/data` is generator output — hashing table contents and aliasing
    duplicates in `gen_runtime_assets.py` is a *generator* change, not codegen.
    Nobody has looked.
@@ -291,11 +353,14 @@ point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`.
 
 1. **Read whichever of the three `kb/research-*.md` files above exist.** They
    answer the viability questions; do not re-derive them.
-2. **Measure bucket 6** — still unmeasured, and ≥1,294,497 B of its 4 MB is
-   already provably dead. Follow `kb/research-budget-premises.md` §2.4 and §6.1.
-   Cheapest win available. Also settle §6.2's one-`ls` question: do
-   `src/data/**/assets/*.inc` exist? A partial check suggested only 4 exist
-   repo-wide, which would mean the non-`TARGET_PC` branch cannot build at all.
+2. ~~Measure bucket 6~~ / ~~settle the `.inc` question~~ — **the cheap parts
+   are DONE** (lever 3 and lever 1's ✅ note). Bucket 6's *high-water mark* is
+   still unmeasured, but it is no longer the cheapest win and it now blocks
+   nothing: the arena was cut by exactly its dead weight, so `__osMalloc`'s pool
+   is unchanged. Defer §2.4 until the image is within ~1 MB of fitting, at
+   which point the last megabyte will have to come from somewhere and the peak
+   decides whether the arena can give it up. **Do not spend a session on it
+   before then.**
 3. **Implement the `pc_assets.c` runtime loader against `assets.pak`**, then
    demand-load the 8,771,358 B of destination arrays into pooled storage. This
    is the single largest lever and it is loader-only. Two rules from the pack

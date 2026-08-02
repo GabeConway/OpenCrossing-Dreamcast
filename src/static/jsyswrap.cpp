@@ -493,7 +493,18 @@ extern void JW_Init() {
     SystemHeapSize = (u32)arena_hi - (u32)arena_lo - 0xD0;
     JC_JFWSystem_setMaxStdHeap(1);
     JC_JFWSystem_setSysHeapSize(SystemHeapSize);
+#if defined(TARGET_DC)
+    /* Dreamcast: there is no GameCube command FIFO. JUTGraphFifo's ctor does
+     * JKRAllocFromSysHeap(ALIGN_NEXT(size,32) + 0xA0, 32) and hands the block
+     * to GXInit(), which on DC only logs it (dc/src/dc_gx.c). At the GameCube
+     * 0x10001 that is 65,697 B of system heap that is never written. Keep a
+     * token allocation so the object, its GXFifoObj and the ~JUTGraphFifo
+     * free path stay structurally identical.
+     * kb/research-budget-premises.md 2.2(b). */
+    JC_JFWSystem_setFifoBufSize(0x100);
+#else
     JC_JFWSystem_setFifoBufSize(0x10001);
+#endif
     OSReport("soundAramSize=%08x graphAramSize=%08x totalAramSize=%08x\n", soundAramSize, graphAramSize,
              soundAramSize + graphAramSize);
     JC_JFWSystem_setAramAudioBufSize(soundAramSize);
