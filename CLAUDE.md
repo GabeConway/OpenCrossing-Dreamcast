@@ -57,17 +57,25 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | 3 | `kb/traps.md` | read before touching the build, harness, or prelude |
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
 
-**The port runs.** A `DC_ASSET_STUB=1` + `DC_DISC_ROOT=…` image boots in
-Flycast, mounts both RARC archives off a real disc, and reaches **`graph_proc`**
-— the game's render loop. Nothing is drawn yet (`dc_gx`'s backend is still
-`NONE`), so a Flycast window on the Sega logo is expected, not a fault. Read
-`kb/STATE.md` §"How far it gets today" before assuming anything is untested.
+**The port draws the title screen.** A `DC_ASSET_STUB=1` + `DC_DISC_ROOT=…`
+image boots in Flycast, runs the game loop at **29.3 FPS / 98 % speed**, and
+renders the Animal Crossing title overlay — "PRESS START" and the copyright
+line — through a real PowerVR backend (`dc/src/dc_pvr.c` +
+`dc_pvr_texture.c`). The town behind the logo is black because only 53,792 B
+of real assets are in that image; that is the S4 loader's job, not a renderer
+bug. Read `kb/STATE.md` **top section** before assuming anything is untested.
 
-**Status (2026-08-01): M0 and M1 met, M2 blocked on RAM.** All 3917 TUs compile
-and link for sh-elf. The image spans 19,564,308 B and, with 4,081,760 B of
-additive heap, **is over by 6,999,924 B** — down from 8,810,740 after S3 banked
-1,810,816 B. State the fit as **one inequality**, never two pools; splitting it
-has already produced two wrong numbers.
+**Status (2026-08-02): M0/M1 met, M2 has first pixels, still blocked on RAM
+for a real-asset build.** All 3917 TUs compile and link for sh-elf.
+
+⚠️ **The heap is TWO pools that compete** — the arena (`__osMalloc`) and KOS
+`sbrk` (libc `malloc`) are carved from the same region. Growing the arena
+starves libc and makes the game get *less* far. The "Out of memory. Requested
+sbrk_base …" message is sbrk, not the arena. `kb/STATE.md` has the measurements;
+this cost a full debug cycle.
+
+State the *image* fit as **one inequality**, never two pools; splitting it has
+already produced two wrong numbers.
 
 ---
 

@@ -26,6 +26,7 @@
  * linear RGBA8, and that is an M2 deliverable.
  */
 #include "dc_gx_internal.h"
+#include "dc_pvr.h"        /* dc_pvr_tex_get(): detects an evicted handle */
 #include "dc_mem_ledger.h"
 #include <dolphin/gx/GXEnum.h>
 
@@ -1958,14 +1959,23 @@ void pc_gx_tlut_set_native_le(unsigned int idx) {
     if (idx < 16) g_gx.tlut[idx].is_be = 0;
 }
 
-/* Binding a texture to a TEV stage. The decode + VRAM upload is the M2
- * deliverable: DC wants twiddled ARGB1555/4444/RGB565, native 4/8-bit paletted
- * for CI4/CI8 (a VRAM win), and offline-VQ for the big ones. The decoders in
- * pc_gx_texture.c survive; only the OUTPUT stage changes. */
+/* Binding a texture to a TEV stage. The decode + VRAM upload lives in
+ * dc_pvr_texture.c: twiddled ARGB1555/4444/RGB565 in the 8 MB of VRAM, decoded
+ * with pc_gx_texture.c's tiling logic unchanged.
+ *
+ * RE-UPLOAD AFTER EVICTION. Texture VRAM is a bounded LRU cache, so a handle
+ * stored in a GXTexObj can go stale while the object itself lives on for the
+ * rest of the run. The check below is what keeps that from being permanent:
+ * without it, the first eviction of a texture leaves its GXTexObj untextured
+ * FOREVER, because the upload path only fires on a zero handle. Clearing the
+ * stale handle here sends it back through the uploader on the next bind. */
 void GXLoadTexObj(void* obj, u32 id) {
     u32* o;
     if (id >= 8) return;
     o = (u32*)obj;
+
+    if (o[TEXOBJ_BACKEND_TEX] && !dc_pvr_tex_get(o[TEXOBJ_BACKEND_TEX]))
+        o[TEXOBJ_BACKEND_TEX] = 0;
 
     if (dc_gx_state_dedup &&
         g_gx.tex_handle[id] == o[TEXOBJ_BACKEND_TEX] &&
@@ -2001,65 +2011,17 @@ void GXLoadTexObj(void* obj, u32 id) {
 /* ==========================================================================
  * ============================ BACKEND SEAM ================================
  * ==========================================================================
- * Everything below this line is a placeholder. The M2 (GLdc) and M4 (direct
- * KOS PVR) renderers replace these six functions and nothing else in dc/.
+ * The seam moved out of this file on the M2 pass. The seven backend functions
+ * now live in:
  *
- * Deliberately NOT attempted in this pass:
- *   - TEV -> PVR fixed-function mapping (needs tev_map.md, M2)
- *   - OP/PT/TR list classification from alpha compare + blend mode
- *   - SH-4 vertex transform + lighting (no hardware T&L)
- *   - texture twiddling / VQ / paletted upload into the 8 MB VRAM
+ *   dc/src/dc_pvr.c          init / frame / SH-4 T&L / near clip / submit
+ *   dc/src/dc_pvr_texture.c  GC texture decode -> twiddled 16-bit VRAM
+ *
+ * Nothing above this line changed to make that happen — the accumulator, the
+ * state machine, the dedup and the whole-batch cull are the same code that ran
+ * against the NONE backend. Building with -DDC_PVR_BACKEND=0 restores the old
+ * do-nothing behaviour for bisecting.
  */
-static int s_backend_frames = 0;
-
-void dc_gx_backend_init(void) {
-    DC_LOGE("[DC/GX] backend: NONE (stub). Geometry is accumulated, culled and "
-            "counted, but nothing is drawn. M2 = GLdc stage A.\n");
-}
-
-void dc_gx_backend_shutdown(void) { }
-
-void dc_gx_backend_frame_begin(void) {
-    /* Real version: pvr_wait_ready(); pvr_scene_begin(); then a
-     * pvr_list_begin/finish pair per OP/PT/TR list. */
-    DC_UNIMPLEMENTED_NOTE("pvr_wait_ready + pvr_scene_begin");
-    s_backend_frames++;
-}
-
-void dc_gx_backend_frame_end(void) {
-    /* Real version: pvr_scene_finish(). */
-    DC_UNIMPLEMENTED_NOTE("pvr_scene_finish");
-}
-
-void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
-    (void)prim; (void)verts; (void)count;
-    DC_UNIMPLEMENTED_NOTE("PVR submission: classify OP/PT/TR from alpha-compare "
-                          "+ blend mode, SH-4 T&L, store-queue vertex emit");
-}
-
-void dc_gx_backend_set_viewport(int x, int y, int w, int h, float nearz, float farz) {
-    (void)x; (void)y; (void)w; (void)h; (void)nearz; (void)farz;
-    DC_UNIMPLEMENTED_NOTE("PVR has no viewport register: fold into the vertex "
-                          "transform and use the user clip plane for sub-rects");
-}
-
-void dc_gx_backend_set_scissor(int x, int y, int w, int h) {
-    (void)x; (void)y; (void)w; (void)h;
-    DC_UNIMPLEMENTED_NOTE("PVR user clipping is per-tile (PVR_USERCLIP_*), "
-                          "32-pixel granular");
-}
-
-unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fmt,
-                                          int ci_fmt, const void* tlut,
-                                          int tlut_fmt, int tlut_count) {
-    (void)data; (void)w; (void)h; (void)fmt;
-    (void)ci_fmt; (void)tlut; (void)tlut_fmt; (void)tlut_count;
-    DC_UNIMPLEMENTED_NOTE("texture decode -> twiddled 16-bit / native paletted / "
-                          "VQ into VRAM (decoders port from pc_gx_texture.c)");
-    return 0;
-}
-
-void dc_gx_backend_texture_release(unsigned int handle) { (void)handle; }
 
 /* Kept so anything that grabbed the PC entry point still links. */
 void pc_gx_blit_to_screen(void) { }

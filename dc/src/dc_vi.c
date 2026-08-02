@@ -8,6 +8,7 @@
  * i.e. BEFORE the game loop — so this path must be live very early in boot.
  */
 #include "dc_platform.h"
+#include "dc_pvr.h"     /* dc_pvr_report(): the renderer half of the PERF line */
 
 #define VI_TVMODE_NTSC_INT    0
 #define VI_TVMODE_NTSC_DS     1
@@ -190,11 +191,23 @@ void VIWaitForRetrace(void) {
                         (double)dc_gx_flush_time_us / 1000.0,
                         (double)dc_gx_texload_time_us / 1000.0);
             }
+            /* Paired with [PERF] on purpose: without a renderer census next
+             * to the draw-call count, a black screen cannot be attributed
+             * between "nothing submitted" and "submitted and discarded". */
+            dc_pvr_report();
             fps_start = now;
             fps_count = 0;
             logic_snap = s_logic_tick_count;
         }
     }
+
+#if defined(DC_FB_PROBE) && DC_FB_PROBE > 0
+    /* Guest-side screenshot. Placed AFTER the present and BEFORE the next
+     * frame opens, so the front buffer is the finished frame and not a
+     * half-built one. */
+    if ((pc_frame_counter % (DC_FB_PROBE)) == 0)
+        dc_pvr_fb_probe();
+#endif
 
     frame_start_us = dc_time_us();
 

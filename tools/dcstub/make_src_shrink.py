@@ -8,7 +8,8 @@ The image is ~8.8 MB over the 16 MB inequality and `.bss` is where the budget
 has to come from.  A handful of numeric literals in the vendored decomp size
 buffers that this port either never writes (dead code paths) or over-allocates
 by a wide margin.  Rewriting those literals recovers 1,175,776 B with no
-codegen change of any kind.
+codegen change of any kind.  One later rule (S6) does the same job on the
+image-span side: it deletes a dead .rodata string pool.
 
 WHY A REWRITER AND NOT AN EDIT
 ------------------------------
@@ -63,6 +64,17 @@ S4  audiomemory 0x90000->0x76000                                -106,496
     acmdBuf 0x70000 = 481,152 B.  0x76000 = 483,328 leaves 2,176 B of margin.
     DO NOT GO FURTHER: `Nas_WaveDmaNew` (`internal/system.c:431`) silently
     `break`s on heap exhaustion and drops voices with no error.
+
+S6  s_assets[] name strings DELETED                             -598,424
+    `pc/src/pc_assets.c` (kb/ram-plan.md P6).  This one is .rodata, not .bss.
+    The 14,495 "assets/<name>.bin" literals (540,668 B once 4-aligned) and the
+    `const char* path` slot that points at them (14,495 x 4 = 57,980 B) are
+    both removed; the table's five live fields are untouched.  The strings had
+    exactly one consumer — pc_load_asset()'s `.bin` fopen fallback — and that
+    fallback is unreachable on Dreamcast.  Full argument at the rule.
+    NOTE: kb/levers.md L3 and kb/ram-plan.md P6 say -821,569.  MEASURED WRONG
+    by 223,145 B; 821,569 was pc_assets.c's whole .rodata contribution, which
+    includes the 347,880 B s_assets table that is live and stays.
 
 S5  sys_stacks 16,384->48                                        -16,336
     `include/sys_stacks.h`.  `osCreateThread2` on DC (`dc/src/dc_os.c:250`)
@@ -119,8 +131,10 @@ def ASSERT(tag, expr):
 #                     for every consumer listed below; see the module docstring
 #                     of dc/Makefile's DC_SRC_SHRINK block.
 #
-# `replacement` is passed to re.sub with count=1 per match, so backreferences
-# work; it is applied with re.MULTILINE.
+# `replacement` is applied with re.MULTILINE and is used LITERALLY — it is fed
+# to re.sub through a lambda, so `\1` and friends are NOT expanded.  When a rule
+# needs the matched text, pass a CALLABLE instead: it receives the match object
+# and returns the replacement string (see the S6 table rule).
 
 MARK = "/* DC_SRC_SHRINK */"
 
@@ -277,6 +291,115 @@ RULES = [
         (1, r"^#define PADMGR_STACK_SIZE 0x1000$", "#define PADMGR_STACK_SIZE 0x10"),
         (1, r"^#define GRAPH_STACK_SIZE 0x2000$",  "#define GRAPH_STACK_SIZE 0x10"),
     ]),
+
+    # -- S6: s_assets[] name strings (kb/ram-plan.md P6) ----------------------
+    # SWAP.  pc/src/pc_assets.c is compiled directly (dc/Makefile PC_REUSE_C),
+    # so -I cannot reach it, and both the PCAsset typedef and s_assets are
+    # file-local (`static const`) — there is no second TU that could disagree
+    # about the layout, so no ODR split is possible.  The assert on
+    # sizeof(PCAsset) pins the struct the row rewrite was derived from.
+    #
+    # WHY THE STRINGS ARE DEAD ON DREAMCAST — verified, not assumed:
+    #   * s_assets[i].path has exactly ONE consumer: it is handed to
+    #     pc_load_asset() as `bin_path`, which uses it for (a) the `.bin`
+    #     fallback `fopen(bin_path)` and (b) the "ASSET MISSING" message.
+    #     Nothing indexes, hashes or compares the strings.
+    #   * The fallback is unreachable on DC.  pc_disc_is_open()
+    #     (dc/src/dc_dvd.c:279) returns 1 unconditionally, and _extract_dol /
+    #     _extract_rel read /cd/main.dol and /cd/foresta.rel, so rom_mode is the
+    #     only mode this port has.  All 14,495 rows carry rom_src 0 (DOL) or 1
+    #     (REL) — NOT ONE is SRC_NONE — so `bin_path` is only ever reached when
+    #     the ROM pointer itself is NULL, i.e. when the disc has no main.dol and
+    #     the whole table has already failed.  Even then the fopen is dead: the
+    #     paths are relative ("assets/<name>.bin"), KOS's cwd is "/", and
+    #     nothing stages an /assets tree onto the disc (dc/stage-disc.sh
+    #     flattens everything into the root that dc_dvd.c opens as /cd/<name>).
+    #
+    # So the rewrite deletes the field outright rather than replacing it with an
+    # index into a disc-side name table: there is nothing left to look up.  The
+    # table index takes over as the identifier in the diagnostic, and the
+    # vendored pc/src/pc_assets.c is the index -> name map for anyone debugging.
+    #
+    # MEASURED with sh-elf-size -A on the object, before -> after:
+    #   .rodata (the string pool)  540,973 -> 305      -540,668
+    #   .rodata.s_assets           347,880 -> 289,900   -57,980  (14,495 x 4 B)
+    #   .text.pc_load_asset_dcshrink     0 -> 236           +236
+    #
+    # MEASURED on the LINKED IMAGE, two clean full rebuilds of all 3917 TUs
+    # differing only in whether this rule ran (2026-08-02):
+    #   .rodata   1,057,364 -> 458,716    -598,648
+    #   .text     5,283,456 -> 5,283,680      +224
+    #   .data / .bss                       unchanged
+    #   image     19,824,552 -> 19,226,128 -598,424
+    #   span      0x12e81c0 -> 0x1255f60   -598,112
+    #   strings matching "^assets/" in the ELF: 16,365 -> 1,870 (exactly the
+    #   14,495 table rows; the 1,870 left are the per-TU _pc_load_src_* call
+    #   sites in src/, a different and much smaller pool).
+    #
+    # kb/levers.md L3 and kb/ram-plan.md P6 both claim -821,569 B.  That is
+    # WRONG by 223,145 B: 821,569 was derived from pc_assets.c's TOTAL .rodata
+    # contribution (888,853 B), which is the string pool PLUS the 347,880 B
+    # s_assets table itself — and the table is live and stays.
+    ("pc/src/pc_assets.c", "swap", [
+        # 1. Drop `path` from the struct, and add the indexed loader that
+        #    replaces the one call site that used it.
+        (1,
+         r"^typedef struct \{ const char\* path; void\* dest; unsigned int size; "
+         r"unsigned int rom_off; int rom_src; int swap; \} PCAsset;$",
+         "/* " + "-" * 68 + "\n"
+         " * DC_SRC_SHRINK S6 (kb/ram-plan.md P6): the `path` field and its\n"
+         " * 14,495 \"assets/<name>.bin\" string literals are DELETED — 540,668 B\n"
+         " * of .rodata string pool plus 57,980 B of pointer slots.\n"
+         " *\n"
+         " * They were only ever used by pc_load_asset()'s .bin fallback, which\n"
+         " * cannot be reached on Dreamcast: every row is rom_src DOL or REL,\n"
+         " * the ROM-direct path is the only mode dc/src/dc_dvd.c implements,\n"
+         " * and the relative \"assets/...\" paths resolve against KOS's \"/\" cwd\n"
+         " * where nothing is staged.  The table INDEX is the identifier now;\n"
+         " * map it back through the vendored pc/src/pc_assets.c.\n"
+         " * " + "-" * 68 + " */\n"
+         "typedef struct { void* dest; unsigned int size; unsigned int rom_off;"
+         " int rom_src; int swap; } PCAsset;\n"
+         + ASSERT("pc_assets_row", "sizeof(PCAsset) == 5 * sizeof(int)") + "\n"
+         "\n"
+         "/* The table's loader.  Same semantics as pc_load_asset() minus the\n"
+         " * dead fopen() fallback; the diagnostic names the row by index and\n"
+         " * stays loud, because a silent miss here is a garbage asset. */\n"
+         "static void pc_load_asset_dcshrink(int idx, void* dest, "
+         "unsigned int size,\n"
+         "                                   unsigned int rom_off, int rom_src,\n"
+         "                                   int swap_type) {\n"
+         "    u8* rom = (rom_src == SRC_REL) ? g_rel_data\n"
+         "            : (rom_src == SRC_DOL) ? g_dol_data\n"
+         "            : (u8*)NULL;\n"
+         "    if (rom == NULL) {\n"
+         "        fprintf(stderr, \"[PC] ASSET MISSING: s_assets[%d] "
+         "(rom_src=%d off=0x%X size=%u)\\n\",\n"
+         "                idx, rom_src, rom_off, size);\n"
+         "        return;\n"
+         "    }\n"
+         "    memcpy(dest, rom + rom_off, size);\n"
+         "    do_swap(dest, size, swap_type);\n"
+         "}"),
+
+        # 2. The 14,495 rows.  Anchored on the exact generated shape:
+        #    four spaces, '{', a double-quoted path, ', '.  MEASURED: this
+        #    matches 14,495 lines in the whole file and nothing else, so the
+        #    count below is the file's own checksum.  The remaining five
+        #    initialisers keep their positions in the shortened struct.
+        (14495, r'^    \{"[^"]*", ', lambda m: "    {"),
+
+        # 3. The one consumer of .path.
+        (1,
+         r"^        pc_load_asset\(s_assets\[i\]\.path, s_assets\[i\]\.dest, "
+         r"s_assets\[i\]\.size,\n"
+         r"                      s_assets\[i\]\.rom_off, s_assets\[i\]\.rom_src, "
+         r"s_assets\[i\]\.swap\);$",
+         "        pc_load_asset_dcshrink(i, s_assets[i].dest, s_assets[i].size,\n"
+         "                               s_assets[i].rom_off, "
+         "s_assets[i].rom_src,\n"
+         "                               s_assets[i].swap); " + MARK),
+    ]),
 ]
 
 # Expected .bss delta, from `sh-elf-nm -S` on the clean non-stub ELF. Printed so
@@ -296,6 +419,15 @@ EXPECTED = [
     ("irqmgrStack",           4096,    16),
 ]
 
+# S6 is .rodata + a hair of .text, not .bss, so it is reported separately.
+# Measured with sh-elf-size -A on pc_assets.c.o built with the Makefile's exact
+# PC_REUSE flag set, before and after.
+EXPECTED_RODATA = [
+    (".rodata (s_assets path string pool)", 540973,    305),
+    (".rodata.s_assets (the 14,495 rows)",  347880, 289900),
+]
+EXPECTED_TEXT_S6 = 224        # pc_load_asset_dcshrink, as it lands in the linked .text
+
 
 class RuleError(Exception):
     pass
@@ -314,7 +446,8 @@ def apply_rules(text, rel, rules):
                 "  build would succeed, save nothing, and nobody would notice.\n"
                 "  The vendored source has drifted — re-derive the rule, do not\n"
                 "  relax the anchor." % (rel, got, want, pattern))
-        text = rx.sub(lambda m: repl, text, count=want)
+        fn = repl if callable(repl) else (lambda m: repl)
+        text = rx.sub(fn, text, count=want)
     return text
 
 
@@ -395,6 +528,12 @@ def main():
             print("  written        : {}  (unchanged {})".format(written, unchanged))
         print("  expected .bss  : {:,} -> {:,}  ({:+,} B)".format(
             before, after, after - before))
+        rb = sum(b for _, b, _ in EXPECTED_RODATA)
+        ra = sum(a for _, _, a in EXPECTED_RODATA)
+        print("  expected .rodata: {:,} -> {:,}  ({:+,} B)   [S6, pc_assets.c]".format(
+            rb, ra, ra - rb))
+        print("  expected .text : {:+,} B   [S6's indexed loader]".format(
+            EXPECTED_TEXT_S6))
         print("  (dc/Makefile adds -16,384 more by dropping KOS's dcache")
         print("   walk buffer out of dc/src/dc_os.c — see DC_OS_TU_OPT there.)")
 

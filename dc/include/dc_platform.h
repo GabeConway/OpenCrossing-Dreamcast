@@ -104,9 +104,45 @@ extern "C" {
  * DC (JUTXfb.cpp / jsyswrap.cpp, both #if TARGET_DC), so the arena is cut by
  * exactly what they used to consume: __osMalloc's usable pool is UNCHANGED at
  * ~2.6 MB while 1,294,496 B of real RAM comes back. 32-byte aligned.
- * Bucket 6's true high-water mark is still unmeasured — see
- * kb/research-budget-premises.md 2.4 for the recipe. */
+ *
+ * ⚠️ THIS ARENA IS NOT THE ONLY HEAP, AND GROWING IT CAN MAKE THINGS WORSE.
+ * There are TWO pools and they are not independent:
+ *
+ *   1. this arena  — __osMalloc / zelda_malloc / JKRHeap, carved ONCE at boot
+ *   2. KOS's sbrk  — plain libc malloc(), which is what graph_proc's
+ *                    `malloc(dlftbl->alloc_size)` and the scene loaders use
+ *
+ * Both come out of the SAME region: everything between the end of .bss and
+ * `_arch_mem_top` (0x8d000000 on a stock 16 MB machine). This arena is carved
+ * from that region with memalign, so every byte added here is a byte libc can
+ * never hand out.
+ *
+ * MEASURED 2026-08-02, first frame-running boot. With arena = 2,705,504 the
+ * title-demo scene (scene 33) reached play_init and died with
+ *
+ *     Out of memory. Requested sbrk_base 8d0ee000, was 8cec5000, diff 2265088
+ *
+ * That message is KOS's sbrk, NOT this arena — note `8d0ee000` is past the top
+ * of physical RAM. libc had 1,290,240 B of headroom left and the scene asked
+ * for 2,265,088, so the shortfall is ~975 KB of LIBC heap.
+ *
+ * Raising the arena to 4,980,736 to "fix" it made the run get LESS far — it
+ * stopped at trademark_init instead of reaching play_main — because the extra
+ * 2.27 MB came straight out of libc's share. Read that as the rule: when the
+ * sbrk OOM fires, the lever is to SHRINK this number, or the ARAM window, or
+ * the image, and never to grow this.
+ *
+ * Overridable so a bring-up image can be tuned without the full build
+ * inheriting the value: -DDC_MAIN_MEMORY_SIZE=<bytes>, plumbed as
+ * DC_ARENA_BYTES in dc/Makefile. DC_BUDGET_JKRHEAP tracks it automatically
+ * (dc_os.c static-asserts they are equal).
+ *
+ * Bucket 6's own high-water mark is STILL unmeasured — no arena-side OOM has
+ * ever been observed, which is weak evidence that 2,705,504 is adequate, not
+ * proof. kb/research-budget-premises.md §2.4 still has the real recipe. */
+#ifndef DC_MAIN_MEMORY_SIZE
 #define DC_MAIN_MEMORY_SIZE     2705504u
+#endif
 #define DC_SYSTEM_HEAP_SIZE     (DC_MAIN_MEMORY_SIZE - DC_ARENA_LOW_RESERVE)
 
 /* ARAM is an ADDRESS SPACE, not an allocation. dc_aram.c never reserves

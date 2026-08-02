@@ -20,6 +20,52 @@ for those see `kb/closed.md`.
 - **`char` is SIGNED by default** on this toolchain build, so `-fsigned-char`
   is belt-and-braces, not load-bearing.
 
+## `DC_ASSET_STUB` — full-size passes over `[1]`-sized destinations
+
+- **The stub build corrupts `.bss` unless every full-size pass is neutralised,
+  not just `pc_assets_init()`.** Shrinking a destination array does not shrink
+  the loops that write it: their bounds are compiled-in constants. `boot.c`
+  runs four endian-fixup passes immediately before the `HotStartEntry` loop and
+  all four overrun —
+  `pc_bswap_house_pos_list()` writes 0x978 B into a `u8[1]` (2,423 B over),
+  `pc_bswap_u8_tlut_palettes()` 14 × 32 B into `u8[1]` (434 B),
+  `pc_bswap_raw_display_lists()` 112 B into three `u8[1]` (109 B), and
+  `mFM_InitActableEndian()` walks six actables looking for a sentinel that no
+  longer exists, so it is unbounded.
+  **Symptom, measured:** `boot.c`'s own `HotStartEntry` came back as
+  `0x64b3418c`, the game jumped to it and died on an illegal instruction at
+  `PC=65000004`. The victim symbol is ~3,000 B from the arrays being swapped
+  and **moves whenever `.bss` moves**, so the same bug presents as a silent
+  hang in one build and a wild jump in the next. Before this was found it read
+  as "the renderer broke the boot".
+  Fixed by the `NEUTRALISE` table in `tools/dcstub/make_stub_data.py`, which
+  rewrites the four call sites under `#ifndef DC_ASSET_STUB` with an anchored,
+  hard-erroring match count. **Any new full-size pass over asset arrays needs
+  an entry there.**
+- Corollary for debugging: in a `DC_ASSET_STUB` image, a crash whose address
+  changes when unrelated `.bss` changes is an overrun, not a logic bug. Look
+  for a loop bound that survived the stubbing.
+
+## Per-TU make rules vs the scratch trees
+
+- **A `$(OBJDIR)/src/…` per-TU rule stops firing the moment a rewriter emits
+  that source.** `stubify`/`shrinkify` change the object path, and make just
+  skips the rule — no warning, no error. The two `-Dmain=` renames are the
+  dangerous instance, and they are now written as
+  `$(OBJDIR)/$(call shrinkify,$(call stubify,src/main.c)).o`.
+  **What it looked like when it bit:** `boot.c` moved into the stub tree, lost
+  `-Dmain=boot_main`, and the image ended up with two `main()`s.
+  `-Wl,--allow-multiple-definition` (required for the 1,367 multiply-defined
+  data symbols) swallowed the clash, the linker kept the wrong `main`, and
+  `--gc-sections` then deleted everything the real entry chain reached: `.text`
+  5,289,364 → 851,684, and `boot_main`/`ac_entry`/`graph_proc`/`mainproc` were
+  simply absent from the ELF. **It linked, produced a CDI, and exited 0.**
+  Cheap detector, worth running after any Makefile or rewriter change:
+  `sh-elf-nm build/AnimalCrossing.elf | grep -c ' _graph_proc$'` must be 1.
+  Note the **leading underscore** — this toolchain prefixes every C symbol, so
+  `grep ' graph_proc$'` matches nothing even in a healthy ELF and reads as the
+  same failure.
+
 ## Harness / emulator
 
 - **Guest `scif_flush()` permanently kills the Flycast console. Never call it.**

@@ -34,8 +34,18 @@
  *             been settled is that 1,294,496 B of it was dead weight (XFB +
  *             GX FIFO, both now killed at source under TARGET_DC), so this
  *             cut leaves __osMalloc's usable pool exactly where it was.
- *             MUST equal DC_MAIN_MEMORY_SIZE — dc_os.c static-asserts it.  */
-#define DC_BUDGET_JKRHEAP          2705504u
+ *             MUST equal DC_MAIN_MEMORY_SIZE — dc_os.c static-asserts it,
+ *             which is why this now DERIVES from it rather than repeating the
+ *             literal: -DDC_MAIN_MEMORY_SIZE alone must not be able to break
+ *             the build.
+ *             ⚠️ This bucket COMPETES with KOS's sbrk (plain libc malloc):
+ *             both are carved out of the region between .bss and
+ *             _arch_mem_top. Growing bucket 6 shrinks libc's share one-for-
+ *             one, and the title-demo OOM measured on 2026-08-02 was a LIBC
+ *             shortfall (~975 KB), not an arena shortfall. Read
+ *             dc_platform.h before changing this number in either direction. */
+#include "dc_platform.h"
+#define DC_BUDGET_JKRHEAP          DC_MAIN_MEMORY_SIZE
 /* Bucket 7  — asset residency pool (replaces 8.77 MB of static BSS)       */
 #define DC_BUDGET_ASSET_POOL       1500000u
 /* Bucket 8  — graph-ARAM (RARC) window.  [MEASURED-FLOOR] see dc_platform.h
@@ -45,8 +55,9 @@
  * the boot archive forest_1st.arc alone is 851,744 B. dc_aram.c now anchors
  * the window on first use; this is the floor that lets the anchor hold a whole
  * archive. Keep it equal to DC_ARAM_WINDOW_SIZE — ARInit allocates from this
- * bucket and a mismatch is a boot-time MEMLEDGER FAIL, not a warning. */
-#define DC_BUDGET_ARAM_GRAPH        1048576u
+ * bucket and a mismatch is a boot-time MEMLEDGER FAIL, not a warning — so it
+ * DERIVES from it, for the same reason bucket 6 does. */
+#define DC_BUDGET_ARAM_GRAPH        DC_ARAM_WINDOW_SIZE
 /* Buckets 9/10/11 — RETIRED, and they were never real.
  *
  * All three were phantom reservations: nothing ever called

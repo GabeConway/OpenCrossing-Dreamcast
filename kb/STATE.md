@@ -12,21 +12,114 @@ knowledge lives in three companions, read on demand:
 
 `CLAUDE.md` is the index to everything else.
 
+## ⭐ 2026-08-02 — THE TITLE SCREEN RENDERS
+
+**The port draws pixels.** A `DC_ASSET_STUB` image boots in Flycast, runs the
+game loop at **29.3 FPS / 98% speed**, reaches the title-demo scene, and
+renders the Animal Crossing title overlay: **"PRESS START" and the copyright
+line are on screen**, confirmed by eye. The PVR backend is submitting ~558,000
+triangles per run with zero drops and zero unsupported primitives.
+
+What is black behind the logo is **expected, not a bug**: only the ten
+`src/data/model/logo_*` / `log_win_*` TUs carry real asset bytes in this build
+(the `DC_STUB_KEEP` allowlist, 53,792 B). Every acre model behind them is still
+a `[1]`-sized stub, so the town has no geometry to draw. Un-stubbing it is the
+S4 loader, not a renderer fix.
+
+The build that does it:
+
+```bash
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+  DC_ARAM_WINDOW=851968 DC_ARENA_BYTES=1900000 \
+  bash dc/build-dc.sh
+bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 180
+```
+
+Four things had to be true at once, and each was a real defect:
+
+1. **The renderer existed at all.** `dc/src/dc_pvr.c` (init, frame, SH-4 T&L,
+   near-plane clip, submit) + `dc/src/dc_pvr_texture.c` (GC formats → twiddled
+   16-bit VRAM). One PVR list, `PVR_LIST_TR_POLY` with **autosort disabled**,
+   which turns it into the submission-ordered Z-buffered rasteriser the game
+   was written against — and costs **zero bytes of main RAM**, unlike buffering
+   three lists. `-DDC_PVR_BACKEND=0` restores the old NONE backend.
+2. **The stub build was spraying `.bss`** — four full-size endian passes in
+   `boot.c` writing into `[1]` arrays, which overwrote `HotStartEntry` and
+   jumped to `0x65000004`. See `kb/traps.md`.
+3. **A per-TU `-Dmain=` rule stopped firing** when a rewriter moved its source,
+   producing two `main()`s, a silently-wrong link, and `--gc-sections` deleting
+   5/6ths of the game. `.text` 5,289,364 → 851,684 and it still built a CDI.
+   See `kb/traps.md`.
+4. **The heap split was wrong.** See the next section — this is the RAM result.
+
+## ⚠️ THE HEAP IS TWO POOLS THAT COMPETE, AND THIS WAS BEING GOT BACKWARDS
+
+Everything between the end of `.bss` and `_arch_mem_top` (`0x8d000000`) is
+shared by **two** allocators:
+
+| pool | who uses it |
+|---|---|
+| the arena (`DC_MAIN_MEMORY_SIZE`, bucket 6) | `__osMalloc` / `zelda_malloc` / JKRHeap |
+| KOS `sbrk` → libc `malloc()` | `graph_proc`'s `malloc(alloc_size)`, the scene loaders |
+
+The arena is carved out of that region with `memalign`, so **every byte given to
+the arena is a byte libc can never hand out.**
+
+Measured, this session:
+
+- With arena = 2,705,504 the title-demo scene died with
+  `Out of memory. Requested sbrk_base 8d0ee000, was 8cec5000, diff 2265088`.
+  That is **KOS's sbrk**, not the arena — `8d0ee000` is past the top of RAM.
+  libc had 1,290,240 B left and wanted 2,265,088.
+- Raising the arena to 4,980,736 to "fix" it made the run get **less** far
+  (stopped at `trademark_init` instead of reaching `play_main`), because the
+  extra 2.27 MB came straight out of libc's share.
+- **Lowering** the arena to 1,900,000 and the ARAM window to 851,968 removed
+  the OOM entirely and took submitted geometry from **46 triangles to 557,971**.
+
+**Rule: when the sbrk OOM fires, shrink the arena, the ARAM window, or the
+image — never grow the arena.** Bucket 6's own high-water is still unmeasured;
+no arena-side OOM has ever been observed, which is weak evidence that 2,705,504
+is generous, not proof. New knobs: `DC_ARENA_BYTES`, `DC_ARAM_WINDOW`,
+`DC_DIAG`, `DC_FB_PROBE` (all in `dc/Makefile`, forwarded by `dc/build-dc.sh`).
+
+⚠️ **851,968 is a floor for the ARAM window, not a preference:**
+`forest_1st.arc` arrives as one 851,744 B transfer, and a window smaller than
+that drops the whole archive on the floor.
+
+## ⚠️ The framebuffer probe does not work in this harness — do not trust a black FBHASH
+
+`dc_pvr_fb_probe()` emits `MARK:FRAME` / `FBHASH` / `FBTHUMB` (the protocol
+`harness/dc/screenshot.sh` already parses), enabled with `DC_FB_PROBE=<frames>`.
+**It reported a constant all-zero frame at the same moment a human watching
+Flycast could see the copyright line render.** Tried against both
+`pvr_get_front_buffer()` and `vram_s`; both read zero. Flycast has no headless
+mode (`harness/dc/_runner.py`), so what the harness runs and what the probe can
+see are not the same surface. Until that is understood, **the renderer census
+(`[DC/PVR] frames/batches/tris`) is the trustworthy in-harness signal** and the
+framebuffer hash is not. Do not re-run the "nothing is drawn" investigation on
+the strength of a zero hash — that already cost a cycle.
+
 ## Headline
 
-**M0 and M1 are met. The port RUNS. M2 is still blocked on RAM, but the gap is
-down from 8,810,740 to 6,999,924 B and the platform layer is no longer a
-suspect.**
+**M0 and M1 are met. M2 has its first pixels — the title screen renders in the
+stub build (see the section above). M2 is NOT complete: the full image still
+does not fit, and only 53,792 B of real assets exist in any running image.**
 
 - **3917 / 3917 translation units compile and link for sh-elf**, zero
   exclusions. `src/` carries only **four** small `#if defined(TARGET_DC)`
   branches; every *compat* fix lives in `dc/include/dc_prelude.h` as a
   force-include. That is the whole licence to touch `src/`.
 - **The harness works and is verified against real CDIs**, not asserted.
-- **A stubbed image boots and reaches `graph_proc`** — the game's render loop —
-  with both archives mounted off a real disc. See "How far it gets" below.
-- **The full image still does not fit**, and that is now the only thing between
-  here and a playable build.
+- **A stubbed image boots, runs the game loop at 29.3 FPS, and draws the title
+  overlay** through a real PowerVR backend, with both archives mounted off a
+  real disc.
+- **The full image still does not fit.** That is the only thing between here
+  and a playable build, and it is now the ONLY thing — the renderer, the
+  platform layer and the boot path are all observed working.
+- P6 landed and the kb figure was wrong: `s_assets[]` strings are
+  **−598,424 B**, not −821,569. `.rodata` 1,057,364 → 458,716, verified by
+  two clean full rebuilds and a byte-identical `DC_SRC_SHRINK=0` revert.
 
 ## The one inequality
 
@@ -41,6 +134,15 @@ suspect.**
 Sections: text 6,320,700 / data 2,638,852 / bss 10,669,268. Measured
 2026-08-01 after S3 landed, from a **clean full rebuild** of all 3917 TUs.
 Before S3: text 6,320,024 / data 2,638,852 / bss 12,415,796, span 21,375,124.
+
+⚠️ **Two things have moved this since, in opposite directions, and the block
+above has NOT been re-derived** — do not quote 6,999,924 without re-measuring:
+S3's `s_assets` rule landed **−598,112 of span** (2026-08-02, below), while the
+PVR backend arriving in `dc/src` grew it. A clean rebuild on 2026-08-02 *without*
+the `s_assets` rule measured text 6,348,304 / data 2,638,872 / bss 10,837,376,
+span **19,824,576** (+260,268 on the line above); *with* it, text 5,749,880 /
+data 2,638,872 / bss 10,837,376, span **19,226,464**. `sh-elf-size`'s "text"
+column carries `.rodata`, which is where this saving lives.
 
 ⚠️ **The ARAM window grew 512,000 → 1,048,576 on 2026-08-01, and that is a
 debt, not a decision.** The window was anchored at ARAM offset 0 while every
@@ -210,6 +312,65 @@ bash harness/dc/crash.sh <cdi>   # symbolise a fault
 point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`. Details:
 `BUILDING-DC.md`. Gotchas: `kb/traps.md`.
 
+## ⭐ NEXT ACTIONS (2026-08-02) — ranked, do these in order
+
+The old S1→S4 plan below is still the RAM strategy and is not superseded. These
+are the concrete next moves now that pixels exist.
+
+### N1. Get the town to draw — extend the keep list scene by scene. [cheap, high signal]
+
+The title screen works because ten TUs carry real bytes. The obvious next
+experiment is to add the title-demo field's assets to `DC_STUB_KEEP` and see
+how far the image gets before it stops fitting. It will not all fit —
+`src/data/field/bg/acre` alone is 5.68 MB — but the *shape* of the failure is
+the measurement S4's pool sizing needs, and it is a one-line change per
+attempt. Start with the acres `src/data/scene/title_demo.c` actually
+references, not all 268.
+
+### N2. Fix the framebuffer probe, or replace it. [blocks all unattended visual work]
+
+Right now nobody can verify a rendering change without a human watching
+Flycast, which is both slow and unreliable (the emulator sometimes stalls on a
+black window). `DC_FB_PROBE` exists and speaks `harness/dc/screenshot.sh`'s
+protocol but reads all-zero. Find out where Flycast is actually scanning out
+from — try `pvr_get_back_buffer()`, the `PVR_FB_R_SOF1` register, and hashing
+a wide VRAM sweep — or add a `pvr_scene_begin_txr()` render-to-texture path
+whose destination the guest definitely owns. Until this works, every visual
+claim in this file rests on one person's eyes.
+
+### N3. Correct the TEV mapping. [the logo renders; is it renders *right*?]
+
+`dc_pvr.c` implements exactly one TEV configuration — modulate texture by
+rasterised colour — against the 101 in `kb/tev-map.md`. Konst-colour and
+multi-stage configs currently come out untinted. Now that something is on
+screen, this is measurable for the first time: instrument which of the 101
+configs the title screen and the field actually request, and implement by
+frequency rather than by enum order.
+
+### N4. Measure bucket 6 properly, now that the game runs. [the margin's biggest claimant]
+
+`kb/ram-plan.md` experiment 7 says "schedule it the moment S4 boots". The game
+boots and runs frames *now*, and the arena is a build knob
+(`DC_ARENA_BYTES`). Bisect it downward until `__osMalloc` itself fails — no
+arena-side OOM has ever been observed, so 2,705,504 may be far more than
+bucket 6 needs, and every byte recovered goes to libc, which is the pool that
+actually ran dry.
+
+### N5. Then S4 — the asset loader. [unchanged, still the critical path]
+
+Everything below still applies. Two things this session changes about it:
+the pool must be sized against the **libc** side of the split, not treated as
+a free-floating extent (see the two-pools section above); and the S3 remainder
+is smaller than billed — P6 measured −598,424 B, not −821,569.
+
+### Also worth knowing
+
+- `SendStart::Mesg Full Queue` spams the console ~1,000 times per run. It is
+  jaudio, it is not fatal, and it makes logs hard to read. Worth silencing.
+- The ARAM window still thrashes (`rebases=13` mounting `forest_2nd.arc`).
+  PLAN §3.1's disc-backed LRU is still owed and is now the thing standing
+  between the game and real archive content.
+
 ## Next actions — the agreed plan
 
 **User chose this sequence on 2026-08-01 (S1 → S4, in order).** Do not
@@ -305,7 +466,7 @@ Cost: small — a host-side hash pass over the generated tables gives the number
 without changing the build. Worth doing purely because the answer is cheap and
 currently unknown.
 
-### S3. Bank the independent savings. ✅ PARTLY DONE 2026-08-01 — 1,810,816 B banked.
+### S3. Bank the independent savings. ✅ PARTLY DONE — 2,409,240 B banked (2026-08-01 + 08-02).
 
 Was billed as "six measured, mutually independent moves, ~4.3 MB". **All three
 parts of that description were wrong** — the total is 2,928,267 B, the moves are
@@ -317,11 +478,20 @@ carries the re-costed table. Banked so far (commit `b0e009d`):
 | `tools/dcstub/make_src_shrink.py` | −1,159,392 | 7 literals, scratch-tree rewrite, `DC_SRC_SHRINK` |
 | `dc_gx` + `dc_os` | −278,796 | vertex 8192×40 → 2040×32; hand-rolled `ocbp` loop |
 | `pc_m_card` | −308,234 | delete a double buffer, retype, move to the arena |
+| `make_src_shrink.py` S6 (2026-08-02) | −598,424 **image, not `.bss`** | `s_assets[].path` + its 14,495 string literals deleted |
 
-Still unbanked from L3: **`s_assets[]` name strings, −821,569 B** — the single
-biggest remaining S3 item, and it is `.rodata`, not `.bss`. It needs
-`dcasset gentable` + a `pc/src` scratch-tree rewrite; the mechanism now exists
-(`DC_SRC_SHRINK`'s two swap modes) so it is no longer blocked.
+**`s_assets[]` name strings: ✅ BANKED 2026-08-02, −598,424 B of image**
+(`.rodata` −598,648, `.text` +224, span −598,112). `make_src_shrink.py` rule
+**S6** deletes the `const char* path` field and its 14,495 `"assets/….bin"`
+literals from `pc/src/pc_assets.c` via the existing scratch-tree swap; the
+five live fields stay. No `dcasset gentable` was needed — the strings' only
+consumer is a `.bin` `fopen` fallback that cannot be reached on DC.
+**The −821,569 B estimate was 223,145 B too high**: it counted the 347,880 B
+`s_assets[]` table, which is live, as string pool. See `kb/levers.md` L3
+"Correction 0". `DC_SRC_SHRINK=0` still reverts everything.
+
+Still unbanked from L3: the **`data_bgd` collision split, −236,544 B**
+(`kb/ram-plan.md` P7). That is all of S3 that is left.
 
 ### S4. Build the loader — `kb/levers.md` L1 + L2. ⭐ NOW THE CRITICAL PATH.
 

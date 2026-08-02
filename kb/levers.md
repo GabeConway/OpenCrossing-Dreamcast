@@ -172,6 +172,9 @@ Two rules from the pack author:
    ships that chunk raw with the `PRESWAPPED` bit clear.
 
 ## L3. The ranked remainder — RE-COSTED 2026-08-01. 2,928,267 B, not 4.3 MB.
+<!-- and re-costed again 2026-08-02: the s_assets row came in 223,145 B under
+     its estimate, so the true remainder is 2,705,122 B. See Correction 0. -->
+
 
 Six agents re-derived every row against the real ELF. **Every estimate in
 `kb/research-size-reduction.md` was wrong, most of them by a lot, and two of
@@ -180,7 +183,7 @@ column so nobody re-proposes them.
 
 | item | defensible | claimed | status |
 |---|---:|---:|---|
-| `s_assets[]` name strings | **−821,569** | −0.89 MB | **LIVE — biggest one left.** It is `.rodata`, and the fix is **deletion, not a disc index** |
+| `s_assets[]` name strings | ~~−821,569~~ → **−598,424** | −0.89 MB | ✅ **BANKED 2026-08-02** as `make_src_shrink.py` rule **S6**. Deletion, as predicted — but the byte figure was **overstated by 223,145 B**, see below |
 | actor overlay arenas | −422,192 | −0.46 MB | ✅ **BANKED** (A3). Dead, not "mutually exclusive" |
 | `pc_m_card` | −308,234 | −0.28 MB | ✅ **BANKED** (A3) |
 | `dc_gx` | −262,400 | −0.24 MB | ✅ **BANKED** (A3), over estimate |
@@ -189,9 +192,38 @@ column so nobody re-proposes them.
 | census: `prbuf` | −614,368 | — | ✅ **BANKED** (A3) |
 | census: `sys_stacks` + KOS `buffer.4` | −32,720 | — | ✅ **BANKED** (A3) |
 | census: jaudio `CALLSTACK`/`pc_task_buf` | ~~−58,368~~ | — | ❌ **REFUTED** — both are live. See A3 |
-| **banked so far** | **−1,746,528** | | measured, clean rebuild |
-| **still live in S3** | **−1,058,113** | | `s_assets` + the `data_bgd` split |
+| **banked so far** | **−2,344,952** | | measured, clean rebuild (1,746,528 + S6's 598,424) |
+| **still live in S3** | **−236,544** | | only the `data_bgd` split is left |
 | `.data` display lists → S4 pool | −901,300 | | **belongs inside S4, not S3** |
+
+### Correction 0 — the `s_assets[]` figure was 37% too big [MEASURED 2026-08-02]
+
+`−821,569` was derived from `pc_assets.c`'s **total** `.rodata` contribution
+(888,853 B, `kb/research-budget-premises.md` §3.6). That total is the name-string
+pool **plus the 347,880 B `s_assets[]` table itself** — and the table is live:
+its `dest`/`size`/`rom_off`/`rom_src`/`swap` fields are the entire asset load.
+Only the strings and the `const char* path` slot that points at them can go.
+
+Measured across two clean full rebuilds of all 3917 TUs that differ only in
+whether the rule ran:
+
+| | before | after | Δ |
+|---|---:|---:|---:|
+| `.rodata` | 1,057,364 | 458,716 | **−598,648** |
+| `.text` | 5,283,456 | 5,283,680 | +224 (the replacement loader) |
+| `.data` / `.bss` | — | — | 0 |
+| image (`sh-elf-size` dec) | 19,824,552 | 19,226,128 | **−598,424** |
+| image span | `0x12e81c0` | `0x1255f60` | **−598,112** |
+
+`"^assets/"` strings in the ELF: 16,365 → 1,870, i.e. exactly the 14,495 table
+rows. Two follow-ons this exposes:
+
+- The **1,870 survivors** are the per-TU `_pc_load_src_*` call sites in `src/`,
+  a separate ~75 KB pool needing a different (769-TU) mechanism. Small, and it
+  dies anyway when S4 replaces those loaders.
+- `s_assets[]` is now **289,900 B of pure `.rodata` table**. It is a disc-index
+  candidate in S4 (`kb/asset-pack.md` already carries the same five fields per
+  chunk), but only after the loader exists — not an S3 item.
 
 ### Three structural corrections — these change the plan, not just the numbers
 

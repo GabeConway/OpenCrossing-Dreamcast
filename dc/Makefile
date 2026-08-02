@@ -23,7 +23,8 @@
 # KNOBS (env or make VAR=...)
 #   DECOMP_OPT=-O0   optimization level for decomp game code (see below)
 #   DC_OPT=-O2       optimization level for dc/src platform code
-#   DC_SRC_SHRINK=1  .bss literal-shrink pass, DEFAULT ON (-1,159,392 B).
+#   DC_SRC_SHRINK=1  source-shrink pass, DEFAULT ON
+#                    (-1,159,392 B .bss, -598,648 B .rodata).
 #                    0 is a byte-identical revert. Needs the tree from
 #                    tools/dcstub/make_src_shrink.py; dc/build-dc.sh runs it.
 #   DC_ASSET_STUB=0  throwaway boot-bringup build with [1]-sized asset arrays
@@ -80,17 +81,19 @@ else
 endif
 
 # =============================================================================
-# DC_SRC_SHRINK — the .bss literal-shrink pass (kb/levers.md L3). DEFAULT ON.
+# DC_SRC_SHRINK — the source-shrink pass (kb/levers.md L3). DEFAULT ON.
 # =============================================================================
 # Recovers 1,159,392 B of .bss by rewriting seven numeric literals in the
-# vendored decomp. Not a codegen change of any kind: the compiler flags are
-# untouched, only the constants that size seven buffers.
+# vendored decomp, plus 598,648 B of .rodata by deleting a dead string pool.
+# Not a codegen change of any kind: the compiler flags are untouched, only the
+# constants that size seven buffers and one struct field nothing on DC reads.
 #
 #   aSTR_overlay 294,912->512 · aINS_overlay 21,528->72 ·
 #   aNPC_{n,s,k,e}_overlay 75,840->192 · aGYO_overlay 30,720->32   (dead arenas)
 #   prbuf 614,400->32                                (writer is a stubbed no-op)
 #   audiomemory 0x90000->0x76000        (measured allocation ceiling is 481,152)
 #   graph/padmgr/irqmgr stacks 16,384->48      (no thread ever starts on this port)
+#   s_assets[].path deleted             (.rodata; the .bin fallback is dead on DC)
 #
 # Each rewrite's justification, and the fifth candidate that was checked and
 # REFUTED, are in the header of tools/dcstub/make_src_shrink.py. src/ and
@@ -100,8 +103,10 @@ endif
 #
 # TWO SWAP MECHANISMS, because one does not cover both cases:
 #
-#   1. Per-TU source swap, exactly like DC_ASSET_STUB above. Used for the four
-#      .c files that are compiled directly, where -I can never reach them.
+#   1. Per-TU source swap, exactly like DC_ASSET_STUB above. Used for the five
+#      .c files that are compiled directly, where -I can never reach them —
+#      four under src/ plus pc/src/pc_assets.c, which is why $(PC_REUSE_C) is
+#      run through $(shrinkify) alongside $(GAME_C) below.
 #      $(SHRINKDIR)/shrink.list names them.
 #
 #   2. Include-path shadow, for the two .c_inc files and include/sys_stacks.h.
@@ -289,6 +294,44 @@ ifeq ($(DC_ASSET_STUB),1)
 DEFINES += -DDC_ASSET_STUB
 endif
 
+# DC_DIAG=1 turns on PC_DIAG() — the decomp's own rate-limited bring-up tracer
+# (pc/include/pc_diag.h), which is compiled out unless PC_VERBOSE_DIAG is
+# defined. It is the ONLY way to see inside graph_proc / game_main without
+# editing src/, which CLAUDE.md forbids. Off by default because each trace
+# point costs a format string in .rodata and a printf at runtime, and the
+# image is already over budget.
+DC_DIAG ?= 0
+ifeq ($(DC_DIAG),1)
+DEFINES += -DPC_VERBOSE_DIAG
+endif
+
+# DC_ARENA_BYTES / DC_ARAM_WINDOW — the two additive-heap knobs, exposed so a
+# bring-up image can be given what the game actually asks for without the full
+# build silently inheriting a size it cannot afford. Empty = the header default
+# (2,705,504 / 1,048,576). Both are 32-byte aligned by contract.
+#
+# MEASURED 2026-08-02: the title-demo scene OOM'd by exactly 2,265,088 B
+# against the 2,705,504 B default, so bucket 6's floor at that scene is
+# 4,970,592 B. The MEMLEDGER FIT line is the detector — raise these past what
+# the image span leaves and the boot fails loudly instead of thrashing.
+ifneq ($(DC_ARENA_BYTES),)
+DEFINES += -DDC_MAIN_MEMORY_SIZE=$(DC_ARENA_BYTES)u
+endif
+ifneq ($(DC_ARAM_WINDOW),)
+DEFINES += -DDC_ARAM_WINDOW_SIZE=$(DC_ARAM_WINDOW)u
+endif
+
+# DC_FB_PROBE=<N> — make the guest emit MARK:FRAME / FBHASH / FBTHUMB every N
+# frames, the protocol harness/dc/screenshot.sh parses. This is the ONLY way
+# to see what the port renders without a human watching Flycast: host-side
+# capture is blocked by macOS TCC on this machine (harness/dc/screenshot.sh
+# documents the two dead ends), and "I looked at the window" cannot tell a
+# stalled emulator from a correctly-rendered black frame. Off by default —
+# each probe reads 614,400 B back out of VRAM, which is not free.
+ifneq ($(DC_FB_PROBE),)
+DEFINES += -DDC_FB_PROBE=$(DC_FB_PROBE)
+endif
+
 # jaudio_NES C files use `nullptr`. C only — C++ has it natively.
 C_ONLY_DEFINES := -Dnullptr=NULL
 
@@ -468,6 +511,10 @@ GAME_C       := $(call shrinkify,$(GAME_C))
 GAME_CXX     := $(call shrinkify,$(GAME_CXX))
 C11_SRC      := $(call shrinkify,$(C11_SRC))
 CXXFROMC_SRC := $(call shrinkify,$(CXXFROMC_SRC))
+# PC_REUSE_C too — S6 rewrites pc/src/pc_assets.c (kb/ram-plan.md P6). This MUST
+# stay above the $(PC_REUSE_OBJS) definition below, or the gnu11 override would
+# still name the vendored path and the swapped copy would be built as gnu89.
+PC_REUSE_C   := $(call shrinkify,$(PC_REUSE_C))
 
 # =============================================================================
 # Object lists
@@ -527,8 +574,24 @@ $(DC_CXX_OBJS): TU_LANG = $(DC_WARN) -fpermissive -fno-exceptions -fno-rtti
 $(DC_CXX_OBJS): TU_OPT  = $(DC_OPT) -fno-strict-aliasing -fwrapv -fsigned-char
 
 # KOS owns main(). Rename the game's two entry points, same as the PC build.
-$(OBJDIR)/src/main.c.o:        TU_DEFS = -Dmain=ac_entry
-$(OBJDIR)/src/static/boot.c.o: TU_DEFS = -Dmain=boot_main
+#
+# THESE MUST FOLLOW THE SOURCE INTO THE SCRATCH TREES. A per-TU rule is keyed on
+# the OBJECT path, and $(stubify)/$(shrinkify) change it — so the moment either
+# rewriter emits main.c or boot.c, a rule spelled only for $(OBJDIR)/src/... is
+# silently skipped and the TU compiles with its own bare main().
+#
+# MEASURED FAILURE, do not re-discover it: make_stub_data.py's NEUTRALISE rule
+# started emitting src/static/boot.c, boot.c lost -Dmain=boot_main, and the
+# build then had TWO main()s. -Wl,--allow-multiple-definition (needed for the
+# 1,367 multiply-defined data symbols, kb/levers.md L6) swallowed it, the linker
+# kept the wrong one, and --gc-sections deleted everything the game's real entry
+# chain reached: .text fell 5,289,364 -> 851,684 and boot_main / graph_proc /
+# ac_entry / mainproc vanished from the ELF. It LINKED and BUILT A CDI.
+#
+# $(call stubify,...) / $(call shrinkify,...) resolve to the same path when the
+# rewriters are off, so this is a no-op in a plain build.
+$(OBJDIR)/$(call shrinkify,$(call stubify,src/main.c)).o:        TU_DEFS = -Dmain=ac_entry
+$(OBJDIR)/$(call shrinkify,$(call stubify,src/static/boot.c)).o: TU_DEFS = -Dmain=boot_main
 
 # =============================================================================
 # Flag stamp — make tracks timestamps, not command lines

@@ -387,6 +387,146 @@ static void dc_check_disc(void) {
 #endif
 }
 
+/* ==========================================================================
+ * DC_ASSET_STUB keep list — real asset bytes inside an otherwise-stubbed image
+ * ==========================================================================
+ * DC_ASSET_STUB shrinks 16,281 asset destination arrays to [1] so the image
+ * fits. pc_assets_init() must NOT run in that build: it walks s_assets[] and
+ * memcpy()s the full-size asset over every one of those [1] destinations,
+ * scribbling over whatever the linker put next. That skip stays.
+ *
+ * But renderer bring-up needs *something* real on screen. So
+ * tools/dcstub/make_stub_data.py takes an allowlist ($DC_STUB_KEEP, default =
+ * the title-logo overlay) of sources it leaves at FULL size, and generates
+ * dc/build/stubsrc/dc_stub_keep.inc: a dc_stub_keep_load() that touches those
+ * destinations and only those. Included below; resolved through the Makefile's
+ * -I$(ROOT). Setting DC_STUB_KEEP= empty makes it an empty function, which is
+ * exactly the old behaviour.
+ *
+ * The loads cannot go through pc_load_asset(). That function wants
+ * g_rel_data / g_dol_data resident — all 15,640,056 B of foresta.rel in RAM at
+ * once (see dc_dvd.c's C6 warning) — and its .bin fallback is a host-relative
+ * fopen() that resolves to nothing on a read-only /cd. dc_stub_keep_load_one()
+ * below is the Dreamcast answer: seek to rom_off in the ROM image on the disc,
+ * read exactly `size` bytes straight into the destination, byte-swap in place.
+ * Peak transient is zero. The generator rewrites the identifier
+ * `pc_load_asset` to `dc_stub_keep_load_one` inside kept TUs, which is how the
+ * generator's own per-file `_pc_load_src_*()` initialisers (the only way to
+ * reach a file-static destination) end up here too.
+ */
+#ifdef DC_ASSET_STUB
+
+/* These mirror pc/src/pc_assets.c's enums, which are file-static there. If the
+ * generator's numbering ever changes, this is the other end that must move. */
+enum { DC_STUB_SRC_REL = 0, DC_STUB_SRC_DOL = 1, DC_STUB_SRC_NONE = 2 };
+enum { DC_STUB_SWAP_NONE = 0, DC_STUB_SWAP_U16 = 1,
+       DC_STUB_SWAP_VTX  = 2, DC_STUB_SWAP_U32 = 3 };
+
+/* Non-static in pc_assets.c and small; referencing them here is what keeps
+ * --gc-sections from dropping them along with pc_assets_init(). */
+extern void pc_bswap_asset_u16(void* data, unsigned int size);
+extern void pc_bswap_asset_vtx(void* data, unsigned int size);
+extern void pc_bswap_asset_u32(void* data, unsigned int size);
+
+static int dc_stub_keep_ok;
+static int dc_stub_keep_bad;
+static unsigned int dc_stub_keep_bytes;
+
+#ifndef DC_HOST_STUB
+/* Indexed by rom_src. Held open across the whole burst: a CD-R seek is ~200 ms
+ * and re-opening per asset would cost more than the read itself. */
+static file_t dc_stub_rom_fd[2] = { FILEHND_INVALID, FILEHND_INVALID };
+static const char* const dc_stub_rom_path[2] = {
+    "/cd/foresta.rel",   /* DC_STUB_SRC_REL — already Yaz0-decompressed */
+    "/cd/main.dol"       /* DC_STUB_SRC_DOL */
+};
+#endif
+
+void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
+                           unsigned int rom_off, int rom_src, int swap);
+
+void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
+                           unsigned int rom_off, int rom_src, int swap)
+{
+#ifdef DC_HOST_STUB
+    (void)bin_path; (void)dest; (void)size;
+    (void)rom_off;  (void)rom_src; (void)swap;
+#else
+    const char* who = bin_path ? bin_path : "(anon)";
+    file_t fd;
+
+    if (dest == NULL || size == 0) return;
+
+    if (rom_src != DC_STUB_SRC_REL && rom_src != DC_STUB_SRC_DOL) {
+        /* SRC_NONE means "the .bin file is the only source". There is no
+         * assets/ tree on the disc, so this cannot be served. Say so — a
+         * silently zeroed texture looks like a renderer bug for hours. */
+        DC_LOGE("[DC/KEEP] %s: rom_src=%d has no on-disc source, left zeroed\n",
+                who, rom_src);
+        dc_stub_keep_bad++;
+        return;
+    }
+
+    fd = dc_stub_rom_fd[rom_src];
+    if (fd == FILEHND_INVALID) {
+        fd = fs_open(dc_stub_rom_path[rom_src], O_RDONLY);
+        if (fd == FILEHND_INVALID) {
+            DC_LOGE("[DC/KEEP] %s MISSING — every kept asset from it stays "
+                    "zeroed\n", dc_stub_rom_path[rom_src]);
+            dc_stub_rom_fd[rom_src] = FILEHND_INVALID;
+            dc_stub_keep_bad++;
+            return;
+        }
+        dc_stub_rom_fd[rom_src] = fd;
+        DC_LOGE("[DC/KEEP] opened %s (%d B)\n", dc_stub_rom_path[rom_src],
+                (int)fs_total(fd));
+    }
+
+    if (fs_seek(fd, (off_t)rom_off, SEEK_SET) < 0) {
+        DC_LOGE("[DC/KEEP] %s: seek to %u failed\n", who, rom_off);
+        dc_stub_keep_bad++;
+        return;
+    }
+    if (fs_read(fd, dest, size) != (ssize_t)size) {
+        DC_LOGE("[DC/KEEP] %s: short read of %u B at %u\n", who, size, rom_off);
+        dc_stub_keep_bad++;
+        return;
+    }
+
+    switch (swap) {
+        case DC_STUB_SWAP_U16: pc_bswap_asset_u16(dest, size); break;
+        case DC_STUB_SWAP_VTX: pc_bswap_asset_vtx(dest, size); break;
+        case DC_STUB_SWAP_U32: pc_bswap_asset_u32(dest, size); break;
+        default: break;
+    }
+
+    dc_stub_keep_ok++;
+    dc_stub_keep_bytes += size;
+    DC_LOG("[DC/KEEP] %s %u B @ %u\n", who, size, rom_off);
+#endif
+}
+
+#include "dc/build/stubsrc/dc_stub_keep.inc"
+
+/* The narrow stand-in for pc_assets_init(). */
+static void dc_stub_keep_assets(void) {
+    dc_stub_keep_load();
+#ifndef DC_HOST_STUB
+    {
+        int i;
+        for (i = 0; i < 2; i++) {
+            if (dc_stub_rom_fd[i] != FILEHND_INVALID) {
+                fs_close(dc_stub_rom_fd[i]);
+                dc_stub_rom_fd[i] = FILEHND_INVALID;
+            }
+        }
+    }
+#endif
+    DC_LOGE("[DC] DC_ASSET_STUB keep list: %d assets, %u B loaded, %d failed\n",
+            dc_stub_keep_ok, dc_stub_keep_bytes, dc_stub_keep_bad);
+}
+#endif /* DC_ASSET_STUB */
+
 int main(int argc, char* argv[]) {
     /* 1. The ledger goes first: it measures .text/.data/.bss from the linker
      *    symbols and publishes pc_image_base/_end, which emu64's seg2k0
@@ -432,8 +572,13 @@ int main(int argc, char* argv[]) {
     /* S1 bring-up build: the destination arrays are one element each, so the
      * central table in pc_assets.c would memcpy megabytes over them. Skipping
      * the load is the whole point — this image exists to prove the trampoline,
-     * KOS init, the console and the ledger run, not to render anything. */
+     * KOS init, the console and the ledger run, not to render anything.
+     *
+     * dc_stub_keep_assets() is the exception, and only the exception: it fills
+     * the $DC_STUB_KEEP allowlist, whose destinations the generator left at
+     * full size. See the block above dc_stub_keep_load_one(). */
     DC_LOGE("[DC] DC_ASSET_STUB: skipping pc_assets_init() — assets are [1]\n");
+    dc_stub_keep_assets();
 #else
     pc_assets_init();
 #endif

@@ -122,11 +122,22 @@ them from `assets.pak`; their trampoline stubs load a zero-length marker and
 the loader logs-and-zero-fills if anything ever requests them (loud, not
 silent). 44.7% of the old 498 KB pool ceiling, recovered offline.
 
-### P6. `s_assets[]` name strings — `.rodata` −821,569 [measured; S3 remainder]
+### P6. `s_assets[]` name strings — ✅ **DONE 2026-08-02, `.rodata` −598,648** (image −598,424)
 
-Biggest live S3 item (`kb/levers.md` L3). It is deletion, not a disc index:
-`dcasset gentable` + a `pc/src` scratch-tree rewrite via `DC_SRC_SHRINK`'s two
-swap modes — the mechanism already exists. Moves the image-span side.
+Landed as `make_src_shrink.py` rule **S6** + `PC_REUSE_C` run through
+`$(shrinkify)` in `dc/Makefile`. Deletion, as this plan said — no `dcasset
+gentable` was needed, because there is nothing left to look up: the strings'
+only consumer was `pc_load_asset()`'s `.bin` `fopen` fallback, and that fallback
+is unreachable on DC (all 14,495 rows are `rom_src` DOL/REL, `dc_dvd.c` only
+implements the ROM-direct path, and the relative `assets/…` paths resolve
+against KOS's `/` where nothing is staged). The table index is the diagnostic
+identifier now.
+
+**The −821,569 estimate was wrong by 223,145 B** — it counted the live 347,880 B
+`s_assets[]` table as if it were string pool. Measured across two clean full
+rebuilds differing only in the rule: `.rodata` 1,057,364 → 458,716, `.text`
++224, `.data`/`.bss` unchanged, span `0x12e81c0` → `0x1255f60`. Derivation and
+the full liveness argument: `kb/levers.md` L3 "Correction 0".
 
 ### P7. `data_bgd` collision split — `.data` −236,544 [measured; S3 remainder]
 
@@ -146,12 +157,19 @@ saving worth ~0 (mutually exclusive — L3 correction 2).
 | step | side moved | Δ | over by |
 |---|---|---:|---:|
 | start | | | **6,999,924** |
-| P6 `s_assets` strings | image (`.rodata`) | −821,569 | 6,178,355 |
-| P7 `data_bgd` split | image (`.data`) | −236,544 | 5,941,811 |
-| P1 loader | image (`.bss`) | −8,460,128 | **−2,518,317** (margin 2,518,317) |
-| P4 ARAM window → VRAM | additive heap | −1,048,576 | margin 3,566,893 |
-| P8 DL bodies → pool | image (`.data`) | −901,300 | margin ≈ 4.47 MB |
+| P6 `s_assets` strings ✅ | image (`.rodata`) | −598,112 span (was billed −821,569) | 6,401,812 |
+| P7 `data_bgd` split | image (`.data`) | −236,544 | 6,165,268 |
+| P1 loader | image (`.bss`) | −8,460,128 | **−2,294,860** (margin 2,294,860) |
+| P4 ARAM window → VRAM | additive heap | −1,048,576 | margin 3,343,436 |
+| P8 DL bodies → pool | image (`.data`) | −901,300 | margin ≈ 4.24 MB |
 | pool cost | additive (0 under P3; ≤1.46–2.5 MB if separate) | | **fits either way** |
+
+⚠️ **The `start` row is stale in the other direction.** It is the 2026-08-01
+image. The PVR backend landing in `dc/src` since then has grown the image
+independently of anything in this table — a clean rebuild on 2026-08-02
+measured the pre-P6 span at **19,824,576**, i.e. **+260,268** on the 19,564,308
+this chain starts from. Re-baseline before trusting the absolute column; the Δ
+column is what each row actually owns.
 
 **The gap closes with margin even if P3 is rejected and the pool stays a
 separate additive extent.** P2 does not appear as a row because its value is
