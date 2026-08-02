@@ -56,3 +56,4 @@ pc/lib/SDL*
 portmaster/*.zip
 harness/rom/
 harness/out/
+.claude/worktrees/

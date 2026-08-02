@@ -93,6 +93,7 @@ already produced two wrong numbers.
 | `kb/levers.md` | **the ranked RAM ledger** — applied cuts, and every lever still live |
 | `kb/closed.md` | settled questions: `-O0`, MMU paging (dead), `--icf`, emu64-is-not-an-emulator, strip/compress = 0 |
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
+| `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
 | `PLAN.md` | milestones, the four hard problems, risk register, open questions |
 

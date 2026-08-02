@@ -109,7 +109,50 @@ ELF read 356,776 B too small.
   never been the displayed surface. `FBNONZERO` is the assertion to trust; a
   hash cannot tell black from wrong-address.
 
-## ⭐ NEXT ACTIONS (2026-08-02) — ranked, do these in order
+## ⭐ PARKED 2026-08-02 — read this first if you are a fresh context
+
+**The frontier is not a crash and not a stub: it is an unpressed button.**
+`kb/boot-blockers.md` (read it — it is the ranked list of what the game reaches
+next) traced the title demo to `aAL_game_start_wait`
+(`src/actor/ac_animal_logo.c:245`), looping forever waiting for START or A.
+Every other gate on `ac_animal_logo.c:268-273` is already open. Nothing in the
+harness can press a button, so nothing past the title has ever been reached in
+CI. That is item 4 on its list and roughly 30 lines of work.
+
+Its other cheap wins, both measured: **85 % of every console log** is jaudio's
+`SendStart::Mesg Full Queue` via `OSReport` (`dc/src/dc_os.c:606`, ~20 lines to
+rate-limit), and **`OSGetSoundMode()` returns 0 = mono** (`dc_stubs.c:118`),
+which silently locks the game to mono and contradicts the audio plan of record
+— a one-line fix.
+
+### Work that was in flight when this was parked
+
+Five agents were running in git worktrees under `.claude/worktrees/`. Each
+worktree holds uncommitted changes; **merge by path, not by `git diff`** — at
+least one worktree had a stale HEAD, so its diff is enormous and meaningless.
+Verify every merged change with a clean rebuild in the main tree before
+believing its numbers; P7's did not reproduce exactly.
+
+| worktree | task | owns |
+|---|---|---|
+| `agent-a3b073c5f8580cec4` | N2, the framebuffer probe | `dc/src/dc_pvr.c`, `harness/**` |
+| `agent-a7f2880fe06b3a5f7` | the vertex/model working-set census | `dc/src/dc_gx.c`, `dc_asset_census.c`, `census_resolve.py` |
+| `agent-af1b1ce21d43307e6` | VMU save — `CARD*` backend | `dc/src/dc_card.c`, `tools/savebench/**`, `kb/save-*.md` |
+| `agent-ab7b5a9310ecbe98d` | ARAM disc-backed LRU (PLAN §3.1) | `dc/src/dc_aram.c`, `dc_dvd.c` |
+| `agent-a027be752134b705b` | P7 — ✅ **already merged** (`528900a`), safe to delete | — |
+
+The ARAM agent was told to default its kill switch in its own header because
+`dc/Makefile` was owned by another agent; **it owes a Makefile knob** — look for
+it in its report or its header's `#ifndef`.
+
+### The single number the plan is waiting on
+
+Whether a **title screen with the town behind it** fits without S4. The texture
+half is measured at 111,136 B; the vertex/model half is what the census agent
+was sent to find. Under ~1.5 MB ⇒ a title-complete build is days away. Several
+MB ⇒ it waits for S4.
+
+## Ranked next actions (2026-08-02) — the list before parking
 
 The S1→S5 plan in `kb/plan-stages.md` is still the RAM strategy and is not
 superseded. These are the concrete next moves now that pixels exist.
