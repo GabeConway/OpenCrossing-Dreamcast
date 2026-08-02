@@ -46,7 +46,32 @@ for those see `kb/closed.md`.
 - **Do not rebuild `opencrossing-dc:sdk`** — ~27 min cold. It is already in the
   local Docker daemon.
 
+## The build tracks timestamps, not flags — FIXED, do not remove the fix
+
+- **A flag change alone used to leave a stale image.** After a
+  `DC_ASSET_STUB=1` build, a plain `bash dc/build-dc.sh` printed
+  `make: Nothing to be done for 'all'` and left the **stub** ELF in place, so
+  `sh-elf-size` reported the stub's sections for what looked like a real build.
+  Two causes: toggling the flag swaps 2,521 sources for their stub twins and
+  *both* sets of `.o` already exist and are older than the ELF, so nothing
+  relinks; and any object whose source did not change keeps the `-D` set it was
+  built with, which would have shipped a non-stub image whose `dc/src` objects
+  still skipped `pc_assets_init()`.
+- **The fix is `dc/build/flags.stamp`**: it holds `DC_ASSET_STUB`,
+  `DECOMP_OPT`, `DC_OPT` and `DEFINES`, is rewritten by `$(file …)` when any of
+  them changes, and every object and the link depend on it. Changing a flag now
+  costs a full rebuild, which is the correct price.
+- **`$(file …)` needs GNU make 4.0.** The container has 4.3; the macOS host has
+  **3.81**, where `$(file …)` silently expands to nothing. That is why the
+  stamp also has an ordinary recipe. The host only ever runs `make count` /
+  `make sources`, never a compile.
+- **When in doubt, `rm dc/build/AnimalCrossing.elf`** and re-link. A missing
+  ELF cannot be stale.
+
 ## Agent hygiene
 
 - **Agents must not run git.** The main thread commits.
+- **One build at a time.** `dc/build/` is a single shared object tree; two
+  concurrent `make` runs corrupt it. Investigation agents get read-only
+  `sh-elf-nm`/`objdump`/`readelf` over `docker run`, never `make`.
 - **Always give absolute paths in scripts** — agents run from varying cwds.

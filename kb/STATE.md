@@ -225,7 +225,17 @@ surfacing every platform-layer bug *now*, separately from the loader.
 Cost: small. Buys: the largest available reduction in unknown-unknowns, plus
 the first end-to-end validation of the harness. Throwaway once S4 lands.
 
-### S2. Measure L6 — generator table dedup.
+### S2. Measure L6 — generator table dedup. ✅ DONE 2026-08-01. 915,139 B, mostly non-additive.
+
+`tools/dcstub/measure_dedup.py --rom <dcasset extract dir>`. Full numbers and
+the verdict are in `kb/levers.md` L6. Headline: `.bss` asset destinations are
+9.3% duplicate by actual ROM bytes (794,640 B) but that **evaporates when S4
+lands**; `.data` is 4.7% duplicate (120,499 B) and that part is durable.
+**Verdict: keep, do not schedule.** Two corrections it produced —
+`src/data/**` is *not* generator output (`gen_runtime_assets.py` edits vendored
+decomp in place), and 1,367 data/bss symbols are multiply-defined, surviving
+only on `-Wl,--allow-multiple-definition`. The original write-up follows.
+
 
 `src/data` is generator output; hashing table contents and aliasing duplicates
 in `gen_runtime_assets.py` is a generator change, not codegen. **Nobody has

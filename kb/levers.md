@@ -158,12 +158,51 @@ relocating them. Disc is 5.3% full and the target is 640×480. `src/data/model`
 alone is 5,682,621 B of `.bss`. `PLAN.md` §1 already sanctions a documented "DC
 edition". This is a product decision.
 
-## L6. Source-level table dedup — nobody has looked.
+## L6. Source-level table dedup — MEASURED 2026-08-01. 915,139 B, mostly non-additive.
 
-`--icf` is unavailable on SH (`kb/closed.md`), but `src/data` is **generator
-output**. Hashing table contents and aliasing duplicates in
-`gen_runtime_assets.py` is a *generator* change, not codegen — legal under the
-`-O0` rule. Unknown saving.
+`tools/dcstub/measure_dedup.py`, run against the linked ELF and the real ISO:
+
+```
+python3 tools/dcasset/dcasset.py extract "<the ISO>" --out /tmp/discroot
+python3 tools/dcstub/measure_dedup.py --rom /tmp/discroot     # + dc/build/dedup/*
+```
+
+| population | total | duplicate | share |
+|---|---:|---:|---:|
+| `.bss` asset destinations, keyed by **actual ROM bytes** | 8,503,550 | **794,640** | 9.3% |
+| `.data` initialised tables | 2,589,975 | **120,499** | 4.7% |
+| `.rodata` (symbol-visible part only) | 37,004 | 171 | 0.5% |
+
+**Read the split before costing this.** The `.bss` 794,640 B does **not stack
+with L1/S4**: once assets are demand-loaded those arrays do not exist, so the
+saving evaporates. Its lasting value is elsewhere — 2,253 fewer distinct assets
+to store in `assets.pak` and to stream off a 500 KB/s CD-R.
+
+The `.data` 120,499 B is the durable part, and it splits again:
+
+- **95,774 B (1,678 syms) aliasable** — distinct names, identical bytes.
+  Realising it needs one object under two names. GNU aliases only work within a
+  TU, so the generator must emit the canonical copies into a single generated
+  TU and turn the duplicates there into `__attribute__((alias(…)))`. Biggest
+  groups are `cKF_*_tbl` keyframe tables (184 copies of one 54-byte table, 304
+  copies of a 26-byte one).
+- **24,725 B (231 syms) redefined** — the *same* symbol name defined more than
+  once, surviving only because the link carries
+  `-Wl,--allow-multiple-definition`. One copy is reachable; the rest are dead.
+  This is not aliasing, it is deleting redundant definitions, and it is the
+  easier half. 1,367 data/bss symbols are multiply-defined overall.
+
+**Correction to this lever's premise:** `src/data/**` is *not* generator output.
+`gen_runtime_assets.py` **edits vendored decomp files in place** — that is where
+the `#ifdef TARGET_PC` blocks came from. So a dedup pass cannot be "just a
+generator change" in the sense L6 assumed. It can, however, use the mechanism
+S1 proved: rewrite into a scratch tree under `dc/build/` and swap the TUs in
+from `dc/Makefile`, exactly as `tools/dcstub/make_stub_data.py` does. `src/`
+stays untouched.
+
+**Verdict: keep, do not schedule.** 120 KB durable against an 8.27 MB gap, for
+a nontrivial rewriter. It is worth doing *after* L3, or never. The measurement
+existed to stop the question being asked again.
 
 ## L7. Bucket 6's high-water mark — deferred, deliberately.
 

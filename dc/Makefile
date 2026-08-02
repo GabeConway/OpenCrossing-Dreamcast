@@ -447,12 +447,49 @@ $(OBJDIR)/src/main.c.o:        TU_DEFS = -Dmain=ac_entry
 $(OBJDIR)/src/static/boot.c.o: TU_DEFS = -Dmain=boot_main
 
 # =============================================================================
+# Flag stamp — make tracks timestamps, not command lines
+# =============================================================================
+# MEASURED, and it produced a wrong image: after a DC_ASSET_STUB=1 build, a
+# plain `bash dc/build-dc.sh` printed "Nothing to be done for 'all'" and left
+# the STUB ELF in place. Two independent failures:
+#
+#   1. Toggling DC_ASSET_STUB swaps 2,521 sources for their stub twins, so OBJS
+#      names change — but BOTH sets of .o already exist and are older than
+#      $(TARGET), so make sees nothing to do and never relinks.
+#   2. Objects whose source did not change keep whatever -D they were built
+#      with. dc/src/*.o compiled under -DDC_ASSET_STUB would silently keep
+#      skipping pc_assets_init() in a non-stub image.
+#
+# The stamp holds the flag set that affects codegen. When it changes the file
+# is rewritten, and every object plus the link depends on it, so everything
+# rebuilds. Written with $(file …) — a shell here-doc would re-run on every
+# make invocation and defeat the point.
+FLAGSTAMP := $(BUILD)/flags.stamp
+FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DECOMP_OPT=$(DECOMP_OPT) \
+             DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
+
+ifneq ($(FLAGSTATE),$(strip $(shell cat $(FLAGSTAMP) 2>/dev/null)))
+$(shell mkdir -p $(BUILD))
+$(file >$(FLAGSTAMP),$(FLAGSTATE))
+endif
+
+# =============================================================================
 # Rules
 # =============================================================================
 .PHONY: all objs clean sources count help
 .SUFFIXES:
 
 all: $(TARGET)
+
+$(OBJS) $(TARGET): $(FLAGSTAMP)
+
+# Fallback so the stamp is never a missing prerequisite. The $(file …) above
+# is what normally writes it; this rule covers a wiped build dir, and make
+# 3.81 on the macOS host, which has no $(file …) and silently expands it to
+# nothing. The host never compiles — it only runs `count`/`sources` — so the
+# no-op there is harmless.
+$(FLAGSTAMP):
+	@mkdir -p $(@D) && printf '%s' '$(FLAGSTATE)' > $@
 
 objs: $(OBJS)
 	@echo "== objs: $(words $(OBJS)) objects up to date (NOT linked) =="
