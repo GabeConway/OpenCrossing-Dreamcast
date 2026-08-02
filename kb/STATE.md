@@ -141,7 +141,6 @@ believing its numbers; P7's did not reproduce exactly.
 
 | worktree | task | owns |
 |---|---|---|
-| `agent-af1b1ce21d43307e6` | VMU save — `CARD*` backend | `dc/src/dc_card.c`, `tools/savebench/**`, `kb/save-*.md` |
 | `agent-ab7b5a9310ecbe98d` | ARAM disc-backed LRU (PLAN §3.1) | `dc/src/dc_aram.c`, `dc_dvd.c` |
 | `agent-a027be752134b705b` | P7 — ✅ **already merged** (`528900a`), safe to delete | — |
 
@@ -201,6 +200,30 @@ address all along; the 64-bit-aperture hypothesis was wrong and Flycast's
 32-bit aperture merely mirrors every block at +4 MB. The frame-rate cost of the
 flag is **unmeasured** — the old 24.8 → 16.8 FPS did not reproduce and no
 controlled pair exists.
+
+### N2b. Wire the game's save path to the VMU. [the backend is real; nothing calls it]
+
+`dc/src/dc_card.c` is a working KOS `vmufs`/`vmu_pkg` backend, proven in Flycast
+and re-verified host-side out of the flash image. **But the game never calls
+it:** `pc/src/pc_m_card.c` does its I/O with `<stdio.h>` against the relative
+path `save/card_a/DobutsunomoriP_MURA.gci`, so of the 29 `CARD*` entry points
+only `CARDInit()` is on its path and `[PC] No save file found` is a failed
+`stat()`. `pc_card_scan_for_gci()` deliberately still returns 0 — returning a
+path would make the game print "found" and then fail to `fopen` it.
+
+The designed fix is `kb/save-plan.md` §7.8: a KOS `vfs_handler_t` mounted at
+`/dcsave` plus an `fs_chdir()` from `dc_main.c`, committing to the VMU on the
+`->rename` callback — which is exactly `pc_save_write_gci_ex`'s last step, so
+it is a free atomic commit point with no edit to `pc/`.
+
+**Measured and load-bearing:** a VMU block costs **84.6 ms** to write
+(`write ≈ 0.678 s + 84.6 ms/block`, within 1.3% of the KOS-source ceiling), so a
+150-block save is **13.4 s**. Incremental writes are mandatory and the shipped
+chunking does *not* deliver them — `vmufs_write()` rewrites the whole file. The
+format is byte-stable; the writer needs a block-diffing pass. Deflate-6 on SH-4
+is 295,910 B → 99,657 B in 0.129 s, i.e. compression is free next to the flash
+cost. ⚠️ Every compression ratio so far is against **synthetic** data; a real
+`.gci` is the top open item.
 
 ### N3. Correct the TEV mapping. [the logo renders; is it renders *right*?]
 

@@ -5,13 +5,18 @@ Results and the recommendation live in [`kb/save-budget.md`](../../kb/save-budge
 this directory is the thing that produced them, so the numbers can be
 re-derived whenever the save layout changes.
 
-Host-side only. Nothing here runs on the Dreamcast and nothing here reads the
-game ISO.
+The top level is host-side only: nothing in *this* directory runs on the
+Dreamcast and nothing here reads the game ISO. **[`dcvmu/`](dcvmu/README.md) is
+the exception and the other half of the story** — it boots
+`dc/src/dc_card.c`'s VMU backend in Flycast and measures what the hardware
+actually does. Read its README before trusting any write-cost or throughput
+number; the estimates in `kb/save-budget.md` §5 were superseded by it (§7).
 
 ## Files
 
 | file | what it is |
 |---|---|
+| `dcvmu/` | **guest-side harness.** Boots the real VMU backend, round-trips payloads on a real (emulated) VMU, and re-verifies the resulting flash image from the host with an independent FAT/CRC parser |
 | `save_layout_probe.c` | Compiles against the vendored decomp headers and prints every `sizeof`/`offsetof` in the save chain. **This is the ground truth.** |
 | `save_layout.py` | The region model: every byte of `Save_t` and the three keep-blocks, tagged with a field group and a content kind. Self-validating (`validate()` asserts the regions tile each struct exactly). |
 | `gen_save.py` | Synthetic save generator. Real struct layout, synthetic contents, four fill profiles. |
