@@ -108,8 +108,8 @@ already produced two wrong numbers.
 | `kb/toolchain-components.md` | kos-chain / KOS / GLdc / mkdcdisc recipes, float ABI, the signed-`char` correction |
 | `kb/toolchain-dockerfile.md` | the two-stage Dockerfile with pinned SHAs; the mkdcdisc `-N` padding measurement |
 | `kb/toolchain-build-invocation.md` | measured image build times; bind-mount / container invocation design |
-| `kb/design-harness.md` | harness design rationale, tagged [V]/[U] |
-| `kb/design-shelf-hazards.md` | sh-elf compile hazards for `src/`. ⚠️ measured on GCC 9.3/KOS `525cbda`, **not** our GCC 15.2/KOS 2.3 — it missed both collisions that actually bit us |
+| `kb/design-harness.md` | **split index** — harness design rationale, tagged [V]/[U]. Parts: `-flycast-setup`, `-capture` (console/SCIF, framebuffer hash, crash triage), `-runner`, `-alternatives` (lxdream/RetroArch, NO-GO), `-corrections` (⚠️ what the real KOS 2.3 image changed — read alongside any other part) |
+| `kb/design-shelf-hazards.md` | **split index** — sh-elf compile hazards for `src/`. ⚠️ measured on GCC 9.3/KOS `525cbda`, **not** our GCC 15.2/KOS 2.3; it missed both collisions that actually bit us, and parts of it tell you to edit `src/`, which §1 forbids. Parts: `-exclusions`, `-flags`, `-alignment`, `-abi-libc` |
 | `BUILDING.md`, `kb/build-test.md` | **armhf-era.** Base-repo build, not this target |
 
 ### Memory — the blocking problem
@@ -119,7 +119,7 @@ already produced two wrong numbers.
 | `kb/levers.md` | start here for any size work |
 | `kb/ram-plan.md` | **the solution stack that closes the gap** — eight ranked moves P1–P8 with closing arithmetic, second-rank levers, experiment queue. Documentation only, nothing implemented |
 | `kb/research-budget-premises.md` | audit of the budget's premises; §2.4 is the bucket-6 measurement recipe, §6 lists what is unfinished |
-| `kb/research-size-reduction.md` | fitting in 16 MB without changing codegen — source of `kb/levers.md` L3 |
+| `kb/research-size-reduction.md` | **split index** — fitting in 16 MB without changing codegen; source of `kb/levers.md` L3, which re-costed every number here and found them all wrong. Parts: `-baseline`, `-techniques`, `-memory-map`, `-plan` |
 | `kb/mem-budget.md` | **index** to the split ledger below. ⚠️ the §4 ledger itself is void |
 | `kb/mem-budget-m1-sh4.md` | **the part that is still true** — the real sh-elf link: section sizes, the `.bss` split, levers applied, dead ends, the boot-size gate |
 | `kb/mem-budget-armhf-working-set.md` | armhf-era: the 65 MB start, the 15.6 MB REL boot transient, boot residency, disc contents |
@@ -149,7 +149,7 @@ already produced two wrong numbers.
 
 | file | contents |
 |---|---|
-| `kb/tev-map.md` | all 101 TEV configs the game uses → fixed-function PVR strategies |
+| `kb/tev-map.md` | **split index** — all 101 TEV configs → fixed-function PVR strategies. Parts: `-table` (**the reference table — load this to implement**), `-implementation`, `-alpha`, `-hard-cases`, `-decoding` |
 | `kb/audio-plan.md` | jaudio_NES on DC. **Verdict: a real risk, not solved** |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |
 | `kb/design-platform-api.md` | **index** to the platform-API split below — every symbol `dc/` must provide, derived from `pc/src` |
