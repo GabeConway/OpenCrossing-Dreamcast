@@ -118,7 +118,12 @@ already produced two wrong numbers.
 |---|---|
 | `kb/levers.md` | start here for any size work |
 | `kb/ram-plan.md` | **the solution stack that closes the gap** — eight ranked moves P1–P8 with closing arithmetic, second-rank levers, experiment queue. Documentation only, nothing implemented |
-| `kb/research-budget-premises.md` | audit of the budget's premises; §2.4 is the bucket-6 measurement recipe, §6 lists what is unfinished |
+| `kb/research-budget-premises.md` | **split index** — audit of the budget's premises |
+| `kb/research-budget-corrected.md` | §1: the corrected image budget and the single-inequality fit test |
+| `kb/research-budget-bucket6.md` | §2: the arena — 1,294,497 B provably dead. **§2.4 is the bucket-6 measurement recipe** (now partly answered by `DC_ARENA_PROBE`) |
+| `kb/research-budget-evidence.md` | §3: the sourced numbers — KOS memory model, the bucket-1 double-count, `s_assets[]` |
+| `kb/research-budget-actions.md` | §4/§5/§7: revised ledger, ranked cheapest actions, bottom line |
+| `kb/research-budget-unfinished.md` | **§6: what is unfinished**, numbered, with next steps |
 | `kb/research-size-reduction.md` | **split index** — fitting in 16 MB without changing codegen; source of `kb/levers.md` L3, which re-costed every number here and found them all wrong. Parts: `-baseline`, `-techniques`, `-memory-map`, `-plan` |
 | `kb/mem-budget.md` | **index** to the split ledger below. ⚠️ the §4 ledger itself is void |
 | `kb/mem-budget-m1-sh4.md` | **the part that is still true** — the real sh-elf link: section sizes, the `.bss` split, levers applied, dead ends, the boot-size gate |
@@ -127,7 +132,12 @@ already produced two wrong numbers.
 | `kb/mem-ledger-runtime-design.md` | `dc/src/dc_mem_ledger.c` design — the budget as a runtime object that fails loudly |
 | `kb/mem-probe-plan.md` | `PC_MEMPROBE=1` probes for the real arena / ARAM / asset high-water marks. Partly overtaken by `DC_ARENA_PROBE` |
 | `kb/mem-budget-void-ledger.md` | ⚠️ **VOID** — the 12-bucket ledger and C1–C11. Kept only for its bucket numbering |
-| `kb/research-mmu-paging.md` | why MMU paging is DEAD. Read before ever reconsidering |
+| `kb/research-mmu-paging.md` | **the DEAD verdict + index.** Read before ever reconsidering MMU paging |
+| `kb/research-mmu-kos-capability.md` | [DEAD] what KOS's MMU driver can do: 4 KB pages, 253,952 B TLB reach, no eviction, forced uncached |
+| `kb/research-mmu-fault-cost.md` | [DEAD] interrupts masked in the fault handler ⇒ no CD-backed pager; SH7750 hazards |
+| `kb/research-mmu-hardware-tax.md` | [DEAD] static remapping is redundant against P1/P2; the store-queue erratum taxes *any* MMU use |
+| `kb/research-mmu-game-impact.md` | [DEAD] the five semantic breakages in `src/` (DMA first); why `.text` need not page |
+| `kb/research-mmu-reopening.md` | [DEAD] precedent, the four preconditions to reopen, all sources |
 | `kb/research-n64-origin.md` | why the 22.5 MB image is *not* an emulation artefact |
 | `kb/research-creative-ram.md` | **unbanked CONCEPTS**, ranked, each with a failure mode and a cheapest experiment. T1 (textures never pooled) is the highest-value open idea in the project |
 | `kb/research-second-tier-memory.md` | ⚠️ salvaged fragment, not a finished doc. VRAM/AICA bandwidth, never run |
@@ -142,7 +152,10 @@ already produced two wrong numbers.
 | `tools/dcstub/measure_dedup.py` | the L6 dedup measurement (S2). Header comment is the doc |
 | `tools/dcstub/census_resolve.py` | resolves a `DC_ASSET_CENSUS=1` console log into the scene's real working set (symbol, size, kind). The only way to learn what a scene touches — acres and NPCs are named by index, not by symbol |
 | `dc/stage-disc.sh` | flatten a `dcasset extract` tree into a disc root for `DC_DISC_ROOT` |
-| `kb/save-budget.md` | 295,910 B of save into a 100 KB VMU. Harness: `tools/savebench/` |
+| `kb/save-budget.md` | **verdict + index** — 295,910 B of save into a 100 KB VMU. Harness: `tools/savebench/`. ⚠️ all compression numbers are SYNTHETIC |
+| `kb/save-layout.md` | what the save actually is: verified struct sizes, `.gci` layout, bytes by field group |
+| `kb/save-compression.md` | codec comparison and the VMU fit verdict (synthetic), plus the measured PLAN §6 options |
+| `kb/save-plan.md` | the recommended VMU plan, compression + flash write cost, open items |
 | `tools/savebench/README.md` | save-size measurement harness |
 
 ### Graphics & audio
@@ -150,7 +163,12 @@ already produced two wrong numbers.
 | file | contents |
 |---|---|
 | `kb/tev-map.md` | **split index** — all 101 TEV configs → fixed-function PVR strategies. Parts: `-table` (**the reference table — load this to implement**), `-implementation`, `-alpha`, `-hard-cases`, `-decoding` |
-| `kb/audio-plan.md` | jaudio_NES on DC. **Verdict: a real risk, not solved** |
+| `kb/audio-plan.md` | jaudio_NES on DC. **Verdict: a real risk, not solved** — verdict + index |
+| `kb/audio-engine.md` | what the engine is (N64 libaudio, *not* JAudio), shipped parameters, `audiorom.img` |
+| `kb/audio-cpu-cost.md` | per-voice op counts, the SH-4 cycle model, A0–A4 configs, the sm64-dc precedent |
+| `kb/audio-stage-a-software.md` | stage A: rspsim at 22 kHz, effect-cut order, `snd_stream`, main-RAM footprint |
+| `kb/audio-stage-b-aica.md` | stage B: the exact seam, AICA register map, residency policy, the offline tools |
+| `kb/audio-plan-of-record.md` | the plan of record, and the ranked list of what is still unmeasured |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |
 | `kb/design-platform-api.md` | **index** to the platform-API split below — every symbol `dc/` must provide, derived from `pc/src` |
 | `kb/platform-api-overview.md` | symbol counts and dispositions, ranked landmines, unverified gaps. **Read first — carries the table legend** |
