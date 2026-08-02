@@ -5,6 +5,8 @@
 # Usage:
 #     bash dc/build-dc.sh                 # full build -> ELF + unpadded CDI
 #     DC_TARGET=objs bash dc/build-dc.sh  # compile only, no link (M1 signal)
+#     DC_SRC_SHRINK=0 bash dc/build-dc.sh # kill switch for the .bss shrink pass
+#                                         # (default 1; 0 is a byte-identical revert)
 #     DC_CDI_PAD=1  bash dc/build-dc.sh   # padded 740 MB CDI for CD-R burns
 #     JOBS=8        bash dc/build-dc.sh
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
@@ -44,11 +46,26 @@ if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
     python3 "$REPO/tools/dcstub/make_stub_data.py"
 fi
 
+# DC_SRC_SHRINK=1 (the DEFAULT) -> the .bss literal-shrink tree, 1,159,392 B of
+# .bss (kb/levers.md L3, dc/Makefile's DC_SRC_SHRINK block). Same host-side
+# story as the stub tree above: python3 is not part of the SDK image's
+# contract, so the tree is generated here and the container only sees it
+# through the bind mount. The generator is idempotent and content-compared.
+#
+# It hard-errors if any of its anchored rules stops matching the vendored
+# source. That is deliberate — a silently-not-applied rewrite would produce a
+# build that looks correct and saves nothing. Do not paper over it here.
+if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
+    echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc"
+    python3 "$REPO/tools/dcstub/make_src_shrink.py"
+fi
+
 ENVARGS=(
     -e JOBS="${JOBS:-4}"
     -e DC_TARGET="${DC_TARGET:-all}"
     -e DC_CDI_PAD="${DC_CDI_PAD:-0}"
     -e DC_ASSET_STUB="${DC_ASSET_STUB:-0}"
+    -e DC_SRC_SHRINK="${DC_SRC_SHRINK:-1}"
 )
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default

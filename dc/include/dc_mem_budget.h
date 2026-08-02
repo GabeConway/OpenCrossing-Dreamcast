@@ -59,7 +59,12 @@
  * and the s_bucket[] table do not have to be renumbered.
  *   9  audio      -> jaudio_NES, 1,265,101 B of .bss
  *   10 disc I/O   -> dc_dvd.c.o, 13,320 B of .bss (no read-ahead ring exists)
- *   11 PVR stage  -> g_gx in dc_gx.c.o, 334,764 B of .bss
+ *   11 PVR stage  -> g_gx in dc_gx.c.o. The 334,764 B this line used to quote
+ *                   is dc_gx.c.o's WHOLE .bss, not g_gx: sh-elf-nm puts g_gx
+ *                   itself at 334,088 B and the other ~676 B are file statics.
+ *                   The 2026-08-01 vertex-buffer shrink (2040 verts x 32 B
+ *                   instead of 8192 x 40 B, see dc_gx_internal.h) takes the TU
+ *                   to 72,352 B and g_gx to 71,688 B.
  * kb/research-budget-premises.md §3.4. */
 #define DC_BUDGET_AUDIO                  0u
 #define DC_BUDGET_DISC_IO                0u

@@ -137,6 +137,36 @@ extern "C" {
  * only so dc_gx.c can report how much it is giving back. */
 #define DC_FIFO_SIZE            (0x10001u)
 
+/* --- KILL SWITCH: DC_CARD_KEEP_STATIC --------------------------------------
+ * kb/levers.md L3, row "pc_m_card": 308,242 B of .bss in pc/src/pc_m_card.c —
+ * the sole definition of mCD_toNextLand & co. on this target, since
+ * dc/Makefile's PC_REUSE_C compiles it in and excludes src/game/m_card.c.
+ *
+ * Four cuts, all of them layout, none of them codegen:
+ *   A  l_keepMail / l_keepOriginal / l_keepDiary deleted     -147,782 B
+ *      They were a pure double buffer of l_aram_block_p_table[]; the GCI read
+ *      now lands in the ARAM blocks directly.
+ *   B  l_keepSave: `Save` -> `Save_t` (drops dead memory-card sector padding)
+ *      and moved from .bss to a zelda_malloc() out of the arena this header
+ *      already reserves, for the one play scene it is live
+ *                                                            -155,644 B
+ *   C  l_mcd_foreigner_file: drop the sector alignment padding  -4,576 B
+ *      (the passport is never written to a card file on this port)
+ *   D  l_card_b_gci_path[300] -> [64]                             -236 B
+ *      (the only DC value is "/vmu/aN/ANIMAL_CROSSING", 23 chars)
+ *
+ * DEFINE THIS to revert all four: every buffer goes back to a file-scope
+ * array and pc_save_read_gci_to_keep() goes back to the double-buffer path.
+ * The switch lives inside four helpers in pc_m_card.c, so the call sites are
+ * identical either way and the logic is not duplicated.
+ *
+ * NB none of this is exercised yet: dc_vmu_write_file() (dc/src/dc_card.c) is
+ * still DC_UNIMPLEMENTED, so nothing on this target saves or travels. The cut
+ * is therefore free of behavioural regression today — and correspondingly
+ * untested at runtime. Re-read the CUT A/B comments in pc_m_card.c when the
+ * VMU write path is wired up. */
+/* #define DC_CARD_KEEP_STATIC */
+
 #define DC_PI  3.14159265358979323846
 #define DC_PIf 3.14159265358979323846f
 #define DC_DEG_TO_RAD  (DC_PI / 180.0)

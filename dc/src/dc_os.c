@@ -311,8 +311,39 @@ BOOL OSRestoreInterrupts(BOOL level) {
 #else
 #define DC_DCACHE_WB(a, l)    dcache_flush_range((uintptr_t)(a), (size_t)(l))
 #define DC_DCACHE_INV(a, l)   dcache_inval_range((uintptr_t)(a), (size_t)(l))
-#define DC_DCACHE_PURGE(a, l) dcache_purge_range((uintptr_t)(a), (size_t)(l))
+#define DC_DCACHE_PURGE(a, l) dc_dcache_purge_range((uintptr_t)(a), (size_t)(l))
 #define DC_ICACHE_INV(a, l)   icache_flush_range((uintptr_t)(a), (size_t)(l))
+
+/* Hand-rolled purge — DO NOT go back to KOS's dcache_purge_range().
+ *
+ * arch/cache.h:208-221 in the SDK image sends any range >= 39,936 B into
+ * arch_dcache_purge_all(), and that inline (arch/cache.h:187-206) carries
+ *
+ *     alignas(32) static char buffer[ARCH_CACHE_L1_DCACHE_SIZE];   // 16,384 B
+ *
+ * on the `if(__is_defined(__OPTIMIZE_SIZE__)) … else …` else-branch. We build
+ * at -O0, so __OPTIMIZE_SIZE__ is never defined and the else-branch is always
+ * the one compiled. The buffer landed in .bss as `.bss.buffer.4` at 0x8d469000,
+ * 0x4000 B, in dc/src/dc_os.c.o — this was the ONLY translation unit in the
+ * whole 3917-TU image that reached it (verified in AnimalCrossing.map).
+ * Calling arch_dcache_purge_line() directly never instantiates purge_all, so
+ * the 16,384 B disappears. `ocbp` is writeback + invalidate for one line, which
+ * is exactly what purge_range promises.
+ *
+ * The tradeoff, stated honestly: above KOS's threshold this is now a per-line
+ * loop rather than a whole-cache sweep, so a very large range issues more ocbp
+ * than the 512 lines the 16 KB dcache can actually hold. It is ~1 cycle each
+ * and every DCFlushRange* call site in the tree is an audio buffer, a card
+ * block or a JUTDirectPrint span — all well under 39,936 B — so the fast path
+ * was never being taken anyway. The alternative (KOS's __OPTIMIZE_SIZE__ path,
+ * writing zeroes through the memory-mapped dcache address array at 0xF4000008)
+ * is untested on our hardware and was deliberately not adopted here. */
+static void dc_dcache_purge_range(uintptr_t start, size_t count) {
+    uintptr_t end = start + count;
+    start &= ~(uintptr_t)0x1f;
+    for (; start < end; start += 32)
+        arch_dcache_purge_line((void*)start);
+}
 #endif
 
 /* Bring-up guard: SH-4 invalidate is line-granular (32 B) and will drop

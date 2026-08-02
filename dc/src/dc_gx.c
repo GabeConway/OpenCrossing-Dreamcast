@@ -101,10 +101,74 @@ static int s_conv_src_count = 0;
 static int s_conv_src_expected = 0;
 static DCGXVertex s_conv_v0, s_conv_v1;
 
-/* One-shot warning when a batch exceeds DC_GX_MAX_VERTS (8192). The PC port
- * had 65536 and never hit it; the DC buffer is 8x smaller (mem-budget §4.1)
- * and the real peak is UNMEASURED. If this fires, geometry is being dropped. */
+/* Vertices emitted into the CURRENT GXBegin, counting ones already flushed out
+ * of the staging buffer by a mid-batch split. g_gx.current_vertex_idx is only
+ * the *staged* count now, so it can no longer serve as the batch-completion
+ * counter (§3.6 behaviour 1 terminates batches on a counted total, because
+ * emu64 never calls GXEnd). */
+static int s_emit_total = 0;
+
+/* One-shot warning, now reachable only under -DDC_NO_VERTEX_SPLIT. With
+ * splitting on — the default — overflow cannot happen and no geometry is
+ * ever dropped. */
 static int s_overflow_warned = 0;
+
+/* ---- Mid-batch split (kill switch: -DDC_NO_VERTEX_SPLIT) ------------------
+ * DC_GX_MAX_VERTS used to be a HARD CEILING: past it dc_gx_commit_vertex()
+ * dropped vertices and printed once. That is the only reason the buffer was
+ * sized defensively at 8192. It is a flush point now — when the next primitive
+ * would not fit, the staged vertices are submitted as their own draw and
+ * accumulation restarts at index 0.
+ *
+ * Why that is safe:
+ *   - Topology. DC_GX_MAX_VERTS is a multiple of 12, and GXBegin() below
+ *     converts GX_TRIANGLESTRIP/GX_TRIANGLEFAN to GX_TRIANGLES *before* any
+ *     vertex reaches the buffer, so every primitive the buffer holds is
+ *     independent: 3 verts, or 4 for GX_QUADS. A split on a multiple of 12
+ *     always lands on a primitive boundary. Strips/fans can only reach the
+ *     buffer unconverted under -DDC_NO_STRIP_CONVERT, and splitting those WOULD
+ *     lose the bridging vertices — dc_gx_split_ok() excludes them and they keep
+ *     the old drop behaviour.
+ *   - Cull. dc_gx_batch_is_offscreen() takes the AABB of what is staged. The
+ *     AABB of each half is contained in the AABB of the whole, so splitting can
+ *     only ever reject less. Strictly more conservative, never wrong.
+ *   - State. Both halves are drawn with identical g_gx state, because every GX
+ *     state setter flushes the open batch first (§3.6 behaviour 3), so state
+ *     cannot change mid-batch.
+ *
+ * Consequence: DC_GX_MAX_VERTS is now a pure performance knob. Too small costs
+ * draw calls; it can never cost a triangle. */
+#ifdef DC_NO_VERTEX_SPLIT
+static const int dc_gx_vertex_split = 0;
+/* Without splitting, a merged batch must still fit the buffer. */
+#define DC_GX_MERGE_CAP DC_GX_MAX_VERTS
+#define DC_GX_STAGE_CAP DC_GX_MAX_VERTS
+#else
+static const int dc_gx_vertex_split = 1;
+/* The split point, rounded DOWN to a multiple of 12 so that it always lands on
+ * a primitive boundary. DC_GX_MAX_VERTS is already 2040 = 12 x 170, so this is
+ * a no-op at the default; it exists so the -DDC_GX_MAX_VERTS=<n> kill switch
+ * stays safe for any n (e.g. the old 8192 -> 8184). */
+#define DC_GX_STAGE_CAP ((DC_GX_MAX_VERTS / 12) * 12)
+/* With splitting the staging buffer no longer bounds a batch, so merging is
+ * limited only by the counters: GXBegin takes a u16 nverts and strip
+ * conversion multiplies by at most 3. */
+#define DC_GX_MERGE_CAP 262144
+#endif
+
+/* A quad is the widest primitive that can sit in the buffer; anything below
+ * that cannot stage even one. */
+typedef char dc_gx_stage_cap_check[(DC_GX_STAGE_CAP >= 12) ? 1 : -1];
+
+/* Splitting preserves topology only for primitives whose vertices are
+ * independent. Everything here is post-conversion (see GXBegin). */
+static int dc_gx_split_ok(void) {
+    return dc_gx_vertex_split &&
+           (g_gx.current_primitive == GX_TRIANGLES ||
+            g_gx.current_primitive == GX_QUADS ||
+            g_gx.current_primitive == GX_POINTS ||
+            g_gx.current_primitive == GX_LINES);
+}
 
 /* ==========================================================================
  * Small helpers, ported verbatim
@@ -160,25 +224,38 @@ static void dc_gx_dirty_all(void) {
  * Vertex accumulation
  * ==========================================================================
  * §3.6 behaviour 2: a GXPosition* call COMMITS the previous vertex and starts a
- * new one; the reset clears normal, color1 and texcoords but CARRIES COLOR0
- * FORWARD. Break that and vertex colours break.
+ * new one; the reset clears normal and texcoords (and color1, when the fat
+ * vertex is compiled in) but CARRIES COLOR0 FORWARD. Break that and vertex
+ * colours break.
  *
  * Converting batches (strip/fan -> triangle list) buffer the first two source
  * vertices, then emit one triangle per subsequent vertex. Strips alternate
  * winding; fans pivot on v0. Doing it here rather than at draw time is what
  * makes them mergeable with plain triangle batches.
  */
+/* Make room for `need` more vertices. Returns 1 if they will fit. With
+ * splitting enabled this submits the staged batch and restarts at index 0
+ * (see the DC_NO_VERTEX_SPLIT block above for why that is safe); with it
+ * disabled this is just the old capacity test. */
+static int dc_gx_reserve_verts(int need) {
+    if (g_gx.current_vertex_idx + need <= DC_GX_STAGE_CAP) return 1;
+    if (!dc_gx_split_ok()) return 0;
+    dc_gx_flush_vertices();     /* resets current_vertex_idx to 0 */
+    return need <= DC_GX_STAGE_CAP;
+}
+
 static void dc_gx_commit_vertex(void) {
     int i;
 
     if (!s_conv_active) {
-        if (g_gx.current_vertex_idx < DC_GX_MAX_VERTS) {
+        if (dc_gx_reserve_verts(1)) {
             g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
             g_gx.current_vertex_idx++;
+            s_emit_total++;
         } else if (!s_overflow_warned) {
             s_overflow_warned = 1;
             DC_LOGE("[DC/GX] vertex buffer overflow: DC_GX_MAX_VERTS=%d is too "
-                    "small, geometry is being DROPPED (mem-budget probe 4)\n",
+                    "small, geometry is being DROPPED (DC_NO_VERTEX_SPLIT)\n",
                     DC_GX_MAX_VERTS);
         }
         return;
@@ -188,7 +265,7 @@ static void dc_gx_commit_vertex(void) {
     if (i == 0) { s_conv_v0 = g_gx.current_vertex; return; }
     if (i == 1) { s_conv_v1 = g_gx.current_vertex; return; }
 
-    if (g_gx.current_vertex_idx + 3 <= DC_GX_MAX_VERTS) {
+    if (dc_gx_reserve_verts(3)) {
         DCGXVertex* dst = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
         if (s_conv_is_fan || (i & 1) == 0) {
             dst[0] = s_conv_v0;
@@ -199,6 +276,7 @@ static void dc_gx_commit_vertex(void) {
         }
         dst[2] = g_gx.current_vertex;
         g_gx.current_vertex_idx += 3;
+        s_emit_total += 3;
     } else if (!s_overflow_warned) {
         s_overflow_warned = 1;
         DC_LOGE("[DC/GX] vertex buffer overflow during strip conversion\n");
@@ -236,7 +314,9 @@ void dc_gx_flush_if_begin_complete(void) {
         if (s_conv_src_count + pend < s_conv_src_expected) return;
     } else {
         if (g_gx.expected_vertex_count <= 0) return;
-        if (g_gx.current_vertex_idx + pend < g_gx.expected_vertex_count) return;
+        /* s_emit_total, NOT current_vertex_idx: a mid-batch split has already
+         * drained part of the batch out of the staging buffer. */
+        if (s_emit_total + pend < g_gx.expected_vertex_count) return;
     }
     dc_gx_commit_pending_and_flush();
 }
@@ -365,18 +445,23 @@ void dc_gx_init(void) {
 
     memset(&g_gx, 0, sizeof(g_gx));
 
-    /* The vertex buffer is the largest single object in the platform layer:
-     * DC_GX_MAX_VERTS * sizeof(DCGXVertex). It lives in BSS (like the PC port)
-     * rather than in a ledger extent, so tell the ledger about it explicitly
-     * or bucket 11 reads as empty. */
+    /* The vertex buffer is still the largest single object in the platform
+     * layer: DC_GX_MAX_VERTS * sizeof(DCGXVertex). It lives in BSS (like the PC
+     * port) rather than in a ledger extent, so tell the ledger about it
+     * explicitly. NOTE bucket 11 is retired to 0 in dc_mem_budget.h — these
+     * bytes are already counted once as .bss inside the image span, and this
+     * note exists for the per-bucket report, not for the fit inequality. */
     dc_mem_note(DCMEM_PVR_STAGING,
                 (ptrdiff_t)(DC_GX_MAX_VERTS * (int)sizeof(DCGXVertex)));
 
-    DC_LOGE("[DC/GX] verts=%d x %uB = %u B; dedup=%d strip=%d cull=%d merge=%d\n",
+    /* The live configuration lands in every smoke log; `split` is the one that
+     * makes DC_GX_MAX_VERTS a perf knob rather than a correctness ceiling. */
+    DC_LOGE("[DC/GX] verts=%d x %uB = %u B; dedup=%d strip=%d cull=%d merge=%d "
+            "split=%d\n",
             DC_GX_MAX_VERTS, (unsigned)sizeof(DCGXVertex),
             (unsigned)(DC_GX_MAX_VERTS * sizeof(DCGXVertex)),
             dc_gx_state_dedup, dc_gx_strip_convert,
-            dc_gx_batch_cull, dc_gx_draw_merge);
+            dc_gx_batch_cull, dc_gx_draw_merge, dc_gx_vertex_split);
 
     g_gx.projection_type = GX_PERSPECTIVE;
     g_gx.num_tev_stages = 1;
@@ -489,9 +574,12 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
         int pend = g_gx.vertex_pending ? 1 : 0;
         int prev_complete = s_conv_active
             ? (s_conv_src_count + pend == s_conv_src_expected)
-            : (g_gx.current_vertex_idx + pend == g_gx.expected_vertex_count);
+            : (s_emit_total + pend == g_gx.expected_vertex_count);
+        /* DC_GX_MERGE_CAP is the staging buffer only when splitting is off;
+         * with splitting on a merged batch may exceed it and simply becomes
+         * several draws. */
         if (prev_complete &&
-            g_gx.expected_vertex_count + emit_count <= DC_GX_MAX_VERTS) {
+            g_gx.expected_vertex_count + emit_count <= DC_GX_MERGE_CAP) {
             if (g_gx.vertex_pending) {
                 dc_gx_commit_vertex();
                 g_gx.vertex_pending = 0;
@@ -521,6 +609,7 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     g_gx.current_vtxfmt = vtxfmt;
     g_gx.expected_vertex_count = emit_count;
     g_gx.current_vertex_idx = 0;
+    s_emit_total = 0;           /* new batch: nothing emitted or split out yet */
     g_gx.in_begin = 1;
     g_gx.vertex_pending = 0;
     s_conv_active = conv;
@@ -555,10 +644,12 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.color0[1] = cg;
     g_gx.current_vertex.color0[2] = cb;
     g_gx.current_vertex.color0[3] = ca;
+#ifdef DC_GX_FAT_VERTEX
     g_gx.current_vertex.color1[0] = 0;
     g_gx.current_vertex.color1[1] = 0;
     g_gx.current_vertex.color1[2] = 0;
     g_gx.current_vertex.color1[3] = 0;
+#endif
     g_gx.current_vertex.texcoord[0] = 0.0f;
     g_gx.current_vertex.texcoord[1] = 0.0f;
 

@@ -51,30 +51,81 @@ void dc_gx_mark_dirty(unsigned int flag);
 #define DIRTY(flag) dc_gx_mark_dirty(flag)
 
 /* --- Sizing ----------------------------------------------------------------
- * PC_GX_MAX_VERTS was 65536 x 48 B = 3.1 MB of static BSS. kb/mem-budget.md
- * §4.1 shrinks this to 8192 verts; the real peak per town frame is UNMEASURED
- * (probe 4). If a batch exceeds this the surplus vertices are DROPPED and a
- * one-shot warning is printed — see dc_gx_commit_vertex(). */
-#define DC_GX_MAX_VERTS       8192
+ * THE BUFFER STAGES ONE FLUSH, NOT ONE FRAME. dc_gx_flush_vertices() resets
+ * current_vertex_idx on every exit path, so the only thing this has to hold is
+ * the largest run of vertices that can arrive between two flushes.
+ *
+ * The provable per-GXBegin ceiling is 512 vertices, from emu64's display-list
+ * decoder:
+ *   emu64.c:4954 dl_G_QUADN  n_faces = ((w0 >> 17) & 0x7F) + 1  <= 128, x4 = 512
+ *   emu64.c:4814 dl_G_TRIN   same 7-bit field,                  x3 = 384
+ *   everything else (G_TRI1/G_TRI2 singles, sprites, rects)     <= 6
+ * kb/perf.md §14 measured merged=0 across a whole session, so GXBegin's
+ * batch-merge path never inflates that in practice.
+ *
+ * 2040 is a ~4x margin over 512. It is deliberately NOT 1024: the G_TRI1/G_TRI2
+ * run coalescer (emu64.c:5103-5118) counts commands until a non-tri opcode and
+ * emits one GXBegin for the whole run — it is the one path with no encoding
+ * bound on nverts. 2040 rather than 2048 because the cap MUST BE A MULTIPLE OF
+ * 12: a mid-batch split is only topology-preserving if it lands on a primitive
+ * boundary, and 12 = lcm(3 triangles, 4 quads, 2 lines, 1 point).
+ *
+ * The old value was 8192. It was not derived from anything: it is
+ * pc/include/pc_gx_internal.h:50 PC_GX_MAX_VERTS 65536 — which is itself just
+ * the width of GXBegin's `u16 nverts` argument, not a measurement — divided by
+ * 8. Do not treat 8192 as a measured floor.
+ *
+ * Since dc_gx_commit_vertex() now FLUSHES AND CONTINUES instead of dropping,
+ * this is a pure performance knob: too small costs extra draw calls, never a
+ * dropped triangle. Kill switch: -DDC_GX_MAX_VERTS=8192 (and
+ * -DDC_NO_VERTEX_SPLIT to get the old drop-on-overflow behaviour back). */
+#ifndef DC_GX_MAX_VERTS
+#define DC_GX_MAX_VERTS       2040
+#endif
 #define DC_GX_MAX_ATTR        26
 #define DC_GX_MAX_VTXFMT      8
 #define DC_GX_MAX_TEV_STAGES  3     /* measured max across all 101 configs */
 
-/* Staging vertex. 40 bytes, not the 32 B mem-budget quotes: that figure
- * assumes stage-B's quantized positions (dca3 meshlets + FTRV decode), which
- * is an M4 change. 8192 x 40 = 327,680 B, inside bucket 11 (384,000 B).
- * Normals are s16-normalized because SH-4 lighting will consume them as
- * fixed point; DC_GX_NRM_SCALE converts. */
+/* Staging vertex. 32 bytes.
+ *
+ * It used to be 40. Three of those fields were dead weight:
+ *   color1[4]   — NEVER WRITTEN. Only zeroed in GXPosition3f32. No call site in
+ *                 src/ ever does GXSetVtxDesc(GX_VA_CLR1, ...) — emu64 declares
+ *                 exactly POS, NRM, CLR0, TEX0 (emu64.c:2885-2896); the only
+ *                 GX_VA_CLR1 mentions in the tree are switch arms inside
+ *                 src/static/dolphin/gx/GXAttr.c and GXVerifXF.c. NOTE: the
+ *                 `.oargb` in kb/tev-map.md is a PER-BATCH constant derived from
+ *                 the TEV konst colours, not a per-vertex attribute — it does
+ *                 not resurrect this field.
+ *   _pad, _reserved — never touched. They existed to pad the struct to a
+ *                 multiple of 8 for SH-4 FMOV pairs; a 32 B struct already is
+ *                 one, and the aligned(8) below makes that a guarantee rather
+ *                 than a hope about where the linker puts g_gx.
+ * position/texcoord/color0 are live. normal[3] is kept even though nothing
+ * reads it yet — SH-4 lighting (PLAN §3.3) consumes it as s16 fixed point, and
+ * the GXNormal3f32/3s16/3s8/1x16 setters already write it. DC_GX_NRM_SCALE
+ * converts.
+ *
+ * Kill switch: -DDC_GX_FAT_VERTEX restores the byte-identical 40 B layout.
+ *
+ * CAVEAT, recorded so nobody banks it twice: this saving is real .bss today,
+ * but GLdc (M2, stage A) will bring its own vertex and command buffers, which
+ * are ADDITIVE HEAP that no bucket currently reserves. This change does not
+ * pay for those. */
 #define DC_GX_NRM_SCALE 32767.0f
 typedef struct {
     float position[3];      /*  0 */
     float texcoord[2];      /* 12 */
     unsigned char color0[4];/* 20 */
-    unsigned char color1[4];/* 24 -- PVR "offset" (specular) color candidate */
-    short normal[3];        /* 28 */
+#ifdef DC_GX_FAT_VERTEX
+    unsigned char color1[4];/* 24 -- dead: never written, see above */
+#endif
+    short normal[3];        /* 24 (28 when fat) */
+#ifdef DC_GX_FAT_VERTEX
     unsigned short _pad;    /* 34 */
-    float _reserved;        /* 36 -> 40, keeps 8-byte alignment for SH-4 FMOV pairs */
-} DCGXVertex;
+    float _reserved;        /* 36 -> 40 */
+#endif
+} __attribute__((aligned(8))) DCGXVertex;   /* 32 B lean, 40 B fat */
 
 typedef struct {
     int color_a, color_b, color_c, color_d;

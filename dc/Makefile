@@ -23,6 +23,10 @@
 # KNOBS (env or make VAR=...)
 #   DECOMP_OPT=-O0   optimization level for decomp game code (see below)
 #   DC_OPT=-O2       optimization level for dc/src platform code
+#   DC_SRC_SHRINK=1  .bss literal-shrink pass, DEFAULT ON (-1,159,392 B).
+#                    0 is a byte-identical revert. Needs the tree from
+#                    tools/dcstub/make_src_shrink.py; dc/build-dc.sh runs it.
+#   DC_ASSET_STUB=0  throwaway boot-bringup build with [1]-sized asset arrays
 #   V=1              echo full compiler command lines
 # =============================================================================
 
@@ -36,6 +40,8 @@ TARGET   := $(BUILD)/AnimalCrossing.elf
 RSP      := $(BUILD)/objs.rsp
 STUBDIR  := $(BUILD)/stubsrc
 STUBREL  := $(patsubst $(ROOT)/%,%,$(STUBDIR))
+SHRINKDIR := $(BUILD)/shrinksrc
+SHRINKREL := $(patsubst $(ROOT)/%,%,$(SHRINKDIR))
 
 # =============================================================================
 # DC_ASSET_STUB — the throwaway boot-bringup build (kb/STATE.md, step S1)
@@ -71,6 +77,68 @@ ifeq ($(DC_ASSET_STUB),1)
   stubify = $(foreach f,$(1),$(if $(wildcard $(STUBDIR)/$(f)),$(STUBREL)/$(f),$(f)))
 else
   stubify = $(1)
+endif
+
+# =============================================================================
+# DC_SRC_SHRINK — the .bss literal-shrink pass (kb/levers.md L3). DEFAULT ON.
+# =============================================================================
+# Recovers 1,159,392 B of .bss by rewriting seven numeric literals in the
+# vendored decomp. Not a codegen change of any kind: the compiler flags are
+# untouched, only the constants that size seven buffers.
+#
+#   aSTR_overlay 294,912->512 · aINS_overlay 21,528->72 ·
+#   aNPC_{n,s,k,e}_overlay 75,840->192 · aGYO_overlay 30,720->32   (dead arenas)
+#   prbuf 614,400->32                                (writer is a stubbed no-op)
+#   audiomemory 0x90000->0x76000        (measured allocation ceiling is 481,152)
+#   graph/padmgr/irqmgr stacks 16,384->48      (no thread ever starts on this port)
+#
+# Each rewrite's justification, and the fifth candidate that was checked and
+# REFUTED, are in the header of tools/dcstub/make_src_shrink.py. src/ and
+# include/ are never touched (CLAUDE.md §1); the rewritten copies live in
+# $(SHRINKDIR), which `clean` removes. DC_SRC_SHRINK=0 is a byte-identical
+# revert.
+#
+# TWO SWAP MECHANISMS, because one does not cover both cases:
+#
+#   1. Per-TU source swap, exactly like DC_ASSET_STUB above. Used for the four
+#      .c files that are compiled directly, where -I can never reach them.
+#      $(SHRINKDIR)/shrink.list names them.
+#
+#   2. Include-path shadow, for the two .c_inc files and include/sys_stacks.h.
+#      $(SHRINKDIR)/include and $(SHRINKDIR)/src go at the FRONT of INCLUDES
+#      below, ahead of the vendored $(ROOT)/include and $(ROOT)/src.
+#      VERIFIED with `sh-elf-gcc -E -H` on every consumer, not assumed:
+#        src/main.c, src/system/sys_stacks.c -> $(SHRINKDIR)/include/sys_stacks.h
+#        src/actor/npc/ac_npc.c              -> .../shrinksrc/include/../src/actor/npc/ac_npc_ctrl.c_inc
+#        src/static/jaudio_NES/game/game64.c -> .../shrinksrc/include/../src/static/jaudio_NES/game/game64.c_inc
+#      (the two .c_inc are included as "../src/…", which cannot resolve against
+#      the includer's own directory and therefore falls through to -I.)
+#
+#      The mechanism has a REAL hole and the generator is built around it: a
+#      quoted #include is resolved against the INCLUDING FILE'S directory first,
+#      so a header in include/ that is pulled in by a sibling header in
+#      include/ can never be shadowed. MEASURED: a shadow of
+#      include/ac_structure.h reaches src/actor/ac_structure.c but NOT
+#      src/actor/npc/ac_npc.c. That is why aSTR_overlay and aINS_overlay are
+#      done as per-TU swaps confined to one TU, with a compile-time assert on
+#      the unshrunk type, rather than as header shadows.
+#
+#   python3 tools/dcstub/make_src_shrink.py    # host side, before the build
+#   bash dc/build-dc.sh                        # does the above for you
+DC_SRC_SHRINK ?= 1
+ifeq ($(DC_SRC_SHRINK),1)
+  ifeq ($(wildcard $(SHRINKDIR)/shrink.list),)
+    $(error DC_SRC_SHRINK=1 but $(SHRINKDIR)/shrink.list is missing. \
+            Run: python3 $(ROOT)/tools/dcstub/make_src_shrink.py)
+  endif
+  # Only a handful of files, so $(filter) is cheap here (unlike the 2535-entry
+  # stub list, which is why that one uses $(wildcard) instead).
+  SHRINK_LIST := $(shell cat $(SHRINKDIR)/shrink.list)
+  shrinkify = $(foreach f,$(1),$(if $(filter $(f),$(SHRINK_LIST)),$(SHRINKREL)/$(f),$(f)))
+  SHRINK_INCLUDES := -I$(SHRINKDIR)/include -I$(SHRINKDIR)/src
+else
+  shrinkify = $(1)
+  SHRINK_INCLUDES :=
 endif
 
 # --- Toolchain ---------------------------------------------------------------
@@ -179,7 +247,13 @@ UB_GUARDS := \
 # include/libc is deliberately NOT on the path (same reason as the PC build):
 # having both include/ and include/libc/ breaks the decomp's #include_next
 # shadow-header chains.
+#
+# $(SHRINK_INCLUDES) MUST COME FIRST when DC_SRC_SHRINK=1: it is how the
+# rewritten sys_stacks.h / ac_npc_ctrl.c_inc / game64.c_inc win over the
+# vendored -I$(ROOT)/include and -I$(ROOT)/src below. It is empty otherwise,
+# so DC_SRC_SHRINK=0 leaves this list byte-identical to what it was.
 INCLUDES := \
+	$(SHRINK_INCLUDES) \
 	-I$(DC_DIR)/include \
 	-I$(ROOT)/pc/include \
 	-I$(ROOT)/include \
@@ -385,6 +459,16 @@ GAME_CXX     := $(call stubify,$(GAME_CXX))
 C11_SRC      := $(call stubify,$(C11_SRC))
 CXXFROMC_SRC := $(call stubify,$(CXXFROMC_SRC))
 
+# DC_SRC_SHRINK's per-TU swaps, applied after stubify for the same reason.
+# The two swap sets MUST stay disjoint — a file claimed by both would silently
+# lose one of the two rewrites, since only one source path per TU is compiled.
+# make_src_shrink.py hard-errors if any of its targets appears in stub.list,
+# so this cannot drift unnoticed.
+GAME_C       := $(call shrinkify,$(GAME_C))
+GAME_CXX     := $(call shrinkify,$(GAME_CXX))
+C11_SRC      := $(call shrinkify,$(C11_SRC))
+CXXFROMC_SRC := $(call shrinkify,$(CXXFROMC_SRC))
+
 # =============================================================================
 # Object lists
 # =============================================================================
@@ -464,8 +548,16 @@ $(OBJDIR)/src/static/boot.c.o: TU_DEFS = -Dmain=boot_main
 # is rewritten, and every object plus the link depends on it, so everything
 # rebuilds. Written with $(file …) — a shell here-doc would re-run on every
 # make invocation and defeat the point.
+#
+# DC_SRC_SHRINK is in the stamp for BOTH of the reasons above and one more:
+# toggling it changes $(INCLUDES), and an include-path change is invisible to
+# make's timestamp model in exactly the same way a -D change is. A TU whose
+# source did not change would keep an object built against the other
+# sys_stacks.h — i.e. a 4,096 B memset into a 16 B array. Full rebuild is the
+# correct price.
 FLAGSTAMP := $(BUILD)/flags.stamp
-FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DECOMP_OPT=$(DECOMP_OPT) \
+FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
+             DECOMP_OPT=$(DECOMP_OPT) \
              DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
 
 ifneq ($(FLAGSTATE),$(strip $(shell cat $(FLAGSTAMP) 2>/dev/null)))

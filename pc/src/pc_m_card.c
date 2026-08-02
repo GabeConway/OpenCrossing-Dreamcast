@@ -21,6 +21,7 @@
 #include "m_time.h"
 #include "m_scene.h"
 #include "m_name_table.h"
+#include "m_malloc.h"     /* zelda_malloc / zelda_free — the pre-reserved arena */
 #include "sys_math3d.h"
 #include "sys_math.h"
 #include "zurumode.h"
@@ -39,6 +40,15 @@
 #include <direct.h>  /* _mkdir */
 #endif
 #include <dolphin/os.h>  /* OSReport */
+
+/* On Dreamcast this TU is compiled into the image by dc/Makefile's PC_REUSE_C
+ * (src/game/m_card.c is excluded), so this file is the sole definition of
+ * mCD_toNextLand & co. dc_platform.h is pulled in only for the
+ * DC_CARD_KEEP_STATIC kill switch; dc/include is first on the DC include path,
+ * and the header is absent from the PC build's -I set, hence the guard. */
+#if defined(TARGET_DC)
+#include "dc_platform.h"
+#endif
 
 /* --- Path constants --- */
 #define PC_CARD_A_DIR     "save/card_a"
@@ -63,21 +73,73 @@
 int pc_save_loaded = 0;
 static int pc_save_ready = 0;
 
-/* --- Travel state --- */
-static Save l_keepSave;                        /* Other town's save data (for Card B visit) */
-static int l_keepSave_set = FALSE;
-static mCD_keep_mail_c l_keepMail;             /* Other town's mail ARAM block */
-static mCD_keep_original_c l_keepOriginal;     /* Other town's original designs ARAM block */
-static mCD_keep_diary_c l_keepDiary;           /* Other town's diary ARAM block */
+/* ===========================================================================
+ * .bss reduction for the Dreamcast build — kb/levers.md L3, row "pc_m_card"
+ * ===========================================================================
+ * This file used to hold 308,242 B of file-scope travel buffers. Every one of
+ * them is either a pure double buffer, or GameCube memory-card sector padding
+ * that a Dreamcast never DMAs anywhere. The four cuts are commented at their
+ * sites below.
+ *
+ * THE RULE THAT GOVERNS ALL OF THEM: KOS's libc heap is an sbrk bump above
+ * `_end`, so turning `static u8 buf[N]` into `malloc(N)` moves bytes without
+ * moving the peak and saves NOTHING against
+ *     (image span) + (additive heap) <= 16,646,144.
+ * A saving is only real if the storage is DELETED, or drawn from the arena
+ * dc_platform.h has ALREADY reserved (DC_MAIN_MEMORY_SIZE) via zelda_malloc()
+ * -> __osMalloc(). Never use libc malloc/free for these buffers.
+ *
+ * KILL SWITCH: build with -DDC_CARD_KEEP_STATIC (declared, with the rest of
+ * the rationale, in dc/include/dc_platform.h) to put every buffer back to a
+ * file-scope array and pc_save_read_gci_to_keep() back on the old double-
+ * buffer path. The switch is implemented inside four small helpers so the
+ * call sites are identical either way — the logic is never duplicated.
+ * =========================================================================== */
 
-/* Passport: the traveling player's private data + departing animal */
+/* --- Travel state --- */
+static int l_keepSave_set = FALSE;
+
+/* Passport: the traveling player's private data + departing animal.
+ *
+ * CUT C (-4,576 B): this was a union padding mCD_foreigner_c (11,808 B) up to
+ * mCD_ALIGN_SECTORSIZE(...) == 16,384 B. That padding exists so the GameCube
+ * can write the struct to a memory-card file as whole sectors; this port never
+ * writes a passport file (see mCD_SaveStation_Passport_bg — the passport lives
+ * in memory for the whole visit), so the 4,576 B of alignment is dead.
+ *
+ * It stays a file-scope object on purpose and must NOT move to any heap:
+ * mCD_toNextLand() hands &l_mcd_foreigner_file.file.priv to
+ * Common_Set(now_private, ...) and that pointer stays live for the entire
+ * visit, across scene teardowns that destroy the zelda arena.
+ *
+ * Only the size of the padding member changes, so every existing
+ * `l_mcd_foreigner_file.file.*` reference and every
+ * `sizeof(l_mcd_foreigner_file)` memset keeps working unchanged. */
+#if defined(DC_CARD_KEEP_STATIC)
+#define PC_FOREIGNER_STORE_SIZE mCD_ALIGN_SECTORSIZE(sizeof(mCD_foreigner_c))
+#else
+#define PC_FOREIGNER_STORE_SIZE sizeof(mCD_foreigner_c)
+#endif
 static union {
     mCD_foreigner_c file;
-    u8 sector_align[mCD_ALIGN_SECTORSIZE(sizeof(mCD_foreigner_c))];
+    u8 sector_align[PC_FOREIGNER_STORE_SIZE];
 } l_mcd_foreigner_file;
 
 static int l_mcd_keep_startCond = 0;
-static char l_card_b_gci_path[300] = {0};      /* Path to the Card B GCI file, if found */
+
+/* CUT D (-236 B): the only value this ever takes on Dreamcast is
+ * "/vmu/a1/ANIMAL_CROSSING" or "/vmu/a2/ANIMAL_CROSSING" (23 chars + NUL),
+ * built by dc_card_full_path() and handed back by pc_card_scan_for_gci()
+ * (dc/src/dc_card.c). 300 bytes is a PC-side directory-scan figure; keep it
+ * for any non-DC build, where the path really can be arbitrary.
+ * The `char tmp_path[300]`/`[320]` locals further down are STACK, not .bss —
+ * they are deliberately left alone. */
+#if defined(TARGET_DC) && !defined(DC_CARD_KEEP_STATIC)
+#define PC_CARD_B_PATH_MAX 64
+#else
+#define PC_CARD_B_PATH_MAX 300
+#endif
+static char l_card_b_gci_path[PC_CARD_B_PATH_MAX] = {0};  /* Card B GCI file, if found */
 
 /* External: scan card_b/ for valid AC GCI file (defined in pc_card.c) */
 extern int pc_card_scan_for_gci(int chan, char* out_path, int out_size);
@@ -181,6 +243,194 @@ void mCD_set_aram_save_data(void) {
             }
         }
     }
+}
+
+/* ===========================================================================
+ * Travel "keep" storage — CUT A and CUT B
+ * ===========================================================================
+ * CUT A (-147,782 B): l_keepMail / l_keepOriginal / l_keepDiary were a pure
+ * double buffer. pc_save_read_gci_to_keep() filled them from the other town's
+ * GCI and mCD_toNextLand() then memcpy'd all three, byte for byte, into
+ * l_aram_block_p_table[] — blocks of exactly the same size that already exist
+ * (allocated in mCD_save_data_aram_malloc, 147,840 B total). Nothing else ever
+ * read them.
+ *
+ * The lifetime argument, VERIFIED against both call sites:
+ * pc_save_read_gci_to_keep() is called only from mCD_SaveStation_NextLand_bg,
+ * on both the outgoing (resident) and the incoming (foreigner returning) path.
+ * In BOTH paths the current town has already been flushed to disc immediately
+ * beforehand — pc_save_write_gci() / pc_save_write_gci_to() — and it is those
+ * writers, and only those, that read l_aram_block_p_table[]. After the write
+ * the ARAM blocks are dead, so the read may land straight in them. The only
+ * other readers are the three storage-locker overlays
+ * (src/game/m_cpmail_ovl.c:377, m_cporiginal_ovl.c:761, m_diary_ovl.c:952),
+ * none of which can be open while the player is talking to the station master.
+ *
+ * SAFETY: writing the blocks early means a failed read would leave the HOME
+ * town's in-RAM lockers holding the OTHER town's data (disc is untouched, RAM
+ * is not). pc_save_read_gci_to_keep() therefore validates the entire `others`
+ * region — destination pointers plus the per-block BE checksums that were
+ * already being computed — BEFORE it writes a single byte, and then commits
+ * all three in one pass. mCD_toNextLand() re-seeds them from
+ * mCD_set_aram_save_data() on the paths where it aborts the transition after
+ * a successful read.
+ *
+ * CUT B (-155,648 B): see the two halves at pc_keep_save_acquire().
+ * =========================================================================== */
+
+#if defined(DC_CARD_KEEP_STATIC)
+#define PC_KEEP_BLOCKS_ARE_ARAM 0
+static Save l_keepSave;                        /* Other town's save data (Card B visit) */
+static mCD_keep_mail_c l_keepMail;             /* Other town's mail ARAM block */
+static mCD_keep_original_c l_keepOriginal;     /* Other town's original designs ARAM block */
+static mCD_keep_diary_c l_keepDiary;           /* Other town's diary ARAM block */
+#else
+#define PC_KEEP_BLOCKS_ARE_ARAM 1
+static Save_t* l_keepSave_p = NULL;
+#endif
+
+/* TRUE while l_aram_block_p_table[] holds the OTHER town's lockers instead of
+ * the home town's — i.e. between a committed pc_save_read_gci_to_keep() and
+ * the mCD_toNextLand() that consumes it. Always FALSE under
+ * DC_CARD_KEEP_STATIC, where the read goes to the statics instead. */
+static int l_keep_blocks_foreign = FALSE;
+
+/* Destination for keep-block `idx` (an mCD_ARAM_DATA_* index) while reading the
+ * other town's GCI. NULL means "no storage" and is a hard failure. */
+static void* pc_keep_block(int idx) {
+#if defined(DC_CARD_KEEP_STATIC)
+    switch (idx) {
+        case mCD_ARAM_DATA_ORIGINAL: return &l_keepOriginal;
+        case mCD_ARAM_DATA_MAIL:     return &l_keepMail;
+        case mCD_ARAM_DATA_DIARY:    return &l_keepDiary;
+        default:                     return NULL;
+    }
+#else
+    /* CUT A: the destination IS the ARAM block. No second copy exists. */
+    if (idx < 0 || idx >= mCD_ARAM_DATA_NUM) return NULL;
+    return l_aram_block_p_table[idx];
+#endif
+}
+
+/* Undo a committed keep-block load. The home town's lockers cannot be restored
+ * from RAM — the authoritative copy is the GCI the caller wrote to disc just
+ * before the read, and re-reading it here would cost a second whole-file read
+ * (kb/save-budget.md §5 bounds VMU I/O at ~12 blocks/s). So they are put back
+ * to the same known-empty state a fresh game start produces, which is what
+ * mCD_set_aram_save_data() does. Losing the in-RAM lockers is acceptable;
+ * leaving another town's mail and designs reachable from the storage-locker UI
+ * is not. */
+static void pc_keep_blocks_rollback(void) {
+    if (l_keep_blocks_foreign) {
+        OSReport("[PC] keep blocks: travel aborted after load — re-seeding home lockers\n");
+        mCD_set_aram_save_data();
+        l_keep_blocks_foreign = FALSE;
+    }
+}
+
+/* Move the keep blocks into the ARAM blocks. A no-op in the default build —
+ * pc_keep_block() already handed out the ARAM blocks themselves. */
+static void pc_keep_blocks_publish(void) {
+    l_keep_blocks_foreign = FALSE;   /* the transition is going through */
+#if defined(DC_CARD_KEEP_STATIC)
+    mCD_save_data_main_to_aram(&l_keepMail,
+                               l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL],
+                               mCD_ARAM_DATA_MAIL);
+    mCD_save_data_main_to_aram(&l_keepOriginal,
+                               l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL],
+                               mCD_ARAM_DATA_ORIGINAL);
+    mCD_save_data_main_to_aram(&l_keepDiary,
+                               l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY],
+                               mCD_ARAM_DATA_DIARY);
+#endif
+}
+
+/* CUT B, both halves.
+ *
+ * B1 (-7,520 B): the buffer was declared `Save`, a union that pads Save_t
+ * (148,128 B) up to mCD_ALIGN_SECTORSIZE(sizeof(Save_t)) == 155,648 B so the
+ * GameCube can DMA it to a memory card as whole sectors. Only the Save_t half
+ * is ever populated (pc_save_read_gci_to_keep) or consumed (mCD_toNextLand),
+ * and this port writes the GCI image out of its own file_data buffer, never
+ * out of this one — so the pad is dead. Retyping it obliges the memcpy in
+ * mCD_toNextLand to use sizeof(Save_t): with `Save` on both sides it read the
+ * full 155,648 B, which was in-bounds but is a 7,520 B over-read afterwards.
+ * The destination (common_data.save, still a full `Save`) has just been
+ * memset to 0, so the pad it no longer receives stays zero either way.
+ *
+ * B2 (-148,128 B): the live range is exactly one play scene. The buffer is
+ * filled inside mCD_SaveStation_NextLand_bg and consumed by mCD_toNextLand,
+ * which src/game/m_play.c:404 calls from play_cleanup() — after mFM_Field_dt()
+ * but BEFORE zelda_CleanupArena() on the next line. VERIFIED that the only
+ * zelda_InitArena/zelda_CleanupArena pairs in the tree are that one
+ * (m_play.c:494 / :411) and famicom_emu.c's, which belongs to a different
+ * scene, so the arena is live at both ends and dead immediately after.
+ *
+ * That arena is the JKRHeap block dc_platform.h already reserves
+ * (DC_MAIN_MEMORY_SIZE), so this is image span -148,128 B for +0 additive
+ * heap. libc malloc would have been worthless here (see the header comment).
+ * Arena pressure at this instant does not rise either: the same call already
+ * takes 466,944 B for the GCI image a few lines later. */
+static Save_t* pc_keep_save(void) {
+#if defined(DC_CARD_KEEP_STATIC)
+    return &l_keepSave.save;
+#else
+    return l_keepSave_p;
+#endif
+}
+
+static Save_t* pc_keep_save_acquire(void) {
+#if defined(DC_CARD_KEEP_STATIC)
+    memset(&l_keepSave, 0, sizeof(l_keepSave));
+    return &l_keepSave.save;
+#else
+    if (l_keepSave_p == NULL) {
+        l_keepSave_p = (Save_t*)zelda_malloc(sizeof(Save_t));
+        if (l_keepSave_p == NULL) {
+            OSReport("[PC] keepSave: zelda_malloc(%u) failed — cannot travel\n",
+                     (unsigned)sizeof(Save_t));
+            return NULL;
+        }
+    }
+    memset(l_keepSave_p, 0, sizeof(Save_t));
+    return l_keepSave_p;
+#endif
+}
+
+static void pc_keep_save_release(void) {
+#if defined(DC_CARD_KEEP_STATIC)
+    memset(&l_keepSave, 0, sizeof(l_keepSave));
+#else
+    /* Only ever called while the zelda arena is still live — see B2 above.
+     * __osFree on a cleaned-up arena OSPanics, so mCD_InitAll() drops the
+     * pointer instead of freeing it. */
+    if (l_keepSave_p != NULL) {
+        zelda_free(l_keepSave_p);
+        l_keepSave_p = NULL;
+    }
+#endif
+}
+
+/* Single exit for every failure path in pc_save_read_gci_to_keep(): drop the
+ * keep buffer, undo a committed block load if there was one, and free the GCI
+ * image. Always returns FALSE so call sites read `return pc_keep_read_fail(p)`.
+ * Every step is a no-op if that stage was never reached. */
+static int pc_keep_read_fail(u8* file_data) {
+    pc_keep_blocks_rollback();
+    pc_keep_save_release();
+    l_keepSave_set = FALSE;
+    if (file_data != NULL) free(file_data);
+    return FALSE;
+}
+
+/* Forget the buffer without touching the allocator. For mCD_InitAll(), which
+ * can run in a scene where the arena that owned the block is already gone. */
+static void pc_keep_save_forget(void) {
+#if defined(DC_CARD_KEEP_STATIC)
+    memset(&l_keepSave, 0, sizeof(l_keepSave));
+#else
+    l_keepSave_p = NULL;
+#endif
 }
 
 /* --- GCI read/write helpers --- */
@@ -589,37 +839,58 @@ static int pc_save_read_gci(const char* path) {
                                          PC_BSWAP_FROM_BE);
             }
         }
+        /* The ARAM blocks now hold THIS save's lockers again. */
+        l_keep_blocks_foreign = FALSE;
     }
 
     free(file_data);
     return TRUE;
 }
 
-/* Read a GCI file's Save_t into a provided buffer (for Card B — does NOT touch common_data).
- * Also loads ARAM blocks (mail/original/diary) into the l_keep* buffers.
+/* Read a GCI file's Save_t into the keep buffer (for Card B — does NOT touch
+ * common_data). Also loads the mail/original/diary blocks.
+ *
+ * CUT A changed the destination of those three: they now land directly in
+ * l_aram_block_p_table[] instead of in a private set of statics that
+ * mCD_toNextLand() copied across verbatim. Everything the writers need out of
+ * the ARAM blocks has already been flushed to disc by the caller before this
+ * runs — see the CUT A note above pc_keep_block().
+ *
+ * Because that makes the write destructive to the HOME town's in-RAM lockers,
+ * the `others` region is validated in full (destination storage + the BE
+ * checksums that were being computed anyway) BEFORE the first byte is written,
+ * and all three blocks are then committed in one pass that cannot fail.
+ *
  * Returns TRUE on success. */
 static int pc_save_read_gci_to_keep(const char* path) {
     FILE* fp;
     CARDDir dir_hdr;
     u8* file_data;
     Save_t* save_src;
+    Save_t* keep;
     u32 offset;
 
     fp = fopen(path, "rb");
-    if (!fp) return FALSE;
+    if (!fp) return pc_keep_read_fail(NULL);
 
-    if (fread(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1) { fclose(fp); return FALSE; }
-    if (memcmp(dir_hdr.gameName, "GAF", 3) != 0) { fclose(fp); return FALSE; }
+    if (fread(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1) { fclose(fp); return pc_keep_read_fail(NULL); }
+    if (memcmp(dir_hdr.gameName, "GAF", 3) != 0) { fclose(fp); return pc_keep_read_fail(NULL); }
+
+    /* CUT B: obtain the keep buffer. In the default build this is a
+     * zelda_malloc() out of the already-reserved arena and can fail; the
+     * caller turns that into a clean travel abort. */
+    keep = pc_keep_save_acquire();
+    if (keep == NULL) { fclose(fp); return pc_keep_read_fail(NULL); }
 
     file_data = (u8*)malloc(GCI_FILE_DATA_SIZE);
-    if (!file_data) { fclose(fp); return FALSE; }
+    if (!file_data) { fclose(fp); return pc_keep_read_fail(NULL); }
 
     if (fread(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
-        fclose(fp); free(file_data); return FALSE;
+        fclose(fp); return pc_keep_read_fail(file_data);
     }
     fclose(fp);
 
-    /* Load Save_t into l_keepSave — validate the raw BE image like the GC
+    /* Load Save_t into the keep buffer — validate the raw BE image like the GC
      * path (checksum, then save ID / land id); try main, then backup copy.
      * A random downloaded/edited GCI that fails here aborts the travel
      * cleanly instead of crashing in the visited town's scene load and
@@ -632,18 +903,20 @@ static int pc_save_read_gci_to_keep(const char* path) {
 
         for (ci = 0; ci < 2 && !ok; ci++) {
             save_src = (Save_t*)(file_data + copy_offs[ci]);
+            /* sizeof(Save), not sizeof(Save_t): this sums the on-disc GCI
+             * entry, which really is sector-padded, not the keep buffer. */
             if (validate && !pc_save_be_sum_ok((const u8*)save_src, sizeof(Save))) {
                 OSReport("[PC] Card B: save copy %d failed checksum\n", ci);
                 continue;
             }
-            memcpy(&l_keepSave.save, save_src, sizeof(Save_t));
-            pc_save_bswap(&l_keepSave.save, PC_BSWAP_FROM_BE);
-            if (!mLd_CheckId(l_keepSave.save.land_info.id)) {
+            memcpy(keep, save_src, sizeof(Save_t));
+            pc_save_bswap(keep, PC_BSWAP_FROM_BE);
+            if (!mLd_CheckId(keep->land_info.id)) {
                 OSReport("[PC] Card B: save copy %d has invalid land id\n", ci);
                 continue;
             }
-            if (validate && !mFRm_CheckSaveData_common(&l_keepSave.save.save_check,
-                                                      l_keepSave.save.land_info.id)) {
+            if (validate && !mFRm_CheckSaveData_common(&keep->save_check,
+                                                      keep->land_info.id)) {
                 OSReport("[PC] Card B: save copy %d failed save ID / land id check\n", ci);
                 continue;
             }
@@ -653,22 +926,26 @@ static int pc_save_read_gci_to_keep(const char* path) {
         if (!ok) {
             OSReport("[PC] Card B: '%s' failed validation (edited or corrupt) — refusing to travel\n",
                      path);
-            memset(&l_keepSave, 0, sizeof(Save));
-            free(file_data);
-            return FALSE;
+            return pc_keep_read_fail(file_data);
         }
     }
 
-    /* Load ARAM blocks — detect GC vs legacy PC order (same landid check as main load) */
+    /* Load the keep blocks — detect GC vs legacy PC order (same landid check
+     * as the main load). Validate-then-commit, see the function comment. */
     {
         u8* others_ptr = file_data + GCI_OTHERS_OFFSET;
         u32 block_start = ALIGN_NEXT(sizeof(MemcardHeader_c) + 32, 32);
         u16 first_landid = ((u16)others_ptr[block_start + 2] << 8) | others_ptr[block_start + 3];
-        u16 save_land_id = l_keepSave.save.land_info.id;
+        u16 save_land_id = keep->land_info.id;
         int gc_order = (first_landid == save_land_id && save_land_id != 0);
         u32 mail_size = l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL];
         u32 orig_size = l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL];
+        u32 diary_size = l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY];
         u32 off_mail, off_orig, off_diary;
+        void* dst_mail;
+        void* dst_orig;
+        void* dst_diary;
+        int mail_ok, orig_ok, diary_ok;
 
         if (gc_order) {
             off_mail = block_start;
@@ -680,39 +957,62 @@ static int pc_save_read_gci_to_keep(const char* path) {
             off_diary = ALIGN_NEXT(off_mail + mail_size, 32);
         }
 
-        /* Per-block checksums (see Card A load): bad block → empty block. */
-        if (gc_order && !pc_save_be_sum_ok(others_ptr + off_mail, mail_size)) {
+        /* --- validate: storage, then the per-block BE checksums --- */
+        dst_mail  = pc_keep_block(mCD_ARAM_DATA_MAIL);
+        dst_orig  = pc_keep_block(mCD_ARAM_DATA_ORIGINAL);
+        dst_diary = pc_keep_block(mCD_ARAM_DATA_DIARY);
+
+        if (dst_mail == NULL || dst_orig == NULL || dst_diary == NULL) {
+            /* mCD_save_data_aram_malloc() never ran, or ran out of memory.
+             * Bail out before writing anything — the home lockers are still
+             * whatever they were. */
+            OSReport("[PC] Card B: keep blocks unavailable (mail=%p orig=%p diary=%p)"
+                     " — refusing to travel\n", dst_mail, dst_orig, dst_diary);
+            return pc_keep_read_fail(file_data);
+        }
+
+        /* Legacy-order PC saves predate block checksum stamping, so the
+         * checksum is only enforced for gc_order saves (see Card A load). */
+        mail_ok  = !gc_order || pc_save_be_sum_ok(others_ptr + off_mail, mail_size);
+        orig_ok  = !gc_order || pc_save_be_sum_ok(others_ptr + off_orig, orig_size);
+        diary_ok = !gc_order || pc_save_be_sum_ok(others_ptr + off_diary, diary_size);
+
+        /* --- commit: one pass, nothing below can fail --- */
+        if (!mail_ok) {
             OSReport("[PC] Card B: mail block failed checksum — using empty block\n");
-            memset(&l_keepMail, 0, sizeof(l_keepMail));
+            memset(dst_mail, 0, mail_size);
         } else {
-            memcpy(&l_keepMail, others_ptr + off_mail, mail_size);
-            pc_save_bswap_keep_mail(&l_keepMail, PC_BSWAP_FROM_BE);
+            memcpy(dst_mail, others_ptr + off_mail, mail_size);
+            pc_save_bswap_keep_mail((mCD_keep_mail_c*)dst_mail, PC_BSWAP_FROM_BE);
         }
 
-        if (gc_order && !pc_save_be_sum_ok(others_ptr + off_orig, orig_size)) {
+        if (!orig_ok) {
             OSReport("[PC] Card B: original-designs block failed checksum — using empty block\n");
-            memset(&l_keepOriginal, 0, sizeof(l_keepOriginal));
+            memset(dst_orig, 0, orig_size);
         } else {
-            memcpy(&l_keepOriginal, others_ptr + off_orig, orig_size);
-            pc_save_bswap_keep_original(&l_keepOriginal, PC_BSWAP_FROM_BE);
+            memcpy(dst_orig, others_ptr + off_orig, orig_size);
+            pc_save_bswap_keep_original((mCD_keep_original_c*)dst_orig, PC_BSWAP_FROM_BE);
         }
 
-        if (gc_order && !pc_save_be_sum_ok(others_ptr + off_diary,
-                                           l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY])) {
+        if (!diary_ok) {
             OSReport("[PC] Card B: diary block failed checksum — using empty block\n");
-            memset(&l_keepDiary, 0, sizeof(l_keepDiary));
-            pc_init_diary_entries(&l_keepDiary);
+            memset(dst_diary, 0, diary_size);
+            pc_init_diary_entries(dst_diary);
         } else {
-            memcpy(&l_keepDiary, others_ptr + off_diary, l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY]);
-            pc_save_bswap_keep_diary(&l_keepDiary, PC_BSWAP_FROM_BE);
+            memcpy(dst_diary, others_ptr + off_diary, diary_size);
+            pc_save_bswap_keep_diary((mCD_keep_diary_c*)dst_diary, PC_BSWAP_FROM_BE);
         }
+
+        /* From here the ARAM blocks hold the OTHER town until mCD_toNextLand
+         * publishes them (or pc_keep_blocks_rollback() gives up on travel). */
+        l_keep_blocks_foreign = PC_KEEP_BLOCKS_ARE_ARAM;
     }
 
     free(file_data);
     l_keepSave_set = TRUE;
     OSReport("[PC] Card B: loaded town '%.*s' (id=0x%04X) from '%s'\n",
-             8, l_keepSave.save.land_info.name,
-             l_keepSave.save.land_info.id, path);
+             8, keep->land_info.name,
+             keep->land_info.id, path);
     return TRUE;
 }
 
@@ -872,7 +1172,15 @@ void mCD_init_card(void) {
 void mCD_InitAll(void) {
     /* ARAM blocks must persist — don't null them */
     memset(&l_mcd_foreigner_file, 0, sizeof(l_mcd_foreigner_file));
+    /* Forget, not free: this can run in a scene where the zelda arena that
+     * owned the keep buffer has already been torn down, and __osFree OSPanics
+     * on a cleaned-up arena. The block died with the arena. */
+    pc_keep_save_forget();
     l_keepSave_set = FALSE;
+    /* Whatever the ARAM blocks hold, a game start re-establishes them (the
+     * Card A load, or mCD_set_aram_save_data() on a new game), so any pending
+     * "these are the other town's lockers" state is stale. */
+    l_keep_blocks_foreign = FALSE;
     l_mcd_keep_startCond = 0;
     l_card_b_gci_path[0] = '\0';
 }
@@ -1240,7 +1548,7 @@ int mCD_SaveStation_Passport_bg(s32* chan) {
 /* Transition to the other town. Called from scene cleanup when switching to the visited town.
  * Faithfully reproduces the original mCD_toNextLand from m_card.c:7188. */
 void mCD_toNextLand(void) {
-    Save_t* save = &l_keepSave.save;
+    Save_t* save = pc_keep_save();
     int scene_no;
     mCD_persistent_data_c persis;
     mLd_land_info_c* land_info;
@@ -1251,14 +1559,28 @@ void mCD_toNextLand(void) {
     Transition_c transition;
     int rtc_enabled;
 
-    if (l_keepSave_set != TRUE) {
-        OSReport("[PC] toNextLand: l_keepSave not set, aborting\n");
+    /* Called from play_cleanup() on EVERY play-scene teardown (m_play.c:404),
+     * so the common case is "no travel pending", this guard fires and
+     * pc_keep_blocks_rollback() is a no-op because nothing was ever loaded. */
+    if (l_keepSave_set != TRUE || save == NULL) {
+        OSReport("[PC] toNextLand: keepSave not set, aborting\n");
+        pc_keep_blocks_rollback();
         return;
     }
 
     land_info = &save->land_info;
     if (!mLd_CheckId(land_info->id)) {
-        OSReport("[PC] toNextLand: invalid land_info in l_keepSave\n");
+        /* Travel is being abandoned after pc_save_read_gci_to_keep() already
+         * overwrote the ARAM blocks with the OTHER town's lockers (CUT A).
+         * Put the home town's back to a known-empty state rather than leave
+         * foreign mail/designs/diary reachable from the storage-locker UI.
+         * Unreachable in practice — mLd_CheckId() already passed on this same
+         * land_info during the read — but the cost of being wrong is a
+         * cross-town data leak, so it is checked anyway. */
+        OSReport("[PC] toNextLand: invalid land_info in keepSave\n");
+        pc_keep_blocks_rollback();
+        pc_keep_save_release();
+        l_keepSave_set = FALSE;
         return;
     }
 
@@ -1283,8 +1605,12 @@ void mCD_toNextLand(void) {
     memcpy(Common_GetPointer(time), &time, sizeof(time));
     memcpy(Common_GetPointer(transition), &transition, sizeof(transition));
 
-    /* Load the other town's save data */
-    memcpy(Common_GetPointer(save), save, sizeof(Save));
+    /* Load the other town's save data.
+     * sizeof(Save_t), NOT sizeof(Save): CUT B1 dropped the 7,520 B of memory-
+     * card sector padding from the source buffer, so copying sizeof(Save)
+     * would over-read it. The destination (common_data.save) is still a full
+     * `Save`, and its pad stays zero from the memset above. */
+    memcpy(Common_GetPointer(save), save, sizeof(Save_t));
 
     Common_Set(copy_protect, Save_Get(copy_protect));
     Save_Set(scene_no, scene_no);
@@ -1319,14 +1645,19 @@ void mCD_toNextLand(void) {
 
     Common_Set(submenu_disabled, TRUE);
 
-    /* Clear keepSave now that it's been applied */
-    memset(&l_keepSave, 0, sizeof(Save));
+    /* Release keepSave now that it's been applied. `save` and `land_info` are
+     * not touched below this line. In the default build this hands 148,128 B
+     * back to the zelda arena, which play_cleanup() tears down a few lines
+     * after this function returns (m_play.c:411) — so the free must happen
+     * HERE, while the arena is still alive. */
+    pc_keep_save_release();
     l_keepSave_set = FALSE;
 
-    /* Load ARAM blocks from the other town */
-    mCD_save_data_main_to_aram(&l_keepMail, l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL], mCD_ARAM_DATA_MAIL);
-    mCD_save_data_main_to_aram(&l_keepOriginal, l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL], mCD_ARAM_DATA_ORIGINAL);
-    mCD_save_data_main_to_aram(&l_keepDiary, l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY], mCD_ARAM_DATA_DIARY);
+    /* Publish the other town's mail/designs/diary into the ARAM blocks.
+     * A no-op in the default build: CUT A already read them straight into
+     * l_aram_block_p_table[], which is what those three memcpys used to
+     * produce. */
+    pc_keep_blocks_publish();
 
     OSReport("[PC] toNextLand: transitioned to visited town, player_no=%d\n",
              Common_Get(player_no));
