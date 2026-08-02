@@ -38,8 +38,15 @@
 #define DC_BUDGET_JKRHEAP          2705504u
 /* Bucket 7  — asset residency pool (replaces 8.77 MB of static BSS)       */
 #define DC_BUDGET_ASSET_POOL       1500000u
-/* Bucket 8  — graph-ARAM (RARC) LRU window.             [?] probe 3 at M1 */
-#define DC_BUDGET_ARAM_GRAPH        512000u
+/* Bucket 8  — graph-ARAM (RARC) window.  [MEASURED-FLOOR] see dc_platform.h
+ *
+ * Was 512,000 and it was BOTH too small and pointed at the wrong region: graph
+ * ARAM starts at offset 8,454,144 (jaudio's 0x810000 is allocated first), and
+ * the boot archive forest_1st.arc alone is 851,744 B. dc_aram.c now anchors
+ * the window on first use; this is the floor that lets the anchor hold a whole
+ * archive. Keep it equal to DC_ARAM_WINDOW_SIZE — ARInit allocates from this
+ * bucket and a mismatch is a boot-time MEMLEDGER FAIL, not a warning. */
+#define DC_BUDGET_ARAM_GRAPH        1048576u
 /* Buckets 9/10/11 — RETIRED, and they were never real.
  *
  * All three were phantom reservations: nothing ever called

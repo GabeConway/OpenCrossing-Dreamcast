@@ -35,6 +35,28 @@ static u32  aram_window_size = 0;
 static u32  aram_alloc_ptr = 0;
 static int  aram_inited = 0;
 
+/* The ARAM offset the window currently covers: it maps
+ * [aram_window_base, aram_window_base + aram_window_size).
+ *
+ * It is NOT 0. JKRAram::JKRAram allocates the sound half first
+ * (jsyswrap.cpp:487, 0x810000 = 8,454,144 B) and the graph half second
+ * (0x6A3780), so every RARC archive lives at offset >= 8,454,144. A window
+ * anchored at 0 sits entirely inside jaudio's region and misses every archive
+ * access — MEASURED on the first boot with real disc content, where
+ * forest_1st.arc mounted, wrote 851,744 B, and had all 257 writes silently
+ * dropped as out-of-window.
+ *
+ * BRING-UP BEHAVIOUR, not the final design: the window anchors itself to the
+ * first out-of-window WRITE, aligned down to 32. That is enough to hold the
+ * boot archive and get the game running, and it is honest about what it is —
+ * PLAN §3.1's disc-backed LRU over forest_{1st,2nd}.arc is still owed, and
+ * jaudio's half still has no provider at all. When a second region starts
+ * competing for the window, this will thrash; the counters below are what will
+ * show it. */
+static u32  aram_window_base = 0;
+static int  aram_window_anchored = 0;
+static u32  aram_rebase_attempts = 0;
+
 /* Diagnostics: how far outside the window the game actually reaches. This is
  * the number that sizes bucket 8 for real. */
 static u32  aram_high_water = 0;
@@ -103,6 +125,52 @@ void ARStartDMA(u32 type, u32 mram_addr, u32 aram_addr, u32 length) {
     if (aram_window && aram_addr >= base && aram_addr < base + aram_window_size)
         aram_addr -= base;
 
+    /* Anchor the window on the first write. Until this happens the window
+     * covers [0, size), which is inside jaudio's half of the address space and
+     * therefore misses every archive. Anchoring on a WRITE and not a read is
+     * deliberate: a read of never-written ARAM should keep zero-filling
+     * (behaviour 3), and re-anchoring there would hand back a window full of
+     * unrelated bytes instead of the zeros callers rely on. */
+    if (aram_window && type == 0 &&
+        (aram_addr < aram_window_base ||
+         aram_addr > aram_window_base + aram_window_size - length ||
+         length > aram_window_size)) {
+        if (length <= aram_window_size) {
+            /* Re-anchor on EVERY missed write, not just the first. The first
+             * write is a small one from elsewhere in the address space, and
+             * anchoring on it strands the archive that arrives later. Whatever
+             * the old window held was going to be lost anyway — an
+             * out-of-window write is dropped on the floor today — so moving it
+             * strictly increases the number of bytes that survive.
+             * aram_rebase_attempts is the thrash counter: if it climbs during
+             * gameplay, that is the signal that the real LRU (PLAN §3.1) can
+             * no longer be deferred. */
+            if (aram_window_anchored) aram_rebase_attempts++;
+            aram_window_base = aram_addr & ~31u;
+            aram_window_anchored = 1;
+            memset(aram_window, 0, aram_window_size);
+            DC_LOGE("[DC/ARAM] window anchored at offset %u, covers "
+                    "[%u, %u) of a %u B space (rebases=%u)\n",
+                    (unsigned)aram_window_base, (unsigned)aram_window_base,
+                    (unsigned)(aram_window_base + aram_window_size),
+                    (unsigned)DC_ARAM_SIZE, (unsigned)aram_rebase_attempts);
+        } else {
+            /* A single transfer bigger than the whole window. Nothing to do
+             * but report it — this is the number that sizes bucket 8. */
+            aram_rebase_attempts++;
+            DC_LOGE("[DC/ARAM] TRANSFER %u B EXCEEDS THE %u B WINDOW at offset "
+                    "%u — content will be lost\n",
+                    (unsigned)length, (unsigned)aram_window_size,
+                    (unsigned)aram_addr);
+        }
+    }
+
+    /* Window-relative from here on. */
+    if (aram_window && aram_addr >= aram_window_base)
+        aram_addr -= aram_window_base;
+    else if (aram_window && aram_addr < aram_window_base)
+        aram_addr = 0xFFFFFFFFu;   /* below the window: force the miss path */
+
     /* Inside the resident window: a plain copy, exactly like GameCube DMA.
      * Cache maintenance matters here on SH-4 — the destination is read by the
      * CPU immediately after, and JKRAramPiece.cpp:97 issues its own
@@ -137,9 +205,11 @@ void ARStartDMA(u32 type, u32 mram_addr, u32 aram_addr, u32 length) {
     DC_UNIMPLEMENTED_NOTE("graph-ARAM disc paging: map ARAM offsets to "
                           "forest_{1st,2nd}.arc ranges + LRU window (PLAN 3.1)");
     if ((aram_oob_reads + aram_oob_writes) % 256 == 1) {
-        DC_LOG("[DC/ARAM] out-of-window traffic: %u reads, %u writes, "
-               "highest offset allocated %u\n",
+        DC_LOG("[DC/ARAM] out-of-window traffic: %u reads, %u writes, window "
+               "[%u, %u), highest offset allocated %u\n",
                (unsigned)aram_oob_reads, (unsigned)aram_oob_writes,
+               (unsigned)aram_window_base,
+               (unsigned)(aram_window_base + aram_window_size),
                (unsigned)aram_high_water);
     }
 }

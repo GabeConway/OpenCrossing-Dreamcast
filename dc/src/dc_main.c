@@ -368,8 +368,22 @@ static void dc_check_disc(void) {
                 "not attach. Every asset load will fail.\n");
         return;
     }
+    /* List the root. ISO9660 mangles names — uppercasing, 8.3 truncation, a
+     * ";1" version suffix — and which of those survive depends on whether the
+     * Joliet tree is present and whether KOS attached to it. Every DVD open in
+     * this port is a literal lowercase name (dc_dvd.c), so a mismatch shows up
+     * as "miss:" on every file with no hint why. Print what is actually there
+     * once, at boot; it costs one directory read. */
+    {
+        dirent_t* e;
+        int n = 0;
+        while ((e = fs_readdir(d)) != NULL) {
+            DC_LOGE("[DC] /cd/%s  %d B\n", e->name, e->size);
+            n++;
+        }
+        DC_LOGE("[DC] /cd mounted, %d entries\n", n);
+    }
     fs_close(d);
-    DC_LOGE("[DC] /cd mounted\n");
 #endif
 }
 

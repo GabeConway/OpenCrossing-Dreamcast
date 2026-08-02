@@ -115,8 +115,23 @@ extern "C" {
  * ARGetSize()/ARAlloc() hand out the same offsets the game expects. */
 #define DC_ARAM_SIZE            (16u * 1024u * 1024u)
 
-/* Graph-ARAM resident window, mem-budget bucket 8. UNMEASURED — probe 3. */
-#define DC_ARAM_WINDOW_SIZE     512000u
+/* Graph-ARAM resident window, mem-budget bucket 8.
+ *
+ * MEASURED 2026-08-01, first boot with real disc content: the window was
+ * anchored at ARAM offset 0 and every archive access missed it. JKRAram splits
+ * the address space audio-first — jsyswrap.cpp:487 asks for 0x810000 of sound
+ * ARAM and JKRAram::JKRAram allocates that BEFORE the 0x6A3780 graph half — so
+ * graph offsets start at 8,454,144 and a window over [0, 512000) is entirely
+ * inside jaudio's region. `forest_1st.arc` mounted, wrote 851,744 B to ARAM
+ * offset 8,454,144, and all 257 writes were counted out-of-window and dropped.
+ * dc_aram.c now anchors the window on first use; see the comment there.
+ *
+ * 1,048,576 rather than 512,000 because the boot archive alone is 851,744 B
+ * and mounting it is the first thing JW_Init2 does. Still UNMEASURED as a
+ * steady-state figure — probe 3 owes a real high-water mark. */
+#ifndef DC_ARAM_WINDOW_SIZE
+#define DC_ARAM_WINDOW_SIZE     1048576u
+#endif
 
 /* GXInit is handed a JKRHeap-allocated FIFO buffer we do not need; recorded
  * only so dc_gx.c can report how much it is giving back. */

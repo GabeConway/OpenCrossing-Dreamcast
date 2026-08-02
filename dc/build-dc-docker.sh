@@ -103,9 +103,13 @@ fi
 # host wrapper bind-mounts a staging directory at /discroot when DC_DISC_ROOT is
 # set; without it the image is ELF-only and every DVDFastOpen misses, which is
 # what the S1 bring-up image did.
+# -D, not -d: `-d` includes the root DIRECTORY ITSELF, which puts everything at
+# /cd/discroot/<name> and makes every DVDFastOpen miss with no clue why (MEASURED
+# — the boot listing showed a lone /cd/discroot entry). `-D` includes its
+# CONTENTS, which is what dc_dvd.c's flat "/cd/<name>" expects.
 DISC_ARGS=()
 if [ -d /discroot ]; then
-    DISC_ARGS=(-d /discroot)
+    DISC_ARGS=(-D /discroot)
     echo "-- disc content: /discroot ($(find /discroot -type f | wc -l) files, \
 $(du -sh /discroot 2>/dev/null | cut -f1))"
 else
