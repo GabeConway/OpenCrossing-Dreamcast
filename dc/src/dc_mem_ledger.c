@@ -156,6 +156,25 @@ void dc_mem_ledger_init(void) {
     dc_check_ram_mod();
     DC_LOGE("MEMLEDGER INIT buckets=%d budget=%u\n",
             (int)DCMEM_NBUCKET, (unsigned)DC_RAM_BUDGET_BYTES);
+    /* FIT is also printed by dc_mem_report(), but that only runs on the way
+     * out of main() and the game does not normally return. The inequality is
+     * the number this whole project turns on, so print it the moment the
+     * linker symbols are readable — i.e. here. */
+    dc_mem_report_fit();
+}
+
+/* The one inequality (kb/STATE.md). Split so it is obvious which side is over,
+ * and read from the linker symbols so a newly added .bss array shows up on the
+ * next boot without anyone updating a table. */
+void dc_mem_report_fit(void) {
+#ifndef DC_HOST_STUB
+    size_t span = dc_span(DC_IMG_TEXT_LO, DC_IMG_BSS_HI);
+    long   fit  = (long)DC_RAM_USABLE_BYTES - (long)span - (long)DC_HEAP_ADDITIVE;
+    DC_LOGE("MEMLEDGER FIT image_span=%u additive_heap=%u usable=%u "
+            "margin=%ld %s\n",
+            (unsigned)span, (unsigned)DC_HEAP_ADDITIVE,
+            (unsigned)DC_RAM_USABLE_BYTES, fit, fit >= 0 ? "OK" : "OVER");
+#endif
 }
 
 static int dc_bucket_valid(dc_mem_bucket_t b) {
@@ -307,21 +326,8 @@ void dc_mem_report(int verbose) {
         DC_LOGE("MEMLEDGER WARN table-sum=%u header-sum=%u (drift)\n",
                 (unsigned)budget, (unsigned)DC_BUDGET_TOTAL);
 
-    /* The inequality that actually decides whether the machine fits. Reported
-     * from the linker symbols so a new .bss array shows up on the next boot,
-     * and split so it is obvious which side is over. */
-#ifndef DC_HOST_STUB
-    {
-        size_t span = dc_span(DC_IMG_TEXT_LO, DC_IMG_BSS_HI);
-        long   fit  = (long)DC_RAM_USABLE_BYTES
-                    - (long)span - (long)DC_HEAP_ADDITIVE;
-        DC_LOGE("MEMLEDGER FIT image_span=%u additive_heap=%u usable=%u "
-                "margin=%ld %s\n",
-                (unsigned)span, (unsigned)DC_HEAP_ADDITIVE,
-                (unsigned)DC_RAM_USABLE_BYTES, fit,
-                fit >= 0 ? "OK" : "OVER");
-    }
-#endif
+    /* The inequality that actually decides whether the machine fits. */
+    dc_mem_report_fit();
     if (!s_wrap_active)
         DC_LOGE("MEMLEDGER WARN no-malloc-wrap KOS/GLdc allocations "
                 "NOT counted; totals are a lower bound\n");

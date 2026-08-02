@@ -57,6 +57,11 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | 3 | `kb/traps.md` | read before touching the build, harness, or prelude |
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
 
+**The port boots.** `DC_ASSET_STUB=1 bash dc/build-dc.sh` builds a throwaway
+image whose asset arrays are one element each; it fits (`MEMLEDGER FIT …
+margin=725740 OK`) and runs all the way to `JW_Init2` in Flycast. Read
+`kb/STATE.md` §"S1 IS DONE" before assuming anything is untested.
+
 **Status (2026-08-01): M0 and M1 met, M2 blocked on RAM.** All 3917 TUs compile
 and link for sh-elf. The image spans 21,374,068 B against 16,646,144 B of
 usable RAM and **is over by 8,273,108 B**, so it links but will not boot — the
@@ -108,6 +113,7 @@ numbers.
 |---|---|
 | `kb/asset-pack.md` | **the `assets.pak` contract** between `tools/dcasset` and the future `dc/` runtime. Built and verified against the real ISO |
 | `tools/dcasset/README.md` | the extraction/pack tool: what it does, usage, what remains |
+| `tools/dcstub/make_stub_data.py` | the `DC_ASSET_STUB` rewriter (S1). Header comment is the doc |
 | `kb/save-budget.md` | 295,910 B of save into a 100 KB VMU. Harness: `tools/savebench/` |
 | `tools/savebench/README.md` | save-size measurement harness |
 

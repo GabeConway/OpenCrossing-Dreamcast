@@ -34,10 +34,21 @@ if [ "${1:-}" = "clean" ]; then
         bash -c 'make -C /work/dc clean'
 fi
 
+# DC_ASSET_STUB=1 -> the S1 bring-up image (kb/STATE.md). The rewritten TUs are
+# generated HOST-side because python3 is not part of the SDK image's contract;
+# the container only ever sees the resulting dc/build/stubsrc tree through the
+# bind mount. The generator is idempotent and only rewrites files whose content
+# actually changes, so re-running it does not invalidate objects.
+if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
+    echo "-- DC_ASSET_STUB=1: regenerating $REPO/dc/build/stubsrc"
+    python3 "$REPO/tools/dcstub/make_stub_data.py"
+fi
+
 ENVARGS=(
     -e JOBS="${JOBS:-4}"
     -e DC_TARGET="${DC_TARGET:-all}"
     -e DC_CDI_PAD="${DC_CDI_PAD:-0}"
+    -e DC_ASSET_STUB="${DC_ASSET_STUB:-0}"
 )
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default

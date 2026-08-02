@@ -62,6 +62,59 @@ arrays (`kb/levers.md` L1) — that alone lands `.bss` at 3,644,150, under the
 ceiling. **But the pool it loads into is additive heap, so it may be at most
 ~498,250 B.** That constraint drives the whole plan below.
 
+## S1 IS DONE — the port has executed (2026-08-01)
+
+**The Dreamcast port runs.** `DC_ASSET_STUB=1` shrinks every asset destination
+array to one element; the image fits and boots in Flycast, and for the first
+time in the project's history the platform layer has been observed working
+rather than assumed to work.
+
+```
+MEMLEDGER FIT image_span=12375220 additive_heap=3545184 usable=16646144
+              margin=725740 OK
+```
+
+Confirmed running, in this order, from one boot: `dc_main.c`'s trampoline · KOS
+2.3 init and the serial console · maple enumeration (controller + 2 VMUs) ·
+`dc_mem_ledger_init()` and `MEMLEDGER FIT` · `vid_set_mode` 640x480IL NTSC ·
+the GX accumulator (`verts=8192 x 40B`) · iso9660 `/cd` mount · `ac_entry()` ·
+`boot_main()` → `OSInit()` arena (0x8cbf8bc0–0x8ce8d420, 2642 KB) · `DVDInit` ·
+the ARAM window · `PADInit` · `GXInit` · `AIInit` and the audio ring ·
+`Na_InitAudio` (the jaudio heap sets up: `AUDIOHEAP SET ADDR 8c9d6e20h`) ·
+`sound_initial()`'s 2.5 s wait · `initial_menu_init` · `dvderr_init` ·
+`sound_initial2()` · `LoadStringTable` · `JW_Init2`.
+
+**Where it stops, and why it is not a port bug:** the CDI is built from the ELF
+alone, so `/cd` carries no game data. `JKRAramArchive::open()` mounts a
+zero-byte `forest_1st.arc`, byte-swaps a garbage `num_file_entries`
+(4,235,863,808) and walks off memory. Every stop before it is the same story —
+`miss: /cd/audiorom.img`, `/cd/COPYDATE`, `/cd/static.str`. Getting further
+needs disc content, which is the `tools/dcasset` track, not a platform fix.
+
+Three things this cost, all now fixed and kept: `MEMLEDGER FIT` is printed from
+`dc_mem_ledger_init()` (it used to print only from `dc_mem_report()`, which runs
+when `main()` returns — the game never returns); `g_pc_verbose` defaults on
+under `DC_ASSET_STUB` or `-DDC_VERBOSE`, because every `OSReport` in the game is
+gated on it and a burned CD-R passes no argv, so without it a bring-up run is
+blind; and `dc_main.c` skips `pc_assets_init()` under `DC_ASSET_STUB` so the
+central table cannot memcpy full-size assets over one-element destinations.
+
+How to rebuild it:
+
+```bash
+DC_ASSET_STUB=1 bash dc/build-dc.sh    # regenerates dc/build/stubsrc, then builds
+bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 120
+```
+
+`tools/dcstub/make_stub_data.py` rewrites 2,535 TUs (16,317 arrays,
+**8,716,158 B**) into `dc/build/stubsrc`, mirroring repo-relative paths;
+`dc/Makefile` swaps those in per-TU. `src/` is not touched and nothing is
+committed — this is a throwaway image, thrown away when S4 lands. Sections with
+the stub: text 5,794,828 / data 2,638,852 / bss 3,939,828.
+
+**The corollary in the next section is now discharged: the trampoline is
+tested.** Everything below describes the unstubbed image, which is unchanged.
+
 ## Boot status — failure fully explained
 
 `harness/dc/smoke.sh` on the real CDI: **timeout, zero bytes of console
@@ -133,7 +186,10 @@ Pooling the storage means **fixing up every such reference at load time** —
 `dcasset`'s round trip already replays **16,365** of them, so the tool has the
 data, but the loader must apply relocations, not just `memcpy`.
 
-### The structural risk S1 exists to kill
+### The structural risk S1 existed to kill — RETIRED, S1 killed it
+
+*(Kept for the record. This was true until 2026-08-01; the section at the top of
+this file is what replaced it.)*
 
 **Zero lines of this port have ever executed.** Not on hardware, not in
 Flycast. The boot failure is size alone, so `dc_main.c`'s trampoline, KOS init,
@@ -144,7 +200,13 @@ out to be broken, the two failures are tangled and hard to attribute.
 
 ---
 
-### S1. Stub the assets and BOOT IT. ⭐ Start here.
+### S1. Stub the assets and BOOT IT. ✅ DONE 2026-08-01 — see the section above.
+
+Landed as `tools/dcstub/make_stub_data.py` + `DC_ASSET_STUB=1`. The image boots
+and reaches `JW_Init2`; it stops on an empty `/cd`, not on a platform fault.
+**⭐ Start at S2.** The original write-up follows, unchanged, because it is the
+argument for why the step was worth taking.
+
 
 Build a **throwaway** image with the destination arrays sized `[1]`: a
 `DC_ASSET_STUB` build mode that rewrites generator output into a scratch tree.

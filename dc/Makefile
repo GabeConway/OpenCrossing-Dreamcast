@@ -34,6 +34,44 @@ BUILD    := $(DC_DIR)/build
 OBJDIR   := $(BUILD)/obj
 TARGET   := $(BUILD)/AnimalCrossing.elf
 RSP      := $(BUILD)/objs.rsp
+STUBDIR  := $(BUILD)/stubsrc
+STUBREL  := $(patsubst $(ROOT)/%,%,$(STUBDIR))
+
+# =============================================================================
+# DC_ASSET_STUB — the throwaway boot-bringup build (kb/STATE.md, step S1)
+# =============================================================================
+# The real image is 8,273,108 B over 16 MB and therefore never executes an
+# instruction: startup .bss zeroing runs off physical memory before scif_init(),
+# so there is not even console output to look at. Nothing in this port has ever
+# run, which means every RAM number rests on a platform layer nobody has
+# observed working.
+#
+# DC_ASSET_STUB=1 shrinks the asset destination arrays to one element so the
+# image fits and boots. tools/dcstub/make_stub_data.py writes the rewritten TUs
+# to $(STUBDIR), mirroring repo-relative paths; each such source is swapped in
+# below in place of its src/ original. src/ itself is never touched (CLAUDE.md
+# §1) and $(STUBDIR) lives under dc/build, so `clean` removes it.
+#
+# The image renders garbage the moment the game reads an asset. That is the
+# intended outcome — what this build buys is the FIRST execution of dc_main.c's
+# trampoline, KOS init, the console path, MEMLEDGER FIT, and crash.sh against a
+# real fault. Throw it away once the S4 loader lands.
+#
+#   python3 tools/dcstub/make_stub_data.py     # host side, before the build
+#   DC_ASSET_STUB=1 bash dc/build-dc.sh        # does the above for you
+DC_ASSET_STUB ?= 0
+ifeq ($(DC_ASSET_STUB),1)
+  ifeq ($(wildcard $(STUBDIR)/stub.list),)
+    $(error DC_ASSET_STUB=1 but $(STUBDIR)/stub.list is missing. \
+            Run: python3 $(ROOT)/tools/dcstub/make_stub_data.py)
+  endif
+  # A source is stubbed iff the generator produced a file for it. $(wildcard)
+  # is one stat per TU; $(filter) against the 2535-entry list would be 10M
+  # string compares on every make invocation.
+  stubify = $(foreach f,$(1),$(if $(wildcard $(STUBDIR)/$(f)),$(STUBREL)/$(f),$(f)))
+else
+  stubify = $(1)
+endif
 
 # --- Toolchain ---------------------------------------------------------------
 # kos-cc / kos-c++ prepend $KOS_CFLAGS (which carries -ml -m4-single, the KOS
@@ -169,6 +207,13 @@ DEFINES := \
 	-DF3DEX_GBI_2 \
 	-DNDEBUG \
 	-D_LANGUAGE_C
+
+# dc_main.c must not call pc_assets_init() when the destinations are [1]: the
+# central table would memcpy full-size assets over them. The per-TU lazy loads
+# are neutralised by the rewriter itself.
+ifeq ($(DC_ASSET_STUB),1)
+DEFINES += -DDC_ASSET_STUB
+endif
 
 # jaudio_NES C files use `nullptr`. C only — C++ has it natively.
 C_ONLY_DEFINES := -Dnullptr=NULL
@@ -330,6 +375,15 @@ CXXFROMC_SRC := \
 C11_SRC := $(filter-out $(CXXFROMC_SRC), \
 	$(filter src/static/jaudio_NES/game/% src/static/jaudio_NES/internal/% \
 	         src/static/libforest/emu64/%, $(GAME_C)))
+
+# Stub swap happens HERE, after the per-TU classifications above have matched
+# on src/ paths — object names derive from the source path, so C11_SRC has to
+# be rewritten too or system.c (the one stubbed jaudio TU) silently reverts to
+# gnu89 and fails on its C99 declarations.
+GAME_C       := $(call stubify,$(GAME_C))
+GAME_CXX     := $(call stubify,$(GAME_CXX))
+C11_SRC      := $(call stubify,$(C11_SRC))
+CXXFROMC_SRC := $(call stubify,$(CXXFROMC_SRC))
 
 # =============================================================================
 # Object lists

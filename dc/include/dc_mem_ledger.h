@@ -58,6 +58,10 @@ void  dc_mem_frame(void);
 /* Print the whole table. verbose != 0 adds per-bucket owner detail. */
 void  dc_mem_report(int verbose);
 
+/* Print the MEMLEDGER FIT line on its own. Called from dc_mem_ledger_init() —
+ * dc_mem_report() only runs when main() returns, which the game never does. */
+void  dc_mem_report_fit(void);
+
 /* Total currently accounted bytes across all buckets. */
 size_t dc_mem_total_used(void);
 

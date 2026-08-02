@@ -94,6 +94,7 @@ colima (4 cores), `-j4`:
 | `JOBS` | `4` | `make -j` level. The colima VM has 4 cores. |
 | `DC_TARGET` | `all` | pass `objs` for a compile-only run |
 | `DC_CDI_PAD` | `0` | `1` → padded 740 MB CDI (see below) |
+| `DC_ASSET_STUB` | `0` | `1` → the throwaway bring-up image (see below) |
 | `DECOMP_OPT` | `-O0` | optimization level for decomp game code |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
 | `V` | unset | `V=1` echoes full compiler command lines |
@@ -103,7 +104,31 @@ DC_TARGET=objs bash dc/build-dc.sh     # compile-only
 DC_CDI_PAD=1   bash dc/build-dc.sh     # CD-R burn image
 JOBS=8         bash dc/build-dc.sh
 DECOMP_OPT=-O2 bash dc/build-dc.sh     # see the warning below
+DC_ASSET_STUB=1 bash dc/build-dc.sh    # bring-up image that actually boots
 ```
+
+### `DC_ASSET_STUB=1` — the bring-up image
+
+The real image is 8,273,108 B over 16 MB, so it never executes an instruction:
+startup `.bss` zeroing runs off physical memory before `scif_init()` and there
+is not even console output. `DC_ASSET_STUB=1` runs
+`tools/dcstub/make_stub_data.py` on the host first, which rewrites every asset
+destination array to `[1]` (2,535 TUs, 16,317 arrays, 8,716,158 B) into
+`dc/build/stubsrc`; `dc/Makefile` then compiles those TUs instead of their
+`src/` originals. `src/` is untouched — the arrays are generator output, so
+generating them small is a generator change, legal under the `-O0` rule
+(CLAUDE.md §1).
+
+The build also defines `-DDC_ASSET_STUB`, which makes `dc_main.c` skip
+`pc_assets_init()` (the central table would memcpy full-size assets over
+one-element destinations) and defaults `g_pc_verbose` to 1 (every `OSReport` in
+the game is gated on it, and a burned CD-R passes no argv, so `--verbose` is
+unreachable there). `-DDC_VERBOSE` turns the latter on by itself for a normal
+build.
+
+The game renders garbage the moment it reads an asset. That is the point: the
+image exists to exercise the platform layer, not to look like Animal Crossing.
+`bash dc/build-dc.sh clean` removes the stub tree with the rest of `dc/build`.
 
 ---
 

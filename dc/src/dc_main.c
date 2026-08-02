@@ -72,7 +72,17 @@ KOS_INIT_FLAGS(INIT_DEFAULT);
  * Renaming any of them re-opens every one of those files.
  */
 int   g_pc_running          = 1;
+/* Every OSReport in the game is gated on this (dc_os.c), so with it off a
+ * bring-up run is blind: the game prints its own progress and its own failure
+ * reasons through OSReport and nothing else. A burned CD-R passes no argv, so
+ * --verbose is unreachable there; DC_VERBOSE=1 is the compile-time way in, and
+ * the stub build turns it on by default because seeing why the game stops is
+ * the entire purpose of that build. */
+#if defined(DC_VERBOSE) || defined(DC_ASSET_STUB)
+int   g_pc_verbose          = 1;
+#else
 int   g_pc_verbose          = 0;   /* dbgio at 57600 baud destroys frame time */
+#endif
 int   g_pc_no_framelimit    = 0;
 int   g_pc_time_override    = -1;  /* -1 = use the battery-backed RTC       */
 int   g_pc_min_override     = -1;
@@ -404,7 +414,15 @@ int main(int argc, char* argv[]) {
 
     /* 5. §1 rule 1: every linked-in .inc asset array is EMPTY until this
      *    returns, and game code must not run before it does. */
+#ifdef DC_ASSET_STUB
+    /* S1 bring-up build: the destination arrays are one element each, so the
+     * central table in pc_assets.c would memcpy megabytes over them. Skipping
+     * the load is the whole point — this image exists to prove the trampoline,
+     * KOS init, the console and the ledger run, not to render anything. */
+    DC_LOGE("[DC] DC_ASSET_STUB: skipping pc_assets_init() — assets are [1]\n");
+#else
     pc_assets_init();
+#endif
 
     /* 6/7. Hand over to the game. boot_main() runs OSInit() (which builds the
      *      arena and writes the 0x28 memory-size word — §1 rule 2),
