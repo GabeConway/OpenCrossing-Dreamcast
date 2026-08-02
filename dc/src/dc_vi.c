@@ -119,6 +119,12 @@ void VIWaitForRetrace(void) {
 
     s_logic_tick_count++;
 
+    /* Before the frameskip early-out below: audio must keep being produced on
+     * logic-only ticks too, or the ring drains and the stream underruns exactly
+     * when the game is already struggling. Budgeted internally (DC_AUDIO=0
+     * removes it entirely). */
+    dc_audio_pump();
+
     if (vi_pre_callback) vi_pre_callback(retrace_count);
 
     /* Logic-only tick (frameskip): no present, no pacing. frame_start_us is

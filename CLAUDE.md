@@ -97,6 +97,7 @@ already produced two wrong numbers.
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
 | `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
+| `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved — keep-list gap + census blind spot) and roof clip-through (three ranked hypotheses + the one-run experiment) |
 | `PLAN.md` | milestones, the four hard problems, risk register, open questions |
 
 ### Build & test

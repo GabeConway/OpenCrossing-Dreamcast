@@ -35,9 +35,19 @@ static int s_pad_logged  = 0;
  * script it also works on hardware.
  *
  * Semantics: from PADRead call N onward, emit a pulse of DC_AUTOSTART_HOLD
- * calls every DC_AUTOSTART_PERIOD calls, alternating START and A — the title
- * takes either, the menus that follow take A. The knob is absent by default,
+ * calls every DC_AUTOSTART_PERIOD calls, mostly A with every
+ * DC_AUTOSTART_START_EVERY'th pulse being START. The knob is absent by default,
  * so a normal build is byte-identical to before (kill switch by construction).
+ *
+ * The mix is not arbitrary. Past the title (which takes either button), A is
+ * the button that advances everything: dialogue pages take A or B only
+ * (m_msg_normal.c_inc:2), and every choice menu defaults to index 0, which A
+ * accepts. START is needed at exactly one place on the path to the town —
+ * mED_COMMAND_END_EDIT in the name-entry keyboard (m_editor_ovl.c:447) — and
+ * that keyboard also rejects an all-blank name (m_editor_ovl.c:1165), so the
+ * sequence has to be "some A presses, then a START". A 1:1 alternation, which
+ * is what this emitted before, wasted half of every run's presses.
+ * DC_AUTOSTART_START_EVERY=2 restores the old pattern exactly.
  * -------------------------------------------------------------------------- */
 #ifdef DC_AUTOSTART
 #ifndef DC_AUTOSTART_PERIOD
@@ -45,6 +55,9 @@ static int s_pad_logged  = 0;
 #endif
 #ifndef DC_AUTOSTART_HOLD
 #define DC_AUTOSTART_HOLD 6u
+#endif
+#ifndef DC_AUTOSTART_START_EVERY
+#define DC_AUTOSTART_START_EVERY 4u
 #endif
 
 static u32 s_autostart_calls = 0;
@@ -61,10 +74,13 @@ static u16 dc_autostart_buttons(void) {
     if (phase >= DC_AUTOSTART_HOLD) return 0;
 
     pulse  = since / DC_AUTOSTART_PERIOD;
-    button = (pulse & 1u) ? PAD_BUTTON_A : PAD_BUTTON_START;
-    if (phase == 0) {
-        DC_LOGE("[DC/PAD] autostart pulse %u: %s (call %u)\n",
-                (unsigned)pulse, (pulse & 1u) ? "A" : "START", (unsigned)n);
+    {
+        u32 is_start = ((pulse + 1u) % (u32)(DC_AUTOSTART_START_EVERY)) == 0u;
+        button = is_start ? PAD_BUTTON_START : PAD_BUTTON_A;
+        if (phase == 0) {
+            DC_LOGE("[DC/PAD] autostart pulse %u: %s (call %u)\n",
+                    (unsigned)pulse, is_start ? "START" : "A", (unsigned)n);
+        }
     }
     return button;
 }

@@ -96,6 +96,60 @@ for those see `kb/closed.md`.
   PVR_CULLING_CW`; `-DDC_PVR_CULL_INVERT` restores the old one and
   `-DDC_PVR_NO_CULL` separates "culling is the axis" from "culling is
   irrelevant" in one build.
+- **The "recorded and never consumed" class has now bitten FOUR times. Grep the
+  consumer before believing any GX state is handled.** The four, all in
+  `dc_gx.c` storing and `dc_pvr.c` ignoring: `TEXOBJ_WRAP_S/T` (fixed
+  2026-08-02), `tev_colors[]` (fixed 2026-08-02), **`alpha_comp0/ref0/op/
+  comp1/ref1`** and **`color_update_enable`/`alpha_update_enable`** (both still
+  open as of 2026-08-02). `GXSetAlphaCompare` has a five-field setter, a
+  dedup path and a `DIRTY(DC_GX_DIRTY_ALPHA_CMP)` — it looks completely plumbed,
+  and `dc_gx.c:1195-1198` even calls the mapping "the most consequential single
+  mapping decision in the renderer". `grep alpha_comp0 dc/src/dc_pvr.c` returns
+  nothing. 23 of the 101 TEV configs ask for an alpha test; all are dropped.
+  **What it looks like:** alpha-tested cutout geometry (foliage, fences, hair)
+  has its fully-transparent texels drawn at full opacity with `zw=1`, so they
+  write depth and occlude whatever is behind them — reported by a human as
+  "textures are not layered properly". The PT list is also compiled out
+  (`p.opb_sizes[4] = PVR_BINSIZE_0`), so there is currently nowhere for
+  punch-through geometry to go. Fix sketch in `kb/tev-map-alpha.md`.
+- **`AA_ZB_TEX_EDGE2` is OPAQUE-WITH-HOLES, not foliage.** When implementing the
+  alpha test, the obvious move — "alpha-tested geometry is see-through, so stop
+  it writing depth" — breaks solid objects. The train door frame and leaf
+  (`obj_romtrain_door.c:44,71`) and the tunnel (`rom_train_out.c:135`) all use
+  `AA_ZB_TEX_EDGE2`; they are walls with alpha edges. With one
+  submission-ordered list and autosort off, a batch that writes no depth is
+  painted over by **everything submitted after it**, and all XLU window scenery
+  is submitted after all OPA geometry. **What it looked like when it bit
+  (2026-08-02):** the passing trees and clouds drew straight through the closed
+  train door. Split on what the game asked for: `GX_BM_NONE` + alpha test =
+  opaque with holes, keep `depth.write`; `GX_BM_BLEND` + alpha test = real
+  translucent cutout, drop it.
+  ⚠️ **That split is still not correct, and cannot be** — see the next entry.
+- **Without a real alpha test there is NO right answer for a punched hole, and
+  both wrong answers have been observed.** `alpha_ref` (144 by default,
+  `emu64.c:718`) is read only to detect that a test exists, never applied as a
+  threshold, because the PVR has no alpha test outside the punch-through list.
+  For a door with alpha-punched window openings: `depth.write=true` makes the
+  transparent holes write depth and **occlude the scenery behind them**
+  ("the windows are missing"); `depth.write=false` makes the door **fail to
+  occlude anything** ("the trees draw through the door"). Do not oscillate
+  between these two — both were tried on 2026-08-02 and both were reported
+  broken by a human. The fix is `PVR_LIST_PT_POLY`; `kb/RESUME.md` item 1
+  carries the constraints (PT is list 4, i.e. LAST, so cutouts must be buffered
+  until the TR list closes).
+- **A draw that binds no texture still got one.** `dc_pvr.c` bound
+  `g_gx.tex_handle[0]` unconditionally and never consulted
+  `tev_stages[0].tex_map`, while nothing ever clears that handle. The whole
+  JSystem 2D path sets `GX_TEXMAP_NULL` + `GXSetNumTexGens(0)`
+  (`J2DGrafContext.cpp:29-31`), and `GXPosition3f32` resets texcoord to (0,0)
+  per vertex, so those panes sampled texel (0,0) of whatever emu64 last bound
+  and `MODULATEALPHA` multiplied it into colour *and alpha*: an opaque-black
+  texel blacked the pane out, a zero-alpha texel erased it, and which one you
+  got depended on that frame's draw order. Letterbox bars, dialogue frames and
+  fade quads. Fixed 2026-08-02; `-DDC_PVR_NO_TEXNULL` reverts.
+  ⚠️ Suppress the bind ONLY on an explicit `GX_TEXMAP_NULL` — `g_gx` is
+  zero-initialised and `tex_map == 0` is `GX_TEXMAP0`, i.e. the "nobody called
+  `GXSetTevOrder` yet" default, which must keep its texture.
 - **State that is recorded and never consumed reads exactly like state that is
   handled.** `dc_gx.c` has stored `TEXOBJ_WRAP_S/T` since M1 and exposes
   `GXGetTexObjWrapS/T`, so a grep for "wrap" finds a plumbed-looking wrap mode.
@@ -171,7 +225,42 @@ for those see `kb/closed.md`.
   `[WALK]` lines call `printf` DIRECTLY, and they only become visible once the
   title screen is passed — so a limiter written against the title-screen log
   looks complete and is not. The sink is a `printf` override in DC-owned code.
-  Our own logs are unaffected because `DC_LOG`/`DC_LOGE` call `vprintf`.
+- **…and `printf` is not the only sink either. `vprintf` needs the same
+  override, and this one cost 8× the frame rate.** emu64's `Printf0`
+  (`emu64_print.cpp:18`) calls `vprintf` DIRECTLY, bypassing the `printf`
+  override entirely. It is gated on `g_pc_verbose`, which **`DC_ASSET_STUB`
+  forces on** (`dc_main.c:81`) — so every stub build had it. In the town,
+  `emu64.c:2690`'s
+  `非シェアードの三角形群にシェアードの頂点が混ざっているので破綻しました!`
+  fired **10,877 times in one 600 s run**; at 57600 baud that is ~900 ms of every
+  1-second frame. **The town ran at 1.1 FPS with `gx=35.1ms` — i.e. the renderer
+  was 4 % of the frame and the console was the rest.** Suppressing it: 10,877 →
+  18 lines, **1.1 → 9.3 FPS**. If a scene is inexplicably slow and `gx=` does
+  not account for it, count console lines before profiling anything else.
+  ⚠️ After overriding `vprintf`, `dc_log_impl`/`dc_loge_impl` must call
+  `vfprintf(stdout, …)` and the `printf` override must call `vfprintf` too —
+  otherwise our own diagnostics get rate-limited (a suppressed `[DC/…]` line
+  reads as "the thing did not happen") and `printf` charges every call site
+  twice.
+- **A counter that only counts the failure you thought of proves nothing.** The
+  ARAM pager's small-read fast path (`dc_aram.c`, `len <= ARAM_BLK`) `memset` a
+  32 KB block to zero, called `dc_dvd_pager_read`, **ignored the return value**,
+  bumped `c_r_disc++` (the SUCCESS counter) unconditionally, and cached the
+  block as authoritative. A failed or short read therefore published ZEROS as
+  real content while `zero=0` in the `[DC/ARAM] LRU` line — the exact counter
+  you would check to rule it out. The neighbouring slow path had the same shape
+  in weaker form: `if (dc_dvd_pager_read(...) < 0)` treats a short read or `0`
+  as success. `dc_dvd_pager_read` returns **bytes read** (`dc_dvd.c:228`), so
+  the test must be `got != (int)n`. Both fixed 2026-08-02; the fast path now
+  frees the block so the next read retries, and logs `SHORT READ`.
+  ⚠️ Note *which* reads take the fast path: `len <= 32768`. The message/string
+  TABLE reads are 64 B (`m_msg_main.c_inc:289`) and string bodies are ~64-128 B,
+  so a silent zero-fill lands on exactly the strings and never on the bulk
+  archive reads — which is why "the dialogue body renders but the speaker name
+  and the reply do not" was reachable with every pager counter looking clean.
+  ⚠️ **It was NOT the cause of that symptom** — the fixed build reports
+  `SHORT READ = 0`. Real bug, wrong suspect; the missing name/reply text is
+  still open (`kb/RESUME.md` item 4).
 - **Never gate a periodic probe on `pc_frame_counter`.** `dc_vi.c`'s retrace
   handler returns early on every frameskipped tick — *after* incrementing
   `pc_frame_counter` — so a `pc_frame_counter % N == 0` test is evaluated only
@@ -200,6 +289,27 @@ for those see `kb/closed.md`.
 
 ## Harness / emulator
 
+- **A short run is usually the HUMAN closing the emulator window, not a hang.**
+  A 479-frame run (vs 10,199 the run before) was diagnosed as an audio-thread
+  deadlock, a kill-switch bisect was built and launched, and then the user said
+  "your changes didnt end the run early i did by accident". A run that stops
+  mid-log with no crash dump and no `[DC/...]` error is ambiguous — **ask before
+  bisecting.**
+- **Say what an A/B build will break BEFORE handing it over.** A build made with
+  `-DDC_PVR_NO_UVCLAMP` to test one hypothesis about the train windows also
+  turns off the fix that repaired K.K. Slider's spotlight the previous session.
+  The user reported "kk slider is messed up major, regression" — correct
+  behaviour for that switch, wasted round trip. Name the expected collateral in
+  the same message as the build.
+- **`-c config:LimitFPS=no` unlocks the frame limiter.** `smoke.sh` passes `-c`
+  straight through to Flycast (`smoke.sh:97`). This is the user's own
+  play-testing setting and gets far more game per wall-clock second.
+- **The town is ~4,000 frames in — use `--timeout 600`.** A 240 s run stops in
+  the train intro and will make you think progression regressed.
+- **Build to a COPY of the CDI before a long run.** Flycast holds
+  `dc/build/OpenCrossing.cdi` open for the whole run, so the next build cannot
+  land while it plays. `cp` to the scratchpad and run the copy; then builds and
+  runs overlap instead of serialising into 20-minute cycles.
 - **Guest `scif_flush()` permanently kills the Flycast console. Never call it.**
   KOS's flush clears TEND and spins; Flycast never re-raises TEND on an idle TX
   FIFO; KOS latches `serial_enabled = 0`; a later crash then prints **nothing**.

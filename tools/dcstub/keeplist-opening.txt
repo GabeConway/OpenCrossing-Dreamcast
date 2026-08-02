@@ -1,55 +1,77 @@
-# DC_STUB_KEEP — the opening / player-select working set.
+# DC_STUB_KEEP — the working set from boot through the town, first intro.
 #
-# GENERATED, not written. Reproduce with:
+# GENERATED + hand-merged. Reproduce the generated half with:
 #
 #   DC_ASSET_CENSUS=1 <the usual build line> bash dc/build-dc.sh
-#   bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 240
+#   bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 600
 #   python3 tools/dcstub/census_resolve.py <run>/console.log \
 #       --sizes-from dc/build/nonstub/AnimalCrossing.elf --top 0 > census.txt
-#   python3 tools/dcstub/census_keeplist.py census.txt --with-default --colon
+#   python3 tools/dcstub/census_keeplist.py census.txt --with-default
 #
-# Checked in because that loop costs two full builds and a 240 s run, and the
-# result is stable for this scene. Use it directly:
-#
-# (the trailing `-` is required: BSD paste on macOS will not read stdin without it)
+# Use it directly (the trailing `-` is required: BSD paste on macOS will not
+# read stdin without it):
 #
 #   DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-opening.txt | paste -sd: -)"
 #
-# MEASURED 2026-08-02 against the previous 31-file list:
-#   asset loads      90 -> 779
-#   blank textures   77/117 -> 11/119   (the animals were 77 of the 77)
-#   image_span       10,239,776 -> 10,622,432 B   (margin 3,664,960 B, fit OK)
-#   frame rate       29.3 FPS, unchanged
+# ⚠️ THIS IS A UNION, NOT A RAW CENSUS. A census names only what a run actually
+# DREW, so regenerating it from a single run DROPS everything that run did not
+# reach. The 2026-08-02 town census would have dropped 11 files that the
+# player-select scene needs — the flg_/kal_/mob_/mol_/mos_/xsq_ animal textures
+# and kan_tizu — because the town run never showed those animals. Always union
+# a new census with this file; never replace it wholesale.
 #
-# The last two entries, src/game/m_msg.c and src/game/m_choice.c, are NOT
-# stubbable and would have been dropped by the old census_keeplist.py filter.
-# They carry the dialogue balloon, whose arrays and loader live in an #included
-# .c_inc; naming them here is what makes make_stub_data.py rewrite that .c_inc
-# and call its loader. See kb/traps.md.
+# MEASURED 2026-08-02 (town run, 600 s, A-dominant DC_AUTOSTART):
+#   the run reaches SCENE_FG (scene_mode 9, mEv_CheckFirstIntro TRUE)
+#   census                 517 batches, full=0, 325 addrs -> 272 symbols
+#   keep list              77 -> 107 entries
 #
-# The residual 11 are 64x64/128x64 acre and scenery textures that this indoor
-# scene loads but never draws; growing the list to cover them needs a census of
-# a run that actually reaches the town.
+# The entries src/game/m_msg.c and src/game/m_choice.c are NOT stubbable and
+# would have been dropped by the old census_keeplist.py filter. They carry the
+# dialogue balloon, whose arrays and loader live in an #included .c_inc; naming
+# them here is what makes make_stub_data.py rewrite that .c_inc and call its
+# loader. See kb/traps.md.
+#
+# src/data/model/boy_model.c is a HAND ADDITION, not a census result. The census
+# only names what drew, and the train-exit player never drew — because this file
+# was stubbed, which was the bug. mPlib_get_player_mdl_p (m_player_lib.c:1319)
+# picks cKF_bs_r_boy_1 for gender MALE, the default for a new game
+# (m_start_data_init.c:193), while girl_model.c was the one being kept.
 src/actor/ac_field_draw.c
 src/actor/ac_train_window.c
 src/data/field/bg/acre/grd_player_select/grd_player_select.c
+src/data/field/bg/acre/grd_s_e1_r1_1/grd_s_e1_r1_1.c
 src/data/field/bg/acre/grd_s_f_2/grd_s_f_2.c
 src/data/field/bg/acre/grd_s_f_3/grd_s_f_3.c
+src/data/field/bg/acre/grd_s_f_4/grd_s_f_4.c
+src/data/field/bg/acre/grd_s_f_6/grd_s_f_6.c
 src/data/field/bg/acre/grd_s_f_mh_1/grd_s_f_mh_1.c
+src/data/field/bg/acre/grd_s_f_mh_3/grd_s_f_mh_3.c
+src/data/field/bg/acre/grd_s_r1_3/grd_s_r1_3.c
 src/data/field/bg/acre/grd_s_t_5/grd_s_t_5.c
+src/data/field/bg/acre/grd_s_t_po_3/grd_s_t_po_3.c
+src/data/field/bg/acre/grd_s_t_r1_1/grd_s_t_r1_1.c
 src/data/field/bg/acre/grd_s_t_st1_1/grd_s_t_st1_1.c
+src/data/field/bg/acre/grd_s_t_st1_2/grd_s_t_st1_2.c
+src/data/field/bg/acre/grd_s_t_st1_3/grd_s_t_st1_3.c
 src/data/field/bg/acre/rom_train_in/rom_train_in.c
 src/data/font/FONT_nes_tex_choice.c
 src/data/font/FONT_nes_tex_cursor.c
 src/data/font/FONT_nes_tex_font1.c
 src/data/font/FONT_nes_tex_next.c
+src/data/model/act_ball_b.c
 src/data/model/bir_win.c
+src/data/model/boy_model.c
 src/data/model/dna_win.c
+src/data/model/ef_dust01_00.c
 src/data/model/ef_ha01_00.c
 src/data/model/ef_hanabira01_00.c
+src/data/model/ef_hirameki01_den.c
+src/data/model/ef_kisha_kemuri01_00.c
 src/data/model/ef_shadow_out.c
 src/data/model/ef_shock01_00.c
 src/data/model/ef_warau01_00.c
+src/data/model/ef_wipe1.c
+src/data/model/ef_wipe2.c
 src/data/model/f_tree3.c
 src/data/model/f_tree4.c
 src/data/model/f_tree5.c
@@ -59,6 +81,62 @@ src/data/model/kai_sousa.c
 src/data/model/kai_sousa2.c
 src/data/model/lat_sp.c
 src/data/model/log_win_logo3_tex.c
+# --- the common ground/water texture set (hand-added 2026-08-02) ---
+# The census can never name these: the acre display lists draw from the
+# *_dummy .bss buffers in src/game/m_bg_tex.c, which m_field_make.c:1128
+# fills by bcopy from these arrays. The census resolves the address that was
+# drawn - the dummy - so it kept m_bg_tex.c (a no-op, pure .bss) and dropped
+# every real texture. With them stubbed the bcopy moved zeros, an all-zero
+# CI4 is every texel at palette index 0 (the transparent entry), and the
+# entire town ground rendered as a black silhouette. See kb/station-bugs.md.
+# Summer only: the season fork at m_field_make.c:1119 selects mFM_grd_w_*
+# for winter, and console RTC in August is summer.
+src/data/model/mFM_grd_beachA_tex.c
+src/data/model/mFM_grd_beachB_tex.c
+src/data/model/mFM_grd_s_beach_tex.c
+src/data/model/mFM_grd_s_bridge1.c
+src/data/model/mFM_grd_s_bridge1_pal.c
+src/data/model/mFM_grd_s_bridge2.c
+src/data/model/mFM_grd_s_bridge2_pal.c
+src/data/model/mFM_grd_s_bushA.c
+src/data/model/mFM_grd_s_bushB.c
+src/data/model/mFM_grd_s_cliff.c
+src/data/model/mFM_grd_s_earth.c
+src/data/model/mFM_grd_s_grass.c
+src/data/model/mFM_grd_s_rail.c
+src/data/model/mFM_grd_s_river.c
+src/data/model/mFM_grd_s_sand.c
+src/data/model/mFM_grd_s_station.c
+src/data/model/mFM_grd_s_station1_pal.c
+src/data/model/mFM_grd_s_stone.c
+src/data/model/mFM_grd_s_tekkyo.c
+src/data/model/mFM_grd_s_tunnel.c
+src/data/model/mFM_grd_sprashA_tex.c
+src/data/model/mFM_grd_sprashC_tex.c
+src/data/model/mFM_grd_water1_tex.c
+src/data/model/mFM_grd_water2_tex.c
+src/data/model/mFM_grd_wave1_tex.c
+src/data/model/mFM_grd_wave2_tex.c
+src/data/model/mFM_grd_wave3_tex.c
+# The ground PALETTES take the identical shape one function up:
+# m_field_make.c:1092 bcopies l_bg_pal_segment_rom_start[] (m_field_make.c:1067)
+# into l_bg_pal_common_dummy[]. Without these the textures above still decode
+# to nothing - an all-zero CI4 palette is transparent for every index, not
+# just index 0.
+src/data/field/bg/beach_pal.c
+src/data/field/bg/bush_pal.c
+src/data/field/bg/cliff_pal.c
+src/data/field/bg/earth_pal.c
+src/data/field/bg/rail_pal.c
+# Same shape again at m_field_make.c:613-620 - the flower, weed and tree
+# palettes are bcopied into mFM_pal_t fields.
+src/data/model/mFM_obj_01_zassou.c
+src/data/model/mFm_obj_palm_01.c
+src/data/model/mFm_obj_tree_01.c
+src/data/model/mFm_obj_tree_01_dol.c
+src/data/model/obj_a_01_flower.c
+src/data/model/obj_gold_01.c
+# --- end common ground set ---
 src/data/model/log_win_logo4_tex.c
 src/data/model/log_win_nintendo1_tex.c
 src/data/model/log_win_nintendo2_tex.c
@@ -70,13 +148,26 @@ src/data/model/logo_us_sing.c
 src/data/model/logo_us_tm.c
 src/data/model/mra_win.c
 src/data/model/nam_win.c
+src/data/model/obj_cedar5.c
+src/data/model/obj_crack.c
 src/data/model/obj_e_mikanbox.c
 src/data/model/obj_fenceL_shadow.c
 src/data/model/obj_hole_pal.c
+src/data/model/obj_hole.c
+src/data/model/obj_item_nuts.c
+src/data/model/obj_melody.c
 src/data/model/obj_romtrain_door.c
+src/data/model/obj_s_cedar3.c
+src/data/model/obj_s_cedar4.c
+src/data/model/obj_s_cedar5.c
 src/data/model/obj_s_fenceL.c
+src/data/model/obj_s_melody.c
 src/data/model/obj_s_sightmap.c
 src/data/model/obj_s_station1.c
+src/data/model/obj_s_tree3.c
+src/data/model/obj_s_tree4.c
+src/data/model/obj_s_tree5_apple.c
+src/data/model/obj_s_tree5.c
 src/data/model/obj_sightmap_shadow.c
 src/data/model/obj_station1_shadow.c
 src/data/model/obj_train_3.c
@@ -85,7 +176,10 @@ src/data/model/obj_tree_shadow.c
 src/data/model/rom_train_out.c
 src/data/model/rst_win.c
 src/data/model/structure/palette/structure_pal_data.c
+src/data/model/tol_keitai_1.c
+src/data/npc/model/mdl/cbr_1.c
 src/data/npc/model/mdl/end_1.c
+src/data/npc/model/mdl/hgh_1.c
 src/data/npc/model/mdl/kab_1.c
 src/data/npc/model/mdl/mnk_1.c
 src/data/npc/model/mdl/xct_1.c

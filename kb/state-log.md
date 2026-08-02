@@ -8,6 +8,201 @@
 > thrash (pager landed, `29ffca5`), VMU write unimplemented (backend landed,
 > `b4a177d`). Narrative for those four commits currently lives in `kb/STATE.md`.
 
+---
+
+## 2026-08-02 (session 2) — the town is reachable; three renderer bugs of one family
+
+**Headline: the port reaches the TOWN.** `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`;
+mode 9 is `mFI_FIELD_FG` with `mEv_CheckFirstIntro()` TRUE
+(`m_field_make.c:1292`), i.e. SCENE_FG, the outdoor field. Previously the run
+stopped in the train intro.
+
+### What unblocked it — input, not memory and not the renderer
+
+`kb/boot-blockers.md` had this filed as a menu problem. It was arithmetic.
+`dc_pad.c:64` alternated START and A **1:1**, and past the title screen START
+advances almost nothing: dialogue pages take A or B only
+(`m_msg_normal.c_inc:2`) and every choice menu defaults to index 0, which A
+accepts. Half of every run's presses were wasted. The gate that actually held
+the port was Rover's forced name-entry keyboard
+(`ac_npc_guide_move.c_inc:662,665`), which needs *some* A presses to type a
+character and then a START to accept — and rejects an all-blank name
+(`m_editor_ovl.c:1165`).
+
+Made A-dominant (`DC_AUTOSTART_START_EVERY`, default 4 → 3 A per START;
+`=2` restores the old 1:1). Measured 188 A / 62 START, and the run walked
+through the keyboard into the town.
+
+⚠️ A save file is NOT needed for this. `pc_m_card.c:1282-1290` overrides the
+card state machine and returns `mCD_TRANS_ERR_NONE` unconditionally; the
+new-game path builds the town in RAM (`m_start_data_init.c:175`).
+
+### The town ran at 1.1 FPS, and it was the CONSOLE
+
+`gx=35.1ms` on a ~900 ms frame — the renderer was 4 % of it. The rest was one
+line: emu64's
+`非シェアードの三角形群にシェアードの頂点が混ざっているので破綻しました!`
+(`emu64.c:2690`) printed **10,877 times** in one 600 s run over a 57600-baud
+SCIF. It escaped the flood limiter because `emu64_print.cpp:18`'s `Printf0`
+calls **`vprintf`**, and only `printf` was overridden. `g_pc_verbose` is forced
+on by `DC_ASSET_STUB` (`dc_main.c:81`), so every stub build had it.
+
+Overrode `vprintf` through the same table (and moved `dc_log_impl` /
+`dc_loge_impl` / the `printf` override onto `vfprintf`, so our own diagnostics
+are never rate-limited and no call site is charged twice).
+
+**10,877 → 18 lines. Town 1.1 → 9.3 FPS.** Later, with the bigger keep list,
+**12.1 FPS**, and frames-per-600 s went 8,159 → 10,199 → **16,889**.
+
+### Keep list: 77 → 107 files, by census + union
+
+Censused a town-reaching run (517 batches, `full=0`), resolved 325 addresses →
+272 symbols. ⚠️ **The raw census would have DROPPED 11 files** the
+player-select scene needs (the `flg_/kal_/mob_/mol_/mos_/xsq_` animal textures,
+`kan_tizu`) because the town run never showed those animals. **Always union;
+never replace.** That rule is now in the file header.
+
+Texture uploads **119 (11 blank) → 269 (15 blank)**, i.e. blank fraction
+9.2 % → 5.6 %. `image_span` 10,621,344 → 10,699,616 B, margin 3,588,448 B, fit
+still OK.
+
+Also hand-added `src/data/model/boy_model.c`: a census only names what DREW,
+and the train-exit player never drew *because it was stubbed*.
+`mPlib_get_player_mdl_p` (`m_player_lib.c:1319`) picks `cKF_bs_r_boy_1` for
+gender MALE, the new-game default (`m_start_data_init.c:193`), while
+`girl_model.c` was the one being kept.
+
+### Three renderer bugs, all "GX state recorded and never consumed"
+
+That makes **four** counting last session's wrap mode and TEV constants. A
+sweep of every `g_gx` field for a consumer in `dc_pvr.c` is now the standing
+technique.
+
+1. **Untextured draws inherited a stale texture.** `dc_pvr.c` bound
+   `tex_handle[0]` unconditionally, never reading `tev_stages[0].tex_map`.
+   The whole JSystem 2D path sets `GX_TEXMAP_NULL` + `GXSetNumTexGens(0)`
+   (`J2DGrafContext.cpp:29-31`) and `GXPosition3f32` zeroes the texcoord per
+   vertex, so those panes sampled texel (0,0) of whatever emu64 last bound and
+   `MODULATEALPHA` folded it into colour AND alpha — order-dependent per frame.
+   Fixed; `-DDC_PVR_NO_TEXNULL` reverts. ⚠️ Suppress only on an explicit
+   `GX_TEXMAP_NULL`; `tex_map == 0` is `GX_TEXMAP0`, the zero-init default.
+2. **Alpha test never implemented.** `GXSetAlphaCompare` stores five fields;
+   `dc_pvr.c` read none. 23 of the 101 TEV configs ask for a test. Cutouts were
+   drawn with `GX_BM_NONE` → `src=ONE dst=ZERO`, so **fully transparent texels
+   painted at full opacity and wrote depth**. Measured **316 of 2331 batches
+   (13.6 %)** are cutouts. Human confirmation after the fix: "rover looks much
+   better in the train".
+3. **`GXSetColorUpdate` never consumed.** A depth-only pass painted solid
+   geometry. Fixed as `src=ZERO dst=ONE` (destination untouched, depth still
+   written) — the exact GX semantics. Measured impact: **1 batch**. Correct,
+   but it was not a layering cause; recorded so nobody re-derives it.
+
+### The alpha-test fix over-corrected, and the door is the evidence
+
+First cut dropped `depth.write` for every alpha-tested batch. Wrong:
+`AA_ZB_TEX_EDGE2` is the game's ordinary **opaque-with-holes** mode — the train
+door frame and leaf (`obj_romtrain_door.c:44,71`) and the tunnel
+(`rom_train_out.c:135`) all use it. With one submission-ordered list and
+autosort off, a batch that writes no depth is painted over by everything
+submitted later, and all XLU window scenery is submitted after the OPA
+geometry — the passing trees drew straight through the closed door.
+
+Narrowed to `if (g_gx.blend_mode == GX_BM_BLEND) cxt.depth.write = false;`
+(`GX_BM_NONE` + test = opaque with holes → keeps depth).
+
+**That is still not right, and the reason is fundamental:** `alpha_ref` (144 by
+default, `emu64.c:718`) is read only to detect that a test exists, never as a
+threshold. So with depth write ON, a door's transparent window holes still
+write depth and occlude the scenery behind them; with it OFF the door does not
+occlude at all. **Neither extreme is correct — this needs the real
+punch-through list.** See `kb/RESUME.md` item 1.
+
+### Measured, and worth not re-deriving
+
+- **Multi-texture is a 9 % problem, not a 52 % one.** 1209 of 1231 two-stage
+  batches request texmap1, but only **220** bind a genuinely different image
+  (`t1=1`); the rest point both texmaps at the same tile — N64 LOD
+  interpolation, which the PVR does in hardware and which is free to drop.
+- **`cu=1,0` on 2330 of 2331 batches**: alpha update is off almost everywhere.
+  Harmless (no destination alpha in the framebuffer), unlike colour update.
+- **Fog is entirely unimplemented** and the game does use it
+  (`emu64.c:3219`, `GX_FOG_PERSP_LIN`). Every train model carries `G_FOG`.
+  Cosmetic — it cannot make geometry vanish.
+
+### Audio: root cause found, pipe built, still silent
+
+The jaudio pipeline had **never ticked once**. `pc_audio_process_frame`
+(`audiothread.c:92`) is the only caller of `Jac_UpdateDAC`, its only caller was
+the SDL thread `pc_audio_start_producer_thread` — which `dc_audio.c:201`
+overrides with a no-op. `--gc-sections` had been dropping
+`.text.pc_audio_process_frame` entirely. The single `AIInitDMA` the port ever
+executed was `aictrl.c:70`'s init call with a zeroed buffer.
+
+⚠️ **`[TRG_SE] NO FREE` is a SYMPTOM of that, not a DC bug** — and
+`kb/RESUME.md`'s old claim that it was "a real bug in the DC audio layer" was
+wrong. `Nap_ReadSubPort` returns −1 while the group is disabled
+(`sub_sys.c:426`), and the free test is `!p5` (`game64.c_inc:1026`), which −1
+never satisfies. It frees itself once the sequencer runs.
+
+Wired a real `snd_stream` device plus a budgeted per-frame pump
+(`dc_audio.c`, called from `dc_vi.c` before the frameskip early-out).
+**The KOS API question that had blocked this since M0 is answered** — read out
+of the SDK image, not guessed: the callback type is
+`void *(*)(snd_stream_hnd_t, int, int *)`, and in `snd_stream.c:697-720` KOS
+calls `get_data(hnd, needed_bytes, &got_bytes)` — **`smp_req` is BYTES despite
+the name**, in and out. The existing callback already matched.
+
+Result: device up, AICA pulling (`cb=2 pulled=8192`), but `[NEOS_OUT] peak=0`
+— synthesis running on silence, because `dc_aram.c` discards every ARAM write
+below `aram_audio_end` and throws `audiorom.img` away. `DC_ARAM_AUDIO_DROP=0`
+now exists to let it through, **unproven and risky** (extent-table ordering).
+Also `fill=` sat at 4480 with `cb=2` for a whole run: the consumer stalls after
+two callbacks, cause unknown. First pump gated on `fill < RING/2` and
+deadlocked (a stalled consumer left the ring half full, so synthesis never
+ran); now gated on a headroom margin.
+
+### An ARAM bug found while chasing missing text — real, but not the cause
+
+The small-read fast path (`len <= ARAM_BLK`) `memset` a 32 KB block to zero,
+called `dc_dvd_pager_read`, **ignored the return value**, bumped the SUCCESS
+counter, and cached the block as authoritative — so a failed or short read
+published zeros while `zero=0` looked clean. That size class is exactly the
+64 B message/string TABLE reads (`m_msg_main.c_inc:289`). Fixed to demand the
+full count (`dc_dvd_pager_read` returns BYTES, `dc_dvd.c:228`), free the block,
+and log `SHORT READ`.
+
+**Measured `SHORT READ = 0`**, so this was NOT the cause of the missing speaker
+name and reply text. That remains open; `DC_ARAM_TBL_PROBE` was added to
+adjudicate it (see `kb/RESUME.md`).
+
+Also proven, so nobody re-checks: **forest_1st IS fully mapped.**
+851,744 + 4,130,656 = 4,982,400 = the reported `mapped=`, to the byte. Two
+extents cover both archives.
+
+### Closed with evidence
+
+- **Near-plane clipper works** — `clipped=1798` over 6.69M triangles. The old
+  `clipped=0` came from short 2D-heavy runs: emu64 forces `GX_ORTHOGRAPHIC`
+  for rect paths, ortho gives `w ≡ 1`, and `w ≡ 1` cannot trip `w <= EPS`.
+- **Ortho `z ≡ 1.0` collapse is harmless** — across 314 logged batches, every
+  depth-TESTED batch carries real perspective z and every collapsed-z batch has
+  depth OFF. Zero overlap.
+- **The "invisible" quads draw** — sane bboxes, `verts=6` per quad; the 50→3
+  alternation is dialogue glyphs appearing and disappearing.
+
+### Process notes
+
+- **A short run is usually the human closing the emulator window.** One
+  479-frame run was diagnosed as an audio deadlock; it was not.
+- **`-c config:LimitFPS=no`** (harness passthrough) unlocks the frame limiter
+  for play-testing — the user's tip, worth using on every long run.
+- Running a kill-switch A/B changes OTHER things too: the
+  `-DDC_PVR_NO_UVCLAMP` run built to test the trees regressed K.K. Slider,
+  because that switch is what fixed his spotlight last session. Say so before
+  handing over an A/B build.
+
+---
+
 The dated narrative of this port's bring-up: what executed, when, and what it
 cost to get there. `kb/STATE.md` carries only what is true *now* and stays
 short; everything that is history but still evidence lives here. Newest first.

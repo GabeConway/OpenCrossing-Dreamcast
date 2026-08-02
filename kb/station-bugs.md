@@ -1,0 +1,242 @@
+# Train-station bugs — traced 2026-08-02, fixes not yet applied
+
+Two human-reported bugs on the current (uncommitted) build, investigated by
+static trace only — no new runs were made. One is solved to the byte; the
+other is constrained to a short list with a one-run experiment that decides it.
+
+| bug | status |
+|---|---|
+| §1 The station floor is black | **SOLVED, FIX APPLIED 2026-08-02** — keep-list gap plus a census blind spot. See §1.5 for what the first trace missed. |
+| §2 The player clips through the station roof | **NOT PINNED.** Every state-mapping path checks out clean; three live hypotheses remain, and one instrumented run separates them. |
+
+---
+
+## 1. The station floor is black — SOLVED
+
+### The chain, with evidence
+
+1. The station platform paving is **acre ground**, not part of the building
+   model. The station acre's display list draws it from a *dummy buffer*:
+   `grd_s_t_st1_2.c:260-261` —
+   `gsDPLoadTLUT_Dolphin(15, 16, 1, station_pal_dummy)` +
+   `gsDPLoadTextureBlock_4b_Dolphin(station_tex_dummy, G_IM_FMT_CI, 128, 32, …)`.
+2. `station_tex_dummy` / `station_pal_dummy` are **bare `.bss` buffers** in
+   `src/game/m_bg_tex.c` (no `TARGET_PC` guard, no data, nothing to load).
+3. They are filled at field-make time by a copy from the real source arrays:
+   `m_field_make.c:1128` —
+   `bcopy(bg_tex_tbl[i], l_bg_tex_common_dummy[i].data, size)`, where the
+   table (`l_bg_tex_segment_rom_start_s_0`, `m_field_make.c:928`) points at
+   `mFM_grd_s_station_tex` and `mFM_grd_s_station1_pal`.
+4. Those sources live in `src/data/model/mFM_grd_s_station.c` and
+   `src/data/model/mFM_grd_s_station1_pal.c` — **neither is in
+   `tools/dcstub/keeplist-opening.txt`**, so under `DC_ASSET_STUB=1` they are
+   zero-filled `.bss` with no loader. The bcopy copies zeros.
+5. An all-zero CI4 texture is every-texel-index-0, and index 0 of these
+   palettes is the transparent entry — under the cutout blend it contributes
+   nothing and reads as a black silhouette. Exactly the RESUME "stubbed asset
+   decodes to a transparent rectangle" signature.
+
+### Why the census could not catch it
+
+`DC_ASSET_CENSUS` resolves *drawn* addresses to symbols. The draw touches
+`station_tex_dummy` (`m_bg_tex.c`), not the source array — **the bcopy severs
+the attribution**. The proof is already in the keep list: line 143 keeps
+`src/game/m_bg_tex.c`, which is a no-op (pure `.bss`, nothing stubbable),
+while the real sources were dropped. The census did its job; the indirection
+is invisible to it by construction.
+
+**This is a class, not an instance.** Every ground/water/wave/beach common
+texture goes through the same dummy-buffer copy, so the *entire town ground*
+(grass, earth, cliff, bush, rail, stone, river, bridges, tunnel, beach…) is
+black on the current build, not just the station paving — the station is
+merely where the player is standing. Flower/weed palettes take the same shape
+at `m_field_make.c:613-616` (`mFM_obj_a_01_flower_pal` → `pal->flowerN_pal`).
+
+### The fix
+
+Immediate (a list edit, two builds, no code):
+
+- Add to `tools/dcstub/keeplist-opening.txt` (union, never replace — see the
+  header of that file):
+  - `src/data/model/mFM_grd_s_station.c` and
+    `src/data/model/mFM_grd_s_station1_pal.c` — the reported bug.
+  - The rest of the summer common set referenced by
+    `l_bg_tex_segment_rom_start_s_0/1/2` (`m_field_make.c:928-988`):
+    `mFM_grd_s_earth.c`, `mFM_grd_s_cliff.c`, `mFM_grd_s_bushA.c`,
+    `mFM_grd_s_bushB.c`, `mFM_grd_s_grass.c`, `mFM_grd_s_rail.c`,
+    `mFM_grd_s_stone.c`, `mFM_grd_s_river.c`, `mFM_grd_water1_tex.c`,
+    `mFM_grd_water2_tex.c`, `mFM_grd_s_bridge1.c`, `mFM_grd_s_bridge1_pal.c`,
+    `mFM_grd_s_bridge2.c`, `mFM_grd_s_bridge2_pal.c`, `mFM_grd_s_tekkyo.c`,
+    `mFM_grd_s_tunnel.c`, `mFM_grd_s_beach_tex.c`, `mFM_grd_beachA_tex.c`,
+    `mFM_grd_beachB_tex.c`, `mFM_grd_s_sand.c`, `mFM_grd_wave1_tex.c`,
+    `mFM_grd_wave2_tex.c`, `mFM_grd_wave3_tex.c`, `mFM_grd_sprashA_tex.c`,
+    `mFM_grd_sprashC_tex.c`.
+  - `src/data/field/bg/acre/grd_s_t_st1_2/grd_s_t_st1_2.c` — the middle
+    station acre. The list has `_1` and `_3` only because the census town
+    happened to use those; town layout randomises the station column, so keep
+    all three.
+- Cost: the dummy set is 30,560 B per texture variant and the `mFM_grd_*.c`
+  tex files carry three variants each (`_tex`, `_2_tex`, `_3_tex` —
+  `mFM_DecideBgTexIdx` is `RANDOM(3)`, `m_field_make.c:1097`), so **≈60-90 KB
+  of image span** against the current 3.5 MB margin. Trivial.
+- Winter: the season fork picks `l_bg_w_tex_segment_table` and the
+  `mFM_grd_w_*.c` files (`m_field_make.c:1119-1123`). Console RTC in August =
+  summer, so not needed for this repro — needed before any winter test.
+
+Structural (tooling, so the next indirection does not cost another trace):
+
+- `census_keeplist.py` needs a small alias table: *symbol drawn* →
+  *file that must be kept*. Seed it with the 27 `*_dummy` symbols of
+  `m_bg_tex.c` → their `mFM_grd_*.c` sources (the mapping is literally
+  `l_bg_tex_common_dummy` vs `l_bg_tex_segment_rom_start_s_0`, same index).
+  Grep for other `bcopy(… , *_dummy…)` / copy-into-buffer sites before
+  trusting any future census; `m_field_make.c:613-616` is the next known one.
+
+## 1.5 What the first trace missed — the palettes, applied 2026-08-02
+
+The trace above named the ground **textures** and stopped there. Keeping only
+those would have changed nothing on screen, because the **palettes take the
+same shape one function up** and were also stubbed. Three more copy sites:
+
+| site | dummy | source table |
+|---|---|---|
+| `m_field_make.c:1092` | `l_bg_pal_common_dummy[]` — `earth_pal_dummy`, `cliff_pal_dummy`, `bush_pal_dummy`, `rail_pal_dummy`, `beach_pal_dummy2` | `l_bg_pal_segment_rom_start[]` (`m_field_make.c:1067`) → `src/data/field/bg/{earth,cliff,bush,rail,beach}_pal.c` |
+| `m_field_make.c:613-616` | `pal->flower{0,1,2}_pal`, `pal->grass_pal` | `obj_a_01_flower.c`, `mFM_obj_01_zassou.c` |
+| `m_field_make.c:617-620` | `pal->{tree,cedar_tree,palm_tree,golden_tree}_pal` | `mFm_obj_tree_01.c`, `mFm_obj_tree_01_dol.c`, `mFm_obj_palm_01.c`, `obj_gold_01.c` |
+
+An all-zero **palette** is worse than an all-zero texture: every index reads
+transparent, not just index 0, so the fix is not partial without it.
+
+The five `*_pal.c` files load by a different mechanism from the textures and
+this matters for anyone extending the list. `mFM_earth_pal` and friends are
+**not in `pc/src/pc_assets.c`'s central `s_assets[]` table at all** — they use
+the per-file lazy shape, `void _pc_load_src_data_field_bg_earth_pal_c(void)`
+appended to the TU (`earth_pal.c:20-24`). `make_stub_data.py` handles both
+kinds, so naming the file is still all that is required; but it also means
+these files never appear in `stub.list` (their `#ifdef TARGET_PC` branch
+already declares a bare `.bss` array, so the stubber finds nothing to shrink),
+and "not in stub.list" is therefore **not** evidence that a file is fine.
+
+### Applied
+
+- `tools/dcstub/keeplist-opening.txt`: +27 `mFM_grd_*` summer textures,
+  +`grd_s_t_st1_2`, +5 bg palettes, +6 flower/weed/tree palette files.
+  107 → 146 entries; generated loads 546 → 951 rows.
+- `tools/dcstub/census_keeplist.py`: `INDIRECT_SOURCES`, a *censused symbol →
+  source files that fill it* alias table, so the next census follows the
+  indirection instead of costing another trace. Seeded with all 24 `m_bg_tex.c`
+  texture dummies, the 3 palettes that travel in the texture table, the 5
+  monthly ground palettes, and `mFM_pal_area` for the flower/tree set.
+  `mFM_pal_area` is in `NOT_ASSETS`; alias keys now survive that filter.
+  `--verbose` reports every alias it followed. Winter (`mFM_grd_w_*`) is
+  deliberately absent — add it before any winter test.
+
+### Verify
+
+`DC_TEX_LOG=1`: the `station_tex_dummy` upload must go from 0 non-zero texels
+to real content; visually, the platform paving and the town ground stop being
+black. No renderer change is involved anywhere in this bug.
+
+---
+
+## 2. The player clips through the station roof — NOT PINNED
+
+### What the trace eliminated (do not re-walk these)
+
+- **Assets.** `obj_s_station1.c` (building model+textures) and its palettes
+  (`structure_pal_data.c`, keep list line 121) are both kept and real. The
+  palette decodes as entry 0 transparent, entries 1-15 fully opaque
+  (`foresta.rel` `.data+0x5011e0`, read directly) — **no mid-alpha entries**,
+  so a "roof drawn 60 % translucent" ghosting mechanism is dead at the data
+  level.
+- **Render state.** The station draws via `_texture_z_light_fog_prim_npc`
+  (`ac_station_draw.c_inc:61`) = `z_gsCPModeSet_Data[10]` (`m_rcp.c:113-122`):
+  2-cycle `G_RM_FOG_SHADE_A | G_RM_AA_ZB_TEX_EDGE2`. Walked through emu64:
+  `IM_RD` set, `FORCE_BL` clear → `GX_BM_NONE` (`emu64.c:2292-2295`);
+  `AA_EN|CVG_X_ALPHA|ALPHA_CVG_SEL` → alpha test GEQUAL/144
+  (`emu64.c:2299-2319`); `Z_CMP` without `ZMODE_DEC` → `GX_LESS`, `Z_UPD` on
+  (`emu64.c:2362-2366`). On the DC side that is the cutout path with **depth
+  write KEPT** (`dc_pvr.c:587-609`, the door fix — `GX_BM_NONE` + alpha test
+  keeps `depth.write`), compare `GX_LESS → PVR_DEPTHCMP_GREATER`
+  (`dc_pvr.c:163`), vertex depth `1/w` (`emit_projected`, `dc_pvr.c:684`).
+  Town batch logs (run `smoke-alpha-…171343`, frame 6000) show the matching
+  state on the 128x32 candidates: `bm=0 cut=1 zt=1 zf=1 zw=1`.
+- **The G_DECAL red herring.** Every station DL sets `G_DECAL_LEQUAL` — it is
+  `0x00` (`gbi_extensions.h:132`), i.e. no bits; a no-op.
+- **Arithmetic.** With roof and player both z-tested (`GREATER` on `1/w`) and
+  both z-writing, occlusion is order-independent: player-after-roof fails the
+  test, roof-after-player overwrites (opaque texels are α=255). **The
+  observed state mapping cannot produce clip-through in either submission
+  order** — which is precisely why this is not solved on paper.
+
+### Live hypotheses, ranked
+
+- **H1 — a state leak: the player's (or roof's) batches in the *station
+  frame* do not actually carry `zt=1`/`zw=1`.** The batch log above is from a
+  different frame; emu64 state is a running machine and one intervening
+  ortho/UI segment that leaves z off would do exactly this. Cheapest to test
+  and the only mechanism that fully matches "solid player drawn over solid
+  roof".
+- **H2 — cutout edge ghosting, i.e. RESUME §5 item 1 wearing a new hat.** The
+  palette has no mid-alpha but **bilinear filtering manufactures it** at every
+  cutout boundary; those edge texels blend instead of discarding, and the
+  roof's scalloped trim is all edge. This yields the player showing through
+  the roof's *border regions* but not through its solid middle. If the
+  screenshot shows ghosting confined to trim/edges, this is it — and the fix
+  is the punch-through list already specced as the top open item, no new
+  work. (The α=0 texels also *write depth* in the current build — the door's
+  "holes occlude" defect — which would make the player *vanish* behind
+  invisible pixels near the trim, the opposite artefact. Both symptoms
+  co-locate at cutout boundaries; both are cured by PT.)
+- **H3 — geometry, not state: the roof mesh sits wrong.** The station is the
+  only structure drawn through `cKF_Si3_draw_R_SV` with NULL-shape joints
+  carrying large fixed translations (`{8000, 13000, 6000}`,
+  `obj_s_station1.c:111-115`) and time-driven joint rotations (the clock,
+  `ac_station_draw.c_inc:6-13`). Characters exercise this path and look
+  right, but no other *building* does. A misplaced/low canopy would read as
+  "the player pokes through the roof" while all render state is perfect. One
+  screenshot falsifies it: the roofline would be visibly deformed or low.
+
+### The experiment that decides it (one run)
+
+```
+DC_XDEFS='-DDC_PVR_BATCH_LOG=1' + DC_FB_PROBE=<N> DC_FB_IMAGE=2, --fb-writeback
+```
+
+with N chosen to land frames while standing under/near the roof (town is
+~4,000+ frames in; use the 600 s line from RESUME §2). Then:
+
+- Decode the PNGs (`tools/dcfb/fbimg_to_png.py`). Player solid through the
+  roof's *middle* → H1 or H3. Ghosting only at trim/edges → H2, close as a
+  duplicate of the punch-through item. Deformed roofline → H3.
+- In the same frame's batch dump, find the station batches (128x32, `bm=0
+  cut=1`, bbox over the station) and the player batches (small TA textures,
+  bbox over the player) and read `zt/zf/zw` and the `z=` ranges directly.
+  Player `zt=0` (or roof `zw=0`) → H1, and the offending state transition is
+  whatever batch precedes it. Player z range *closer than the roof's* despite
+  standing behind it → H3.
+- Tooling gap worth one line while in there: `DC_PVR_BATCH_LOG` prints
+  `tex=1` (a flag) but not the texture's VRAM/source pointer, so batches
+  cannot be joined to symbols the way the census is. Printing `tex->base`
+  would make attribution mechanical.
+
+### If it is H1
+
+The fix will be in `dc_gx.c`/`dc_pvr.c` dirty-state handling, not in the
+station: find which GX call the intervening batch made that never got
+consumed (the standing "recorded but never read" family — wrap, TEV const,
+colour mask were all this shape).
+
+### If it is H2
+
+No new work: it is RESUME §5 item 1 (the PVR punch-through list,
+`opb_sizes[4]`, cutouts buffered until the TR list closes, threshold pinned
+to 144). Add "station roof" to that item's symptom list and close this one as
+a duplicate.
+
+### If it is H3
+
+Instrument `cKF_Si3_draw_R_SV` joint matrices for the station only (compare
+joint world positions against the GC values derivable from the skeleton
+table) — suspect the NULL-joint translation path first, since no working
+model exercises it at this magnitude.

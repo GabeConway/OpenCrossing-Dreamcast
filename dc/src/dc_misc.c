@@ -99,9 +99,30 @@ int printf(const char* fmt, ...) {
     if (count > DC_FLOOD_VERBATIM) fprintf(stdout, "[x%u] ", (unsigned)count);
 
     va_start(ap, fmt);
-    r = vprintf(fmt, ap);
+    /* vfprintf, not vprintf: vprintf is overridden below and would re-enter the
+     * limiter, charging this call site twice and suppressing the line we just
+     * decided to admit. */
+    r = vfprintf(stdout, fmt, ap);
     va_end(ap);
     return r;
+}
+
+/* MEASURED 2026-08-02: overriding printf was not enough. emu64's Printf0
+ * (src/static/libforest/emu64/emu64_print.cpp:18) calls vprintf DIRECTLY, so it
+ * bypassed the printf sink entirely. In the town it emitted
+ * "非シェアードの三角形群にシェアードの頂点が混ざっているので破綻しました!"
+ * (emu64.c:2690) 10,877 times in one run — at 57600 baud that is roughly
+ * 900 ms of every 1-second frame, and the town ran at 1.1 FPS with the renderer
+ * accounting for only 35 ms of it. Printf0 is gated on g_pc_verbose, which
+ * DC_ASSET_STUB forces on (dc_main.c:81), so every stub build had this.
+ *
+ * Same table, same backoff, same kill switch — a flooding call site still gets
+ * a periodic heartbeat rather than silence. */
+int vprintf(const char* fmt, va_list ap) {
+    u32 count = 0;
+    if (!dc_console_admit(fmt, &count)) return 0;
+    if (count > DC_FLOOD_VERBATIM) fprintf(stdout, "[x%u] ", (unsigned)count);
+    return vfprintf(stdout, fmt, ap);
 }
 #else
 int dc_console_admit(const char* fmt, u32* out_count) {
@@ -109,17 +130,20 @@ int dc_console_admit(const char* fmt, u32* out_count) {
 }
 #endif /* DC_CONSOLE_LIMIT */
 
+/* vfprintf, not vprintf: our own diagnostics must never be rate-limited — they
+ * are the instrument, and a suppressed [DC/...] line reads as "the thing did not
+ * happen". The vprintf override above is for the game's own floods only. */
 void dc_log_impl(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 }
 
 void dc_loge_impl(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    vfprintf(stdout, fmt, ap);
     va_end(ap);
 }
 

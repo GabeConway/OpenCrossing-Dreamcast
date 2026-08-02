@@ -86,6 +86,77 @@ NOT_ASSETS = {
     "end",
 }
 
+# ---------------------------------------------------------------------------
+# INDIRECTION ALIASES — the census's one structural blind spot.
+#
+# The census resolves the address that was DRAWN. When the game draws out of a
+# scratch buffer that some earlier frame filled by bcopy, the copy severs the
+# attribution: the census names the buffer's own TU and never sees the source
+# array. The result looks like a working keep list and renders black.
+#
+# The instance that cost a trace (kb/station-bugs.md §1): every acre draws its
+# ground from the *_dummy buffers in src/game/m_bg_tex.c — bare .bss, no data,
+# nothing stubbable — which m_field_make.c:1128 fills from the mFM_grd_*
+# arrays and m_field_make.c:1092 fills from the bg palettes. The generated
+# list therefore kept m_bg_tex.c, which is a no-op, and dropped every real
+# texture and palette in the town.
+#
+# Keys are censused symbols; values are the source files that must be kept for
+# that symbol to contain anything. Adding a row here is cheaper than the trace.
+#
+# ⚠️ SUMMER ONLY. m_field_make.c:1119 forks on season and picks the
+# mFM_grd_w_* set for winter; add those rows before any winter test.
+# ⚠️ Grep for other `bcopy(…, *_dummy…)` sites before trusting a new census.
+_GRD = "src/data/model/mFM_grd_%s.c"
+_BGPAL = "src/data/field/bg/%s_pal.c"
+
+INDIRECT_SOURCES = {
+    # ground/water textures — l_bg_tex_common_dummy <- l_bg_tex_segment_rom_start_s_*
+    "earth_tex_dummy":     [_GRD % "s_earth"],
+    "cliff_tex_dummy":     [_GRD % "s_cliff"],
+    "bush_a_tex_dummy":    [_GRD % "s_bushA"],
+    "bush_b_tex_dummy":    [_GRD % "s_bushB"],
+    "grass_tex_dummy":     [_GRD % "s_grass"],
+    "rail_tex_dummy":      [_GRD % "s_rail"],
+    "station_tex_dummy":   [_GRD % "s_station"],
+    "stone_tex_dummy":     [_GRD % "s_stone"],
+    "river_tex_dummy":     [_GRD % "s_river"],
+    "water_1_tex_dummy":   [_GRD % "water1_tex"],
+    "water_2_tex_dummy":   [_GRD % "water2_tex"],
+    "bridge_1_tex_dummy":  [_GRD % "s_bridge1"],
+    "bridge_2_tex_dummy":  [_GRD % "s_bridge2"],
+    "tekkyo_tex_dummy":    [_GRD % "s_tekkyo"],
+    "tunnel_tex_dummy":    [_GRD % "s_tunnel"],
+    "beach_tex_dummy":     [_GRD % "s_beach_tex"],
+    "beach1_tex_dummy2":   [_GRD % "beachA_tex"],
+    "beach2_tex_dummy2":   [_GRD % "beachB_tex"],
+    "sand_tex_dummy":      [_GRD % "s_sand"],
+    "wave1_tex_dummy":     [_GRD % "wave1_tex"],
+    "wave2_tex_dummy":     [_GRD % "wave2_tex"],
+    "wave3_tex_dummy":     [_GRD % "wave3_tex"],
+    "sprashA_tex_dummy":   [_GRD % "sprashA_tex"],
+    "sprashC_tex_dummy":   [_GRD % "sprashC_tex"],
+    # palettes that travel in the same table as the textures
+    "bridge_1_pal_dummy":  [_GRD % "s_bridge1_pal"],
+    "bridge_2_pal_dummy":  [_GRD % "s_bridge2_pal"],
+    "station_pal_dummy":   [_GRD % "s_station1_pal"],
+    # monthly ground palettes — l_bg_pal_common_dummy <- l_bg_pal_segment_rom_start
+    "earth_pal_dummy":     [_BGPAL % "earth"],
+    "cliff_pal_dummy":     [_BGPAL % "cliff"],
+    "bush_pal_dummy":      [_BGPAL % "bush"],
+    "rail_pal_dummy":      [_BGPAL % "rail"],
+    "beach_pal_dummy2":    [_BGPAL % "beach"],
+    # m_field_make.c:613-620 — flower / weed / tree palettes copied into mFM_pal_t
+    "mFM_pal_area": [
+        "src/data/model/obj_a_01_flower.c",
+        "src/data/model/mFM_obj_01_zassou.c",
+        "src/data/model/mFm_obj_tree_01.c",
+        "src/data/model/mFm_obj_tree_01_dol.c",
+        "src/data/model/mFm_obj_palm_01.c",
+        "src/data/model/obj_gold_01.c",
+    ],
+}
+
 # `.bss.foo`, `.data.foo`, `.rodata.foo` … ⚠️ ld emits this in TWO shapes and
 # a parser that knows only one silently loses symbols: when the section name
 # is short enough it stays on the same line as the address/size/object,
@@ -114,7 +185,10 @@ def parse_census(path):
             continue                      # C++ mangled: emu64 internals
         if sym.startswith("_"):
             sym = sym[1:]                 # this toolchain prefixes C symbols
-        if sym in NOT_ASSETS:
+        # An alias key survives the NOT_ASSETS filter: mFM_pal_area is engine
+        # state with no source file of its own, but it is also the evidence
+        # that the flower/tree palettes were copied into it.
+        if sym in NOT_ASSETS and sym not in INDIRECT_SOURCES:
             continue
         syms.append(sym)
     return syms
@@ -185,7 +259,19 @@ def main():
 
     keep, missing, not_stubbed = [], [], []
     seen = set()
+    aliased = []
     for s in syms:
+        # Follow the indirection first: a censused scratch buffer names the
+        # sources that fill it as well as (or instead of) its own TU.
+        for src in INDIRECT_SOURCES.get(s, ()):
+            if not (REPO / src).exists():
+                sys.exit("alias target does not exist: %s (for %s)" % (src, s))
+            if src not in seen:
+                seen.add(src)
+                keep.append(src)
+                aliased.append((s, src))
+        if s in NOT_ASSETS:
+            continue                       # alias key only; no source of its own
         obj = sym2obj.get(s)
         if obj is None:
             missing.append(s)
@@ -219,6 +305,9 @@ def main():
         print("# unresolved symbols:    %d" % len(missing), file=sys.stderr)
         for s in missing[:40]:
             print("#   unresolved %s" % s, file=sys.stderr)
+        print("# added via indirection: %d" % len(aliased), file=sys.stderr)
+        for s, src in aliased:
+            print("#   alias %-22s -> %s" % (s, src), file=sys.stderr)
         print("# already full size:     %d" % len(not_stubbed), file=sys.stderr)
         for s, src in not_stubbed[:40]:
             print("#   not stubbed %-40s %s" % (s, src), file=sys.stderr)

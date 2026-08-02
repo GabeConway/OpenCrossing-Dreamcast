@@ -40,12 +40,43 @@ static volatile u32 ring_read_pos  = 0;
 
 static int  audio_open = 0;
 static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
+
+/* DC_AUDIO=0 is the kill switch: no output device, no synthesis, byte-identical
+ * to the silent build. DC_AUDIO_BUDGET_US caps how long one frame may spend in
+ * jaudio synthesis before giving up until the next frame. */
+#ifndef DC_AUDIO
+#define DC_AUDIO 1
+#endif
+#ifndef DC_AUDIO_BUDGET_US
+#define DC_AUDIO_BUDGET_US 4000
+#endif
+/* Samples of slack kept free at the top of the ring, i.e. how much room one
+ * pump leaves for the next Jac_UpdateDAC push. One jaudio DAC frame is 2*DAC_SIZE
+ * samples; 2048 leaves several frames of margin. */
+#ifndef DC_AUDIO_HEADROOM
+#define DC_AUDIO_HEADROOM 2048
+#endif
+
+#if DC_AUDIO && !defined(DC_HOST_STUB)
+static snd_stream_hnd_t s_hnd = SND_STREAM_INVALID;
+#else
+static int s_hnd = -1;
+#endif
+static u32 s_cb_calls = 0, s_cb_bytes = 0;
+static u32 s_pump_calls = 0, s_pump_frames = 0;
+static u32 s_pump_budget_hits = 0, s_pump_usec = 0;
+static u32 s_poll_fail = 0;
 typedef void (*AIDMACallback)(void);
 static AIDMACallback ai_dma_callback = NULL;
 
 /* Volume scales the jaudio side reads (defined in game code under TARGET_PC). */
 extern float pc_bgm_volume_scale, pc_se_volume_scale, pc_voice_volume_scale;
 extern void  Na_PC_ApplyVolumes(void);
+
+/* jaudio_NES/internal/audiothread.c:92. Declared rather than #included: the
+ * header lives under include/jaudio_NES and pulling it in here would drag the
+ * decomp's headers into a platform TU for one prototype. */
+extern void pc_audio_process_frame(void);
 
 /* ==========================================================================
  * snd_stream callback — the seam to KOS/AICA
@@ -58,7 +89,9 @@ extern void  Na_PC_ApplyVolumes(void);
  * size), snd_stream_start(hnd, freq, stereo), snd_stream_poll(hnd), and the
  * callback signature (older KOS: void*(*)(snd_stream_hnd_t, int, int*)).
  */
-static u8 s_stream_scratch[4096];
+/* 32-byte aligned: stream.h documents "for best performance use 32-byte aligned
+ * pointer", and the SPU store-queue path in snd_stream.c copies from it. */
+static u8 s_stream_scratch[4096] __attribute__((aligned(32)));
 
 static void* dc_audio_stream_cb(int hnd, int req, int* done) {
     int total = req / (int)sizeof(s16);
@@ -91,6 +124,8 @@ static void* dc_audio_stream_cb(int hnd, int req, int* done) {
         memset(&out[copy], 0, (size_t)(total - copy) * sizeof(s16));
 
     ring_read_pos = rp + (u32)copy;
+    s_cb_calls++;
+    s_cb_bytes += (u32)req;
     if (done) *done = req;
     return s_stream_scratch;
 }
@@ -104,19 +139,35 @@ void AIInit(u8* stack) {
 
     dc_mem_note(DCMEM_AUDIO, (ptrdiff_t)(sizeof(ring_buffer) + sizeof(s_stream_scratch)));
 
-    /* Real version:
-     *     snd_stream_init();
-     *     s_hnd = snd_stream_alloc(dc_audio_stream_cb, SND_STREAM_BUFFER_MAX);
-     *     snd_stream_start(s_hnd, DC_AUDIO_SAMPLE_RATE, 1);
-     * left unwired because the exact snd_stream API shape is unverified and a
-     * wrong callback signature is a silent memory corruption, not a compile
-     * error. The ring buffer below is fully live in the meantime, so the game's
-     * audio timing still advances and AIInitDMA still consumes samples. */
+#if DC_AUDIO && !defined(DC_HOST_STUB)
+    /* VERIFIED 2026-08-02 against the SDK image's own headers and source, which
+     * is what the old "unverified API shape" note was waiting on:
+     *   kos/kernel/arch/dreamcast/include/dc/sound/stream.h
+     *     typedef void *(*snd_stream_callback_t)(snd_stream_hnd_t, int, int *);
+     *     snd_stream_hnd_t is int, SND_STREAM_INVALID is -1.
+     *   kos/kernel/arch/dreamcast/sound/snd_stream.c:697-720
+     *     get_data(hnd, needed_bytes, &got_bytes) — despite the `smp_req` name
+     *     the unit is BYTES, both in and out.
+     * dc_audio_stream_cb already matched that contract exactly. */
+    if (snd_stream_init() < 0) {
+        DC_LOGE("[DC/AUDIO] snd_stream_init FAILED — silent run\n");
+    } else {
+        s_hnd = snd_stream_alloc(dc_audio_stream_cb, SND_STREAM_BUFFER_MAX);
+        if (s_hnd == SND_STREAM_INVALID) {
+            DC_LOGE("[DC/AUDIO] snd_stream_alloc FAILED — silent run\n");
+        } else {
+            snd_stream_start(s_hnd, ai_dsp_sample_rate, 1 /* stereo */);
+            DC_LOGE("[DC/AUDIO] stream up: hnd=%d rate=%u stereo\n",
+                    s_hnd, (unsigned)ai_dsp_sample_rate);
+        }
+    }
+#else
     (void)dc_audio_stream_cb;
-    DC_UNIMPLEMENTED_NOTE("KOS snd_stream_init/alloc/start (see PLAN 3.4 stage A)");
+    DC_LOGE("[DC/AUDIO] DC_AUDIO=0 — output device deliberately not opened\n");
+#endif
     audio_open = 1;
-    DC_LOGE("[DC/AUDIO] ring %u samples, rate %u (no output device yet)\n",
-            (unsigned)RING_BUF_SAMPLES, (unsigned)DC_AUDIO_SAMPLE_RATE);
+    DC_LOGE("[DC/AUDIO] ring %u samples, rate %u\n",
+            (unsigned)RING_BUF_SAMPLES, (unsigned)ai_dsp_sample_rate);
 }
 
 /* The game hands us a block of finished PCM. On GameCube this armed a DMA;
@@ -197,9 +248,83 @@ void pc_audio_shutdown(void) {
 
 /* The PC build creates a real producer thread here. Deliberately NOT done on
  * DC — see the THREADING note at the top of the file. Audio is produced from
- * the main loop via audiothread.c's TARGET_PC path. */
+ * the main loop via audiothread.c's TARGET_PC path, which is what
+ * dc_audio_pump() below drives. */
 void pc_audio_start_producer_thread(void) {
     DC_LOG("[DC/AUDIO] single-threaded audio production (no producer thread)\n");
+}
+
+/* ==========================================================================
+ * The pump — why there was no sound at all
+ * ==========================================================================
+ * MEASURED 2026-08-02: the jaudio synthesis pipeline never ticked ONCE on DC.
+ * pc_audio_process_frame() (jaudio_NES/internal/audiothread.c:92) is the only
+ * caller of Jac_UpdateDAC (aictrl.c:283), which is the only thing that ever
+ * calls AIInitDMA with real PCM (aictrl.c:290). Its only caller in turn was
+ * pc_audio_producer_func, the SDL thread in pc/src/pc_audio.c:43, started by
+ * pc_audio_start_producer_thread — which DC overrides with the no-op above.
+ * src/audio.c:50 had already removed the old per-game-frame call. So the chain
+ * was cut at both ends: the single AIInitDMA the DC ever executed was
+ * aictrl.c:70's init call with a zeroed buffer. The linker noticed before we
+ * did — .text.pc_audio_process_frame was being dropped by --gc-sections.
+ *
+ * Everything downstream was a symptom of this, including the "[TRG_SE] NO FREE"
+ * slot leak: Nap_ReadSubPort returns -1 when the group is disabled
+ * (sub_sys.c:426), the sequencer that enables it never ran, and the free
+ * condition at game64.c_inc:1026 tests !p5, which -1 never satisfies.
+ *
+ * BUDGETED, not free-running. The town already runs at ~9 FPS, so synthesis is
+ * capped per frame and simply drops an audio frame when it runs out — the game
+ * loop must never stall on audio. DC_AUDIO_BUDGET_US tunes it, DC_AUDIO=0
+ * removes the whole thing. */
+void dc_audio_pump(void) {
+#if DC_AUDIO && !defined(DC_HOST_STUB)
+    u64 t0;
+    int frames = 0;
+
+    if (!audio_open) return;
+
+    t0 = dc_time_us();
+    /* Fill toward the TOP of the ring, not the middle.
+     *
+     * MEASURED 2026-08-02: gating on `fill < RING/2` deadlocked. The consumer
+     * stalled at fill=4480 (>4096), so synthesis never ran (synth_frames=0),
+     * so the ring never changed, so it stayed above the threshold forever.
+     * A producer must not refuse to produce because a stalled consumer left the
+     * buffer half full — keep a headroom margin instead, so jaudio ticks every
+     * frame regardless of what the AICA side is doing. That also matters beyond
+     * sound: ticking the sequencer is what lets the SE slot table free itself
+     * (game64.c_inc:1026 tests !p5, and Nap_ReadSubPort returns -1 while the
+     * group is disabled). */
+    while (pc_audio_get_buffer_fill() <
+           (int)(RING_BUF_SAMPLES - DC_AUDIO_HEADROOM)) {
+        pc_audio_process_frame();
+        frames++;
+        if ((u32)(dc_time_us() - t0) >= (u32)DC_AUDIO_BUDGET_US) {
+            s_pump_budget_hits++;
+            break;
+        }
+    }
+    s_pump_frames += (u32)frames;
+    s_pump_usec += (u32)(dc_time_us() - t0);
+
+    /* The return value matters: cb stuck at 2 for a whole 600 s run says the
+     * consumer died early, and an unchecked poll cannot tell us that. */
+    if (s_hnd != SND_STREAM_INVALID) {
+        if (snd_stream_poll(s_hnd) < 0) s_poll_fail++;
+    }
+
+    if (++s_pump_calls >= 600u) {
+        DC_LOGE("[DC/AUDIO] pump calls=%u synth_frames=%u budget_hits=%u "
+                "cb=%u pulled=%u fill=%d pollfail=%u us/600=%u\n",
+                (unsigned)s_pump_calls, (unsigned)s_pump_frames,
+                (unsigned)s_pump_budget_hits, (unsigned)s_cb_calls,
+                (unsigned)s_cb_bytes, pc_audio_get_buffer_fill(),
+                (unsigned)s_poll_fail, (unsigned)s_pump_usec);
+        s_pump_calls = 0; s_pump_frames = 0; s_pump_budget_hits = 0;
+        s_pump_usec = 0;
+    }
+#endif
 }
 
 void pc_audio_update_volumes(void) {

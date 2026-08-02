@@ -16,13 +16,28 @@ now*, plus what to do next. Everything else is one hop away.
 
 ## Where the port is
 
-**M0 and M1 are met. M2 has first pixels and is not complete.** A
-`DC_ASSET_STUB` image boots in Flycast, runs the game loop at 29.3 FPS, reaches
-the title-demo scene and draws the Animal Crossing title overlay — "PRESS
-START" and the copyright line — through a real PowerVR backend
-(`dc/src/dc_pvr.c` + `dc_pvr_texture.c`), submitting ~558,000 triangles per run
-with zero drops. The town behind the logo is black because only 53,792 B of
-real assets are in that image; that is the S4 loader's job, not a renderer bug.
+⚠️ **Updated 2026-08-02 (session 2). The port now REACHES THE TOWN.**
+`[SCENE_MODE] 0 → 3 → 4 → 18 → 9`; mode 9 is `mFI_FIELD_FG` +
+`mEv_CheckFirstIntro()` TRUE (`m_field_make.c:1292`) = SCENE_FG, the outdoor
+field. Title → player-select → train intro with Rover → name-entry keyboard →
+town, unattended, in one 600 s run. What unblocked it was **input**, not memory:
+`DC_AUTOSTART` alternated START/A 1:1 and past the title almost nothing takes
+START. Latest full run: **16,889 frames / 600 s**, town ~12 FPS,
+`image_span` 10,699,616 B, margin 3,588,448 B, fit OK.
+
+Human verdict on the current build: K.K. Slider correct, Rover correct in the
+train, scrolling trees and glass present. **Still wrong: the train door, and the
+scrolling window texture sits entirely above the window.** Both are tracked in
+`kb/RESUME.md` §5, items 1-2. The door needs the PVR punch-through list and
+cannot be fixed by toggling depth write — both settings were tried and both are
+visibly broken, for opposite reasons.
+
+**M0 and M1 are met. M2 has real pixels and is not complete.** The renderer is a
+real PowerVR backend (`dc/src/dc_pvr.c` + `dc_pvr_texture.c`). Four renderer
+bugs of one family — **GX state recorded by `dc_gx.c` and never consumed by
+`dc_pvr.c`** — have now been found and fixed (wrap mode, TEV constants,
+`GX_TEXMAP_NULL`, alpha compare, colour update). Sweeping every `g_gx` field for
+a *consumer* is the standing technique; fog is the largest one still unread.
 
 - **3917 / 3917 translation units compile and link for sh-elf**, zero
   exclusions. `src/` carries only **four** `#if defined(TARGET_DC)` branches;
@@ -32,14 +47,20 @@ real assets are in that image; that is the S4 loader's job, not a renderer bug.
   a playable build** — the renderer, the platform layer and the boot path are
   all observed working.
 
-The build that renders:
+The build that renders (2026-08-02, session 2 — supersedes the older line):
 
 ```bash
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-opening.txt | paste -sd: -)" \
 DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-  DC_ARAM_WINDOW=851968 DC_ARENA_BYTES=1900000 \
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 \
   bash dc/build-dc.sh
-bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 180
+bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 600 -c config:LimitFPS=no
 ```
+
+**600 s and `LimitFPS=no`, not 180 s.** The town is ~4,000 frames in; a short
+run stops in the train intro and reads as a progression regression. Build to a
+*copy* of the CDI before a long run — Flycast holds the file open for the whole
+run.
 
 ⚠️ A game smoke run **always** exits 1 with `status=exited_early` — the game
 never returns, so the end-marker checks cannot pass. The console log is the
@@ -225,7 +246,25 @@ it is the town-to-town transfer path with no save.
 `DC_STUB_KEEP` with the censused models and textures is the next concrete step
 (N1 item 2 below).
 
-## Ranked next actions (2026-08-02) — the list before parking
+## ⭐ Ranked next actions — SUPERSEDED 2026-08-02 (session 2)
+
+**Read `kb/RESUME.md` §5 instead.** The list below predates the town being
+reachable. What changed: N1 ("get the town to draw") is essentially done — the
+keep list is 107 files from a town census, uploads went 119→269 with blanks
+9.2 %→5.6 %, and the town renders. The live queue is now
+**(1) the PVR punch-through list** — blocking the train door, and the one thing
+that cannot be worked around, since both depth-write settings are visibly
+broken; **(2) the window scroll's UV offset**; **(3) fog**, entirely
+unimplemented though the game asks for `GX_FOG_PERSP_LIN`; **(4) the missing
+speaker-name / reply text**, with `DC_ARAM_TBL_PROBE` written and ready to
+adjudicate it.
+
+Audio is parked by the user's instruction. Its root cause was found (the jaudio
+pipeline had never ticked once — `pc_audio_process_frame` had no caller and was
+being dropped by `--gc-sections`), a real `snd_stream` device and pump now
+exist, and it produces silence because `dc_aram.c` throws `audiorom.img` away.
+
+## Ranked next actions (2026-08-02, session 1) — the list before parking
 
 The S1→S5 plan in `kb/plan-stages.md` is still the RAM strategy and is not
 superseded. These are the concrete next moves now that pixels exist.
