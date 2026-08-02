@@ -95,6 +95,7 @@ colima (4 cores), `-j4`:
 | `DC_TARGET` | `all` | pass `objs` for a compile-only run |
 | `DC_CDI_PAD` | `0` | `1` → padded 740 MB CDI (see below) |
 | `DC_ASSET_STUB` | `0` | `1` → the throwaway bring-up image (see below) |
+| `DC_DISC_ROOT` | unset | a directory whose files go on the disc **flat** |
 | `DECOMP_OPT` | `-O0` | optimization level for decomp game code |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
 | `V` | unset | `V=1` echoes full compiler command lines |
@@ -129,6 +130,32 @@ build.
 The game renders garbage the moment it reads an asset. That is the point: the
 image exists to exercise the platform layer, not to look like Animal Crossing.
 `bash dc/build-dc.sh clean` removes the stub tree with the rest of `dc/build`.
+
+### `DC_DISC_ROOT` — putting real game data on the disc
+
+Without it the CDI is built from the ELF alone, `/cd` mounts empty and every
+`DVDFastOpen` misses — which is where the S1 image stops, in
+`JKRAramArchive::open()` on a zero-byte `forest_1st.arc`.
+
+`dc_dvd.c` builds every path as `"/cd" + "/" + name` (`dc/src/dc_dvd.c:113`),
+so the files must sit at the **disc root, flat**. `dcasset extract` writes the
+GameCube shape instead (`files/`, `sys/`), so it needs flattening first:
+
+```bash
+python3 tools/dcasset/dcasset.py extract "<the ISO>" --out /tmp/discroot
+bash dc/stage-disc.sh /tmp/discroot /tmp/discflat        # 11 files, 36,953,162 B
+DC_DISC_ROOT=/tmp/discflat DC_ASSET_STUB=1 bash dc/build-dc.sh
+```
+
+The directory is bind-mounted read-only at `/discroot` and passed to
+`mkdcdisc -d`. **Keep the staging directory out of the repo** — it is ROM
+material, and neither it nor the CDI may ever be committed (CLAUDE.md §1).
+
+⚠️ `pc_disc_extract_rel()` (`dc/src/dc_dvd.c:290`) reads the whole 15,640,056 B
+`foresta.rel` into RAM. On a 16 MB machine that cannot work; it is exactly what
+`kb/levers.md` L2 replaces with `assets.pak`. It is only reachable from
+`pc_assets_init()`, which the stub build skips — so the stub image is safe, and
+a non-stub image with disc content is not.
 
 ---
 

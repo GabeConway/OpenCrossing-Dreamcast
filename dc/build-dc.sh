@@ -57,8 +57,29 @@ ENVARGS=(
 [ -n "${DC_OPT+x}"     ] && ENVARGS+=(-e DC_OPT="$DC_OPT")
 [ -n "${V+x}"          ] && ENVARGS+=(-e V="$V")
 
+# DC_DISC_ROOT=<dir> puts real game data on the disc. The directory is mounted
+# read-only at /discroot and handed to mkdcdisc with -d, so its contents land at
+# the DISC ROOT — which is what dc_dvd.c expects, since it opens "/cd/<name>"
+# with no subdirectory. Build one with:
+#
+#   python3 tools/dcasset/dcasset.py extract "<the ISO>" --out /tmp/discroot
+#   bash dc/stage-disc.sh /tmp/discroot /tmp/discflat
+#   DC_DISC_ROOT=/tmp/discflat DC_ASSET_STUB=1 bash dc/build-dc.sh
+#
+# Never commit the result: built disc images and ROM material stay out of the
+# repo (CLAUDE.md §1).
+MOUNTARGS=()
+if [ -n "${DC_DISC_ROOT:-}" ]; then
+    if [ ! -d "$DC_DISC_ROOT" ]; then
+        echo "ERROR: DC_DISC_ROOT='$DC_DISC_ROOT' is not a directory." >&2
+        exit 2
+    fi
+    MOUNTARGS+=(-v "$(cd "$DC_DISC_ROOT" && pwd)":/discroot:ro)
+fi
+
 exec docker run --rm --platform linux/arm64 \
     -v "$REPO":/work \
+    "${MOUNTARGS[@]}" \
     "${ENVARGS[@]}" \
     "$IMAGE" \
     bash /work/dc/build-dc-docker.sh

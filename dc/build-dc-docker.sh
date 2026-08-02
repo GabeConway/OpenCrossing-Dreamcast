@@ -98,10 +98,25 @@ if [ "${DC_CDI_PAD:-0}" = "1" ]; then
     PAD_DESC="PADDED (CD-R burn / read-speed-realistic timing)"
 fi
 
+# Disc content. dc_dvd.c builds every path as "/cd" + "/" + name, so the game's
+# files must sit at the DISC ROOT, flat — not under a files/ subdirectory. The
+# host wrapper bind-mounts a staging directory at /discroot when DC_DISC_ROOT is
+# set; without it the image is ELF-only and every DVDFastOpen misses, which is
+# what the S1 bring-up image did.
+DISC_ARGS=()
+if [ -d /discroot ]; then
+    DISC_ARGS=(-d /discroot)
+    echo "-- disc content: /discroot ($(find /discroot -type f | wc -l) files, \
+$(du -sh /discroot 2>/dev/null | cut -f1))"
+else
+    echo "-- disc content: NONE (ELF only). Every DVD open will miss."
+fi
+
 echo "-- mkdcdisc: $PAD_DESC"
 START=$(date +%s)
 mkdcdisc "${PAD_ARGS[@]}" \
     -e "$ELF" \
+    "${DISC_ARGS[@]}" \
     -n "OpenCrossing" \
     -o "$CDI"
 RC=$?
