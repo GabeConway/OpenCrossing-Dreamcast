@@ -55,6 +55,7 @@ GOLDEN=""
 GOLDEN_FILE=""
 WRITE_GOLDEN=""
 RUN_DIR=""
+FB_WRITEBACK=1
 EXTRA=()
 
 while [ $# -gt 0 ]; do
@@ -66,6 +67,12 @@ while [ $# -gt 0 ]; do
         --timeout)      TIMEOUT="$2"; shift 2 ;;
         --run-dir)      RUN_DIR="$2"; shift 2 ;;
         -c|--config)    EXTRA+=(-c "$2"); shift 2 ;;
+        # MEASURED 2026-08-02: without this the guest hashes an all-zero frame
+        # no matter what is on screen — Flycast's hardware renderer never
+        # writes back to emulated VRAM (kb/traps.md). A game image is useless
+        # here without it, so unlike smoke.sh this defaults ON and the flag
+        # turns it off for selftest images, which own their own framebuffer.
+        --no-fb-writeback) FB_WRITEBACK=0; shift ;;
         -h|--help)      sed -n '2,45p' "$0"; exit 0 ;;
         -*)             echo "unknown arg: $1" >&2; exit 2 ;;
         *)              IMAGE="$1"; shift ;;
@@ -74,6 +81,10 @@ done
 
 case "$IMAGE" in /*) ;; *) IMAGE="$PWD/$IMAGE" ;; esac
 [ -f "$IMAGE" ] || { echo "screenshot: image not found: $IMAGE" >&2; exit 2; }
+
+if [ "$FB_WRITEBACK" -eq 1 ]; then
+    EXTRA+=(-c config:rend.EmulateFramebuffer=yes)
+fi
 
 if [ -n "$GOLDEN_FILE" ]; then
     case "$GOLDEN_FILE" in /*) ;; *) GOLDEN_FILE="$REPO/$GOLDEN_FILE" ;; esac

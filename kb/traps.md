@@ -96,17 +96,27 @@ for those see `kb/closed.md`.
 - **mkdcdisc padding**: default 740,083,145 B / 15.6 s vs `-N` 1,783,337 B /
   0.021 s. Use `-N` for every emulator run; `DC_CDI_PAD=1` only for burns and
   read-speed-realistic timing.
-- **Flycast's hardware renderer never writes the frame back into emulated
-  VRAM — SOLVED 2026-08-02, use `smoke.sh --fb-writeback`.** The guest-side
-  framebuffer probe read all-zero from both `vram_s` and
-  `pvr_get_front_buffer()` while a human watching the window could see the
-  title logo, because the rendered surface lives on the host GPU and the
-  guest's VRAM is never updated from it. Adding
-  `config:rend.EmulateFramebuffer=yes` (Flycast's "Full Framebuffer
-  Emulation") makes `FBHASH` real and frame-varying. It costs about a third of
-  the frame rate — 24.8 → 16.8 FPS on the title screen — so it is a flag, not
-  a default. **A zero `FBHASH` from a run without that flag says nothing about
-  what was drawn.**
+- **A framebuffer HASH is not a framebuffer TEST — count nonzero pixels.**
+  `FBHASH bae41dc5` looks like a result and is the FNV-1a of 614,400 zero
+  bytes. Two runs showing two different hashes were briefly read as "the
+  framebuffer works now"; adding `FBNONZERO <n> of 307200` showed n = 0 every
+  time. Any probe that reports a digest must report a population count next to
+  it, or the digest will eventually be mistaken for content.
+- **`config:rend.EmulateFramebuffer=yes` (`smoke.sh --fb-writeback`) does NOT
+  by itself make the guest see pixels.** Turning on Flycast's full framebuffer
+  emulation left `FBNONZERO` at 0 while the window plainly showed the title
+  logo. It costs 24.8 → 16.8 FPS. Keep it opt-in and do not treat it as the
+  fix; `FBSWEEP` (scanout registers + an 8 MB VRAM sweep) is the diagnostic
+  that actually attributes the black frame.
+- **`vram_s` is not the displayed surface once `pvr_init()` has run.** The PVR
+  allocates its own buffers inside VRAM and programs the display controller at
+  them: `PVR_FB_R_SOF1` (0xA05F8050) read **0x000E7480**, i.e. 947,840 bytes
+  in, while the probe was hashing offset 0. Read the scanout register; never
+  assume the framebuffer is at the base of VRAM.
+- **A 16×12 thumbnail must box-filter, not point-sample.** The title logo
+  covers a few per cent of a 640×480 frame, so a grid of 192 single pixels can
+  report an all-black thumb off a frame that is not black. `dc_pvr_fb_probe()`
+  averages whole cells now.
 - **A smoke run of the game "fails" by construction.** The game never returns,
   so `run_reached_end_marker` / `mark_boot_ok` / `end_rc_zero` can never hold
   and `smoke.sh` exits 1 with `status=exited_early` even on a perfect run. For

@@ -18,18 +18,60 @@ Three of the five next actions moved. All numbers below are from two runs of
 one instrumented image (`DC_ARENA_PROBE=60 DC_FB_PROBE=120 DC_ASSET_CENSUS=1`),
 plus one clean full-size rebuild.
 
-**N2 is SOLVED — the probe was right and Flycast was the problem.**
-`config:rend.EmulateFramebuffer=yes` (now `harness/dc/smoke.sh --fb-writeback`)
-turns on Flycast's full VRAM framebuffer emulation, and `FBHASH` immediately
-went from a constant `00000000` to real, frame-varying values
-(`bae41dc5`, `25789d43`). Flycast's hardware renderer draws into a host GPU
-surface and never writes back to emulated VRAM, so *no* guest-side read —
-`vram_s`, `pvr_get_front_buffer()`, anything — could have seen a pixel. Cost:
-24.8 → 16.8 FPS, so it stays opt-in. ⚠️ `FBTHUMB` still sampled all-zero on the
-runs above; the 16×12 grid may simply be missing the logo, but **the thumbnail
-is not yet corroborated and the hash is.** Do not treat a black thumb as
-evidence of a black frame until one probe is checked against a human-visible
-frame.
+**N2 is NOT solved. Framebuffer emulation was not the answer, and reading two
+different hashes was not evidence that it was.**
+
+Full sequence, because the wrong conclusion was reached first and is worth not
+repeating. `config:rend.EmulateFramebuffer=yes` (Flycast's "Full Framebuffer
+Emulation", now `smoke.sh --fb-writeback`) made `FBHASH` show two distinct
+values instead of one, which *looked* like the fix. It was not: the probe now
+also prints `FBNONZERO`, and the answer is
+
+```
+FBNONZERO 0 of 307200      (every probe, every frame, with writeback ON)
+FBHASH bae41dc5
+```
+
+`bae41dc5` is simply the FNV-1a of 614,400 zero bytes. **Counting nonzero
+pixels is the assertion; a hash cannot tell "black" from "reading the wrong
+surface".** The probe was also point-sampling its 16×12 thumbnail, which could
+step over a logo covering a few per cent of the frame — it box-filters whole
+cells now, and still reports black, which is consistent.
+
+`FBSWEEP` — the display controller's own scanout registers plus a sweep of all
+8 MB of VRAM in 64 KB blocks — was added to attribute it, and it acquits the
+emulator:
+
+```
+FBSWEEP sof1=000e7480 sof2=000e7980 hot_blocks=3/128  first=12,14,78,0
+FBSWEEP sof1=000e7480 sof2=000e7980 hot_blocks=12/128 first=0,12,14,23
+FBSWEEP sof1=000e7480 sof2=000e7980 hot_blocks=20/128 first=0,12,14,20
+```
+
+**VRAM is not empty and it fills up as the run proceeds** (3 → 12 → 20 hot
+blocks), so "Flycast writes nothing back" is dead. And **`PVR_FB_R_SOF1` is
+0x000E7480 — the display scans out from VRAM offset 947,840, not from offset
+0.** `pvr_init()` allocates its own buffers and programs the display controller
+at them; `vram_s`, which the probe was reading, is the base of VRAM and is not
+the displayed surface. That was our bug, not the emulator's.
+
+Pointing the probe at `0xA5000000 + SOF1` is the obvious fix and **it is not
+sufficient — that read is still 0 of 307,200.** Meanwhile one run reading the
+*old* address with writeback on did once report `FBNONZERO 13711`, so content
+does reach low VRAM eventually.
+
+**Next step, and the strong hypothesis:** the Dreamcast exposes VRAM through
+two windows — the 32-bit linear area at `0xA5000000` and the 64-bit
+bank-interleaved area at `0xA4000000` — and the SOF registers are in the
+hardware's own offset terms. Reading the right bytes through the wrong window
+returns the wrong bytes. Try `0xA4000000 + SOF1`, and hash the hot blocks the
+sweep names (12, 14, 20, 23) directly to find where the 640×480×2 image
+actually is; the sweep already prints everything needed to locate it. If both
+windows fail, fall back to `pvr_scene_begin_txr()` and render one frame into a
+texture the guest allocated itself.
+
+`--fb-writeback` is kept and stays opt-in (24.8 → 16.8 FPS). It is not known to
+be necessary.
 
 **N4 has its first real measurement.** The arena is not where the pressure is:
 
@@ -413,13 +455,15 @@ symbols, 111,136 B — see the top of this file). Two follow-ups, in order:
    111 KB of textures fits trivially; the models will not, and *that* boundary
    is the S4 pool-sizing measurement N1 was always after.
 
-### N2. ✅ DONE 2026-08-02 — `smoke.sh --fb-writeback`.
+### N2. STILL OPEN, one step from done. [blocks all unattended visual work]
 
-Flycast never wrote the rendered frame back to emulated VRAM; `FBHASH` is real
-with `config:rend.EmulateFramebuffer=yes`. Details at the top of this file,
-trap in `kb/traps.md`. **Left open:** `FBTHUMB` still samples all-zero, so the
-human-readable half of the protocol is unconfirmed — check one thumbnail
-against a frame a human can see before relying on it.
+Attributed, not fixed. VRAM holds content (20 of 128 blocks by the end of a
+run) and the display scans out from offset 947,840, so the old `vram_s` read
+was looking at the wrong place — but `0xA5000000 + SOF1` still reads zero.
+Next: try the 64-bit VRAM window `0xA4000000 + SOF1`, and hash the hot blocks
+`FBSWEEP` names (12, 14, 20, 23) to locate the image directly. Fallback is
+`pvr_scene_begin_txr()` into a guest-owned texture. Full evidence at the top of
+this file. **One build and one run should close it.**
 
 ### N3. Correct the TEV mapping. [the logo renders; is it renders *right*?]
 

@@ -778,33 +778,67 @@ void dc_pvr_fb_probe(void) {
     unsigned short thumb[16 * 12];
     unsigned char raw[16 * 12 * 2];
     char out[((16 * 12 * 2 + 2) / 3) * 4 + 1];
+    /* Box-filter accumulators, one per thumbnail cell. Point sampling was
+     * wrong: the title logo covers a few per cent of a 640x480 frame, so a
+     * 16x12 grid of single pixels reported an all-black thumbnail off a frame
+     * whose hash proved it was not black. Averaging the whole cell cannot miss
+     * content that a single sample steps over. */
+    unsigned int acc_r[16 * 12], acc_g[16 * 12], acc_b[16 * 12];
+    unsigned int cell_px;
+    unsigned int nonzero = 0;
     int x, y, i, o;
 
     if (!dc_pvr_ready) return;
 
-    /* MEASURED 2026-08-02: pvr_get_front_buffer() hashed to a constant
-     * all-zero frame at the same moment a human watching Flycast could see the
-     * copyright line render. It is NOT the buffer being scanned out here, so
-     * trusting it produced a false "nothing is drawn" and sent the
-     * investigation at the renderer instead of at this probe. `vram_s` is the
-     * mapping vid_set_mode() hands back and is what the display actually
-     * reads; the front-buffer pointer is reported alongside it purely so the
-     * two can be compared. */
-    fb = (const unsigned short*)vram_s;
+    /* ASK THE HARDWARE WHERE IT IS SCANNING OUT FROM. Do not assume.
+     *
+     * MEASURED 2026-08-02, and this cost two wrong conclusions before the
+     * sweep below settled it. `pvr_get_front_buffer()` and `vram_s` both read
+     * all-zero while the window showed the title logo, which was read first as
+     * "nothing is drawn" (wrong — the renderer census said otherwise) and then
+     * as "Flycast never writes back" (also wrong). The truth is simpler:
+     * pvr_init() allocates its own buffers inside VRAM and programs the
+     * display controller to scan out from them, so the framebuffer is nowhere
+     * near the base of VRAM. PVR_FB_R_SOF1 read 0x000E7480 — 947,840 bytes in
+     * — while this probe was reading offset 0.
+     *
+     * SOF1 is the odd-field / progressive base; on the interlaced 640x480
+     * mode this port sets up, SOF2 is the even field one line further on.
+     * Hashing from SOF1 is what the display is showing. */
+    {
+        volatile unsigned int* sof1_reg = (volatile unsigned int*)0xA05F8050u;
+        unsigned int off = *sof1_reg & 0x00FFFFFCu;
+        fb = (const unsigned short*)(0xA5000000u + off);
+    }
     if (!fb) return;
 
-    /* FNV-1a over the 16-bit words. Stride 1 — sampling would make the hash
-     * blind to exactly the small sprites this is meant to catch. */
-    for (i = 0; i < DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT; i++) {
-        unsigned short px = fb[i];
-        hash = (hash ^ (px & 0xFF)) * 16777619u;
-        hash = (hash ^ (px >> 8)) * 16777619u;
+    memset(acc_r, 0, sizeof(acc_r));
+    memset(acc_g, 0, sizeof(acc_g));
+    memset(acc_b, 0, sizeof(acc_b));
+
+    /* One pass does all three jobs: FNV-1a over the 16-bit words (stride 1 —
+     * sampling would make the hash blind to exactly the small sprites this is
+     * meant to catch), the nonzero-pixel count, and the box filter. */
+    for (y = 0; y < DC_SCREEN_HEIGHT; y++) {
+        unsigned int cell_row = (unsigned int)(y * 12 / DC_SCREEN_HEIGHT) * 16u;
+        for (x = 0; x < DC_SCREEN_WIDTH; x++) {
+            unsigned short px = fb[y * DC_SCREEN_WIDTH + x];
+            unsigned int c = cell_row + (unsigned int)(x * 16 / DC_SCREEN_WIDTH);
+            hash = (hash ^ (px & 0xFF)) * 16777619u;
+            hash = (hash ^ (px >> 8)) * 16777619u;
+            if (px) nonzero++;
+            acc_r[c] += (px >> 11) & 0x1F;
+            acc_g[c] += (px >> 5) & 0x3F;
+            acc_b[c] += px & 0x1F;
+        }
     }
 
-    for (y = 0; y < 12; y++)
-        for (x = 0; x < 16; x++)
-            thumb[y * 16 + x] = fb[(y * DC_SCREEN_HEIGHT / 12) * DC_SCREEN_WIDTH
-                                   + (x * DC_SCREEN_WIDTH / 16)];
+    cell_px = ((unsigned int)DC_SCREEN_WIDTH / 16u) *
+              ((unsigned int)DC_SCREEN_HEIGHT / 12u);
+    for (i = 0; i < 16 * 12; i++)
+        thumb[i] = (unsigned short)(((acc_r[i] / cell_px) << 11) |
+                                    ((acc_g[i] / cell_px) << 5) |
+                                     (acc_b[i] / cell_px));
     memcpy(raw, thumb, sizeof(raw));
 
     for (i = 0, o = 0; i < (int)sizeof(raw); i += 3) {
@@ -818,7 +852,53 @@ void dc_pvr_fb_probe(void) {
     }
     out[o] = '\0';
 
+    /* VRAM SWEEP — the diagnostic that tells us WHOSE bug a black frame is.
+     *
+     * MEASURED 2026-08-02: with Flycast's full framebuffer emulation on, the
+     * guest still read 0 of 307,200 nonzero pixels at vram_s while the window
+     * showed the logo. Two explanations survive that — the guest is reading
+     * the wrong surface, or the emulator never writes any surface back — and
+     * they have opposite fixes, so guessing is expensive.
+     *
+     * This separates them. PVR_FB_R_SOF1/SOF2 (0xA05F8050/54) are the display
+     * controller's scanout base registers: whatever the hardware is actually
+     * showing starts there. Sweeping all 8 MB of VRAM in 64 KB blocks then
+     * says whether ANY of it is nonzero. All-zero VRAM plus a visible window
+     * means the emulator is compositing somewhere the guest cannot see;
+     * nonzero blocks away from vram_s mean the probe is simply looking in the
+     * wrong place, and the block index says where to look instead. */
+    {
+        volatile unsigned int* sof1 = (volatile unsigned int*)0xA05F8050u;
+        volatile unsigned int* sof2 = (volatile unsigned int*)0xA05F8054u;
+        const unsigned int* vram = (const unsigned int*)0xA5000000u;
+        const unsigned int block_words = 65536u / 4u;
+        unsigned int blocks = (8u * 1024u * 1024u) / 65536u;
+        unsigned int b, w, hot = 0, first[4];
+        int nfirst = 0;
+
+        for (b = 0; b < blocks; b++) {
+            const unsigned int* p = vram + (unsigned int)b * block_words;
+            for (w = 0; w < block_words; w++) {
+                if (p[w]) {
+                    hot++;
+                    if (nfirst < 4) first[nfirst++] = b;
+                    break;
+                }
+            }
+        }
+        DC_LOGE("FBSWEEP sof1=%08x sof2=%08x hot_blocks=%u/%u first=%u,%u,%u,%u\n",
+                *sof1, *sof2, hot, blocks,
+                nfirst > 0 ? first[0] : 0u, nfirst > 1 ? first[1] : 0u,
+                nfirst > 2 ? first[2] : 0u, nfirst > 3 ? first[3] : 0u);
+    }
+
     DC_LOGE("MARK:FRAME %u\n", probe_no++);
+    /* The count is the part a script can assert on without decoding anything:
+     * "0 of 307200" is a black frame, full stop, and any other number means
+     * the guest can see its own output. The hash alone cannot distinguish
+     * "black" from "the probe is reading the wrong surface". */
+    DC_LOGE("FBNONZERO %u of %u\n", nonzero,
+            (unsigned)(DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT));
     DC_LOGE("FBHASH %08x\n", hash);
     DC_LOGE("FBTHUMB 16x12 %s\n", out);
 }
