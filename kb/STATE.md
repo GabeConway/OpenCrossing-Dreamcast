@@ -102,8 +102,14 @@ ELF read 356,776 B too small.
   textures, `grl_1_*`, and the animals' eye/mouth TA textures — against the
   4.6 MB of texture destinations the image keeps in `.bss`. Strongest evidence
   yet for `kb/research-creative-ram.md` T1.
-- **The vertex/model half is still unmeasured.** `GXSetArray` recorded zero
-  hits; emu64 dereferences `Gfx`/`Vtx` inside `src/`, where there is no seam.
+- **The vertex/model half is measured: the whole title-screen working set is
+  93,312 B** — 30,688 B of models (58 `gsSPVertex` batches, 18,720 B actually
+  read) plus 62,624 B of textures and palettes, against **8,771,358 B** of asset
+  destination arrays in `.bss`. `GXSetArray` is **dead in this game**, not just
+  quiet: its only call site anywhere in `src/` is `GXInit.c:252`'s own reset
+  loop. The seam that works is `OSs16tof32()`, whose only three calls in the
+  emu64 TU are the three components of a source vertex; `dc/include/dc_census_vtx.h`
+  wraps it and `dc/Makefile` force-includes it into that one TU.
 - **The framebuffer probe is attributed, not fixed.** `PVR_FB_R_SOF1` reads
   `0x000E7480`: the display scans out 947,840 B into VRAM, and `vram_s` has
   never been the displayed surface. `FBNONZERO` is the assertion to trust; a
@@ -135,7 +141,6 @@ believing its numbers; P7's did not reproduce exactly.
 
 | worktree | task | owns |
 |---|---|---|
-| `agent-a7f2880fe06b3a5f7` | the vertex/model working-set census | `dc/src/dc_gx.c`, `dc_asset_census.c`, `census_resolve.py` |
 | `agent-af1b1ce21d43307e6` | VMU save — `CARD*` backend | `dc/src/dc_card.c`, `tools/savebench/**`, `kb/save-*.md` |
 | `agent-ab7b5a9310ecbe98d` | ARAM disc-backed LRU (PLAN §3.1) | `dc/src/dc_aram.c`, `dc_dvd.c` |
 | `agent-a027be752134b705b` | P7 — ✅ **already merged** (`528900a`), safe to delete | — |
@@ -144,12 +149,11 @@ The ARAM agent was told to default its kill switch in its own header because
 `dc/Makefile` was owned by another agent; **it owes a Makefile knob** — look for
 it in its report or its header's `#ifndef`.
 
-### The single number the plan is waiting on
+### The number the plan was waiting on — answered
 
-Whether a **title screen with the town behind it** fits without S4. The texture
-half is measured at 111,136 B; the vertex/model half is what the census agent
-was sent to find. Under ~1.5 MB ⇒ a title-complete build is days away. Several
-MB ⇒ it waits for S4.
+**93,312 B.** A title-screen-complete build does not need S4. Extending
+`DC_STUB_KEEP` with the censused models and textures is the next concrete step
+(N1 item 2 below).
 
 ## Ranked next actions (2026-08-02) — the list before parking
 
@@ -163,16 +167,20 @@ named by index and profile ID, so there is no static list to extend from.
 `DC_ASSET_CENSUS=1` replaces it and already answered the texture side (50
 symbols, 111,136 B — see "Latest measurements" above). Two follow-ups, in order:
 
-1. **Census the vertex/model side.** `GXSetArray` sees nothing because emu64
-   walks `Gfx`/`Vtx` pointers inside `src/`. Options, cheapest first: census
-   the `Gfx` pointer at the emu64→GX boundary that `dc_gx.c` already sees
-   (`dc_gx.c:673`'s indexed-fetch path documents what does arrive); or hook
-   `pc_load_asset`'s stub redirect; or accept a `#if defined(TARGET_DC)`
-   branch — but that spends one of the four licences in `src/` and needs a
-   reason better than instrumentation.
-2. **Then extend `DC_STUB_KEEP` from the measured list, not by guessing.**
-   111 KB of textures fits trivially; the models will not, and *that* boundary
-   is the S4 pool-sizing measurement N1 was always after.
+1. ✅ **The vertex side is censused** — 93,312 B for the whole title screen, no
+   `src/` edit needed. See "Latest measurements".
+2. **Extend `DC_STUB_KEEP` from the measured list.** 93 KB fits trivially, so a
+   **title-screen-complete build should land without S4**. The census names the
+   models: `boy_1_v`/`grl_1_v`, `mnk_1_v`, `wol_1_v`, `dog_1_v`, the three
+   `obj_train*_v`, five `logo_us_*_v`, `ef_hanabira01_00_v`, `ef_shadow_out_v`.
+   ⚠️ Animal species attribution is **not decidable on a stub image** — every
+   `xxx_1_v` is 16 B apart and all species share a rig, so 4 of 58 batches are
+   ambiguous and some "certain" animal hits may be aliases. Keeping the named
+   models gives them real sizes and spacing, which makes the join exact: do that
+   first, then re-run the census to confirm before trusting the list.
+3. Then re-run on a **town** scene — that is what actually sizes S4's pool, and
+   the batch table caps at 1,024 (`full=0` on the title screen; a town run must
+   check that counter).
 
 ### N2. ✅ DONE 2026-08-02 — the unattended visual gate works.
 

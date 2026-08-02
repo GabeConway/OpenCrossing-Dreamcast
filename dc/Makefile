@@ -351,13 +351,19 @@ ifneq ($(DC_ARENA_PROBE),)
 DEFINES += -DDC_ARENA_PROBE=$(DC_ARENA_PROBE)
 endif
 
-# DC_ASSET_CENSUS=1 — record the distinct asset addresses the GX layer is
-# handed (texture images at GXLoadTexObj, vertex arrays at GXSetArray) and
+# DC_ASSET_CENSUS=1 — record the asset addresses the renderer is handed and
 # print them for tools/dcstub/census_resolve.py to resolve against the ELF.
 # This is the only way to learn which acres and NPCs a scene touches: the
 # title demo names its acres through BLOCK_COMBI_* indices and its animals
-# through profile IDs, so a static trace of src/data sees neither. Costs
-# 32,768 B of .bss for the address set, which is why it is off by default.
+# through profile IDs, so a static trace of src/data sees neither.
+#
+# Three sources: texture images at GXLoadTexObj, palettes at GXLoadTlut, and
+# model vertex data through the OSs16tof32 shim force-included into emu64.c by
+# the TU_DEFS rule further down. (Indexed arrays at GXSetArray are recorded too
+# and are always empty — this game never uses GX indexed fetch. MEASURED.)
+#
+# Costs ~110 KB of .bss for the address set and the batch table, which is why
+# it is off by default.
 ifneq ($(DC_ASSET_CENSUS),)
 DEFINES += -DDC_ASSET_CENSUS=$(DC_ASSET_CENSUS)
 endif
@@ -622,6 +628,28 @@ $(DC_CXX_OBJS): TU_OPT  = $(DC_OPT) -fno-strict-aliasing -fwrapv -fsigned-char
 # rewriters are off, so this is a no-op in a plain build.
 $(OBJDIR)/$(call shrinkify,$(call stubify,src/main.c)).o:        TU_DEFS = -Dmain=ac_entry
 $(OBJDIR)/$(call shrinkify,$(call stubify,src/static/boot.c)).o: TU_DEFS = -Dmain=boot_main
+
+# DC_ASSET_CENSUS: the vertex half of the working set is observable in exactly
+# ONE TU. emu64 walks the N64 display lists itself and hands GX finished floats,
+# so no dc/ function ever sees a Vtx*; GXSetArray, the obvious hook, is dead in
+# this game — its only call site in src/ is GXInit.c:252's own reset loop, and
+# the census measured zero hits on it. The one seam is OSs16tof32(), which
+# dl_G_VTX uses to read each source vertex's x/y/z, and whose only three call
+# sites in the whole TU are exactly those three. dc/include/dc_census_vtx.h
+# wraps it.
+#
+# Force-included HERE rather than from dc_prelude.h on purpose: the shim has to
+# pull a decomp header (dolphin/os/OSFastCast.h) in so it can rename the
+# vendored inline out of the way, and the prelude must stay free of decomp
+# declarations for all 3917 TUs. Scoping it to one TU also means the two jaudio
+# TUs that use OSs16tof32 contribute no noise.
+#
+# Same path caveat as the two rules above: the object name follows the source
+# into the stub/shrink scratch trees, so it must be spelled through both calls.
+ifneq ($(DC_ASSET_CENSUS),)
+$(OBJDIR)/$(call shrinkify,$(call stubify,src/static/libforest/emu64/emu64.c)).o: \
+	TU_DEFS = -include $(DC_DIR)/include/dc_census_vtx.h
+endif
 
 # =============================================================================
 # Flag stamp — make tracks timestamps, not command lines

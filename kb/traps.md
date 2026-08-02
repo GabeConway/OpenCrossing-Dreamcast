@@ -90,6 +90,17 @@ for those see `kb/closed.md`.
   the arena probe three times, all inside the first two seconds, then never
   again; the counter simply stopped landing on a multiple of 60. Both probes
   now share one local `probe_tick` incremented where they are called.
+- **Never union address ranges measured on a stub build.** Display lists are
+  initialised `Gfx[]` data and are NOT stubbed, so `gsSPVertex(&obj_train1_1_v[93],
+  15, 0)` carries a real offset and a real count into a 16-byte array: every read
+  runs far past its own symbol and over its neighbours. Coalescing those spans
+  merged unrelated arrays wholesale — 665,136 component reads collapsed to **ten**
+  ranges, an undercount of unknown size with every identity but the first lost.
+  Record contiguous *batches* keyed on base instead; the count comes from the
+  display list and is real either way.
+- **Interior pointers break nearest-symbol resolution.** `census_resolve.py`
+  joins batches against the ~11,789 literal `gsSPVertex` sites in `src/` on
+  `nm[symbol] + byte_offset == base`, which is an exact 32-bit equality.
 - **A `[1]`-sized stub build still censuses correctly.** The addresses the GX
   layer is handed are link-time constants, so `DC_ASSET_CENSUS` names the same
   symbols in a stub image as it would in a full one; only the *sizes* are

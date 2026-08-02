@@ -298,13 +298,23 @@ extern unsigned int pc_image_base;
 extern unsigned int pc_image_end;
 
 /* --- Asset working-set census (kb/STATE.md N1) ------------------------------
- * Records the distinct asset addresses the GX layer is handed — texture images
- * ('T', from GXLoadTexObj) and vertex-array bases ('V', from GXSetArray) — and
- * prints them for tools/dcstub/census_resolve.py to turn back into symbols.
- * This is the only way to learn which acres and NPCs a scene touches: the
- * title demo names both indirectly, so no static trace can see them.
+ * Records the asset addresses the renderer is handed and prints them for
+ * tools/dcstub/census_resolve.py to turn back into symbols. This is the only
+ * way to learn which acres and NPCs a scene touches: the title demo names both
+ * indirectly, so no static trace can see them.
+ *
+ *   _note()  one address per asset. 'T' texture image (GXLoadTexObj),
+ *            'P' palette (GXLoadTlut), 'V' indexed vertex array (GXSetArray —
+ *            measured dead, this game never uses indexed fetch).
+ *   _vtx()   one address per vertex COMPONENT, from emu64's dl_G_VTX via the
+ *            dc/include/dc_census_vtx.h shim. Grouped into contiguous batches
+ *            internally, because a point table would need a slot per vertex
+ *            and a coalesced range table gives a wrong answer on a stub image
+ *            (dc_asset_census.c explains why).
+ *
  * Compiled to empty functions unless -DDC_ASSET_CENSUS=1. */
 void dc_asset_census_note(const void* addr, int kind);
+void dc_asset_census_vtx(const void* addr);
 void dc_asset_census_report(void);
 
 /* --- Arena high-water probe (kb/STATE.md N4) --------------------------------

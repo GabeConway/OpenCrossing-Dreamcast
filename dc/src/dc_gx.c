@@ -785,9 +785,13 @@ void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
 
 void GXSetArray(u32 attr, const void* data, u32 size, u8 stride) {
     (void)size;
-    /* Working-set census (dc_asset_census.c). Every indexed draw names its
-     * source array here, so this is where a scene's vertex/normal/colour
-     * assets become observable by address. No-op unless DC_ASSET_CENSUS. */
+    /* Working-set census (dc_asset_census.c). MEASURED 2026-08-02: this records
+     * ZERO hits, and not just on the title screen — the only GXSetArray call
+     * site anywhere in src/ is GXInit.c:252's reset loop, so this game draws no
+     * indexed geometry at all and this hook can never see an asset. Kept
+     * because it costs nothing and a future J3D path would use it; the vertex
+     * census that actually works is the OSs16tof32 shim in
+     * dc/include/dc_census_vtx.h. Do not re-derive this — it cost a search. */
     dc_asset_census_note(data, 'V');
     if (attr < GX_VA_MAX_ATTR) {
         g_gx.array_base[attr] = data;
@@ -1942,6 +1946,16 @@ void GXLoadTlut(void* obj, u32 idx) {
     dc_gx_flush_if_begin_complete();
     if (idx >= 16) return;
     o = (u32*)obj;
+
+    /* Working-set census, the bind rather than the GXInitTlutObj — same rule as
+     * GXLoadTexObj below. Palettes are real asset bytes and emu64 passes the
+     * source pointer straight through on this target: the 32-byte-alignment
+     * truncation at emu64.c:3872 is #ifndef TARGET_PC, so `aligned_addr ==
+     * tlut_addr` here, and a TLUT is always named by its symbol base rather
+     * than an interior pointer — which is what makes a point record correct in
+     * a stub image. No-op unless DC_ASSET_CENSUS. */
+    dc_asset_census_note((const void*)(uintptr_t)o[TLUTOBJ_DATA], 'P');
+
     g_gx.tlut[idx].data = (const void*)(uintptr_t)o[TLUTOBJ_DATA];
     g_gx.tlut[idx].format = (int)o[TLUTOBJ_FORMAT];
     g_gx.tlut[idx].n_entries = (int)o[TLUTOBJ_N_ENTRIES];
