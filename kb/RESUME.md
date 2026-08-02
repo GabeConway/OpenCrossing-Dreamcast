@@ -144,7 +144,50 @@ What is known about doing it:
 - Kill switch `-DDC_PVR_NO_PUNCHTHRU` must restore today's behaviour verbatim.
 - Design notes: `kb/tev-map-alpha.md`.
 
-### 2. The scrolling window texture is drawn ENTIRELY ABOVE THE WINDOW.
+### 2. ❌ CLOSED 2026-08-02 (session 3) — the window scroll is NOT a UV bug. It is item 1.
+
+**The texture-matrix chain is correct end to end, and this was verified
+numerically, not argued.** `dc/src/dc_mtx.c:474` is term-for-term identical to
+the real GC SDK `C_MTXLightOrtho` (`src/static/dolphin/mtx/mtx.c:544`) and to
+`pc/src/pc_mtx.c:259`. No transposition: `dc_gx.c:881` memcpys 12 floats
+row-major, `apply_texgen` reads rows 0/1 — the same layout `pc_gx.c:1201` feeds
+`u_texmtx_row0/row1` — and `apply_texgen`'s `row·(s,t,0,1)` is byte-identical to
+`pc/shaders/default.vert:68-73`.
+
+The derivation predicts `u ∈ [m[0][3], m[0][3]+1.0]`, `v ∈ [0.015625, 1.015625]`
+from bgtree vertices read out of the retail `foresta.rel`. **An existing run
+already contained the answer** — `smoke-t1-20260802-172246-21069/console.log:1718`:
+
+```
+BATCH b=150790 TRI n=12 verts=12 tex=1 128x32 wrap=1,1 bm=1,4,5 zt=1 zf=1 zw=0
+  argb=D4D4D4D4  bbox=-1215.9,-182.7..247.8,901.9  uv=-2.80,0.02..-1.80,1.02
+```
+
+`u` span exactly 1.00, `v` = 0.02..1.02, and `m[0][3] = -(8·1435-16)/4096 =
+-2.7988` matches the logged `-2.80`. **The "derived, unverified U to about −4,
+V in [0.016, 1.016]" figures in the old version of this item were never a
+symptom — they are the correct GameCube values.**
+
+What the symptom really is: on that same line the trees are XLU with `zw=0`
+(no depth write), `zt=1 zf=1` (depth *tested*), and their bbox spans the full
+visible height. They are not geometrically above anything. The train wall's
+alpha-punched window opening **writes depth at its transparent texels** and
+rejects the tree band exactly inside the opening, leaving the band visible only
+where no wall covers it. **This is item 1 wearing a third hat.** Do not spend
+another session on the texgen path.
+
+Two real but currently **inert** divergences were found while walking it, and
+they are worth knowing before someone re-derives them: `dc_pvr.c:1066` drops the
+texture matrix's third column (GX expands a `GX_TG_TEX0` source to
+`(s,t,1.0,1.0)`, which is why `C_MTXLightPerspective`/`Frustum` park their
+translation in `m[*][2]`; `C_MTXLightOrtho` writes 0 there, and
+`pc/shaders/default.vert:68` has the same omission, so it is not a regression);
+and `dc_pvr.c:1064`'s `cv[k].u *= tex->u_scale` cannot express `GX_REPEAT` on an
+NPOT texture at all — scaling a `u` of −2.80 lands on a different texel rather
+than repeating. Both are inert for the train window (128×32 is POT, `us=1.000`).
+The NPOT one has no patch: the fix is edge/period replication when padding.
+
+<details><summary>the original, now-falsified item 2</summary>
 
 Human-confirmed on the current build; the trees themselves now scroll. This is a
 UV / texture-matrix **offset** error, not wrap and not format — both of those
@@ -166,6 +209,8 @@ period, V stays in [0.016, 1.016].** A V offset that puts the band above the
 window points at the `m[1][3]` term or at `C_MTXLightOrtho`'s translation
 convention on DC (`dc_mtx.c:474`). Dump the tree batch's `uv=` from
 `DC_PVR_BATCH_LOG=1` and compare against that derivation — that is one run.
+
+</details>
 
 ### 2b. Two train-station bugs, traced 2026-08-02 — read `kb/station-bugs.md`.
 

@@ -179,6 +179,7 @@ already produced two wrong numbers.
 | `kb/audio-stage-a-software.md` | stage A: rspsim at 22 kHz, effect-cut order, `snd_stream`, main-RAM footprint |
 | `kb/audio-stage-b-aica.md` | stage B: the exact seam, AICA register map, residency policy, the offline tools |
 | `kb/audio-plan-of-record.md` | the plan of record, and the ranked list of what is still unmeasured |
+| `kb/texture-path.md` | **what happens to a GC texture on its way to VRAM** — filtering, format, per-format colour loss, mipmaps, the VRAM budget, the NPOT pad. Read before proposing any texture-quality work: paletted and VQ are both closed here with reasons |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |
 | `kb/design-platform-api.md` | **index** to the platform-API split below — every symbol `dc/` must provide, derived from `pc/src` |
 | `kb/platform-api-overview.md` | symbol counts and dispositions, ranked landmines, unverified gaps. **Read first — carries the table legend** |

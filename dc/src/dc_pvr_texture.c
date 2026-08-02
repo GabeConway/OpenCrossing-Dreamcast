@@ -211,20 +211,54 @@ static int             s_class;
 /* ==========================================================================
  * Texel packing
  * ========================================================================== */
+/* 8-bit source channel -> vmax-bit destination, ROUND TO NEAREST.
+ *
+ * This used to pack with plain shifts (r >> 4 and friends), i.e. truncation,
+ * which carries a systematic -0.5 LSB bias on every channel of every texel.
+ * In ARGB4444 — where all graded-alpha content lands — that is -8/255, about
+ * 3 % darker across the whole image, plus double the quantisation error. It
+ * reads as "the port looks murky" rather than as any specific artefact.
+ * pc/src/pc_gx_texture.c never had to quantise (it writes RGBA8), so there was
+ * no reference implementation to copy this from: the loss is DC-only.
+ *
+ * (v * vmax + 127) / 255 evaluated as a multiply and two shifts. The divide is
+ * avoided on purpose — src/ builds at -O0 and SH-4 would turn an integer
+ * divide into a libgcc call, once per texel of every upload. Exact for all 256
+ * inputs.
+ *
+ * Two round-trips MUST stay bit-exact, and do:
+ *   RGB565 source -> RGB565 dest   (the decoder does v5*255/31; dc_q inverts)
+ *   I4 / IA4      -> ARGB4444      (the decoder replicates the nibble, n*17)
+ *
+ * Kill switch: -DDC_PVR_TEX_TRUNCATE restores the shifts verbatim.
+ */
+#ifndef DC_PVR_TEX_TRUNCATE
+static unsigned int dc_q(unsigned int v, unsigned int vmax) {
+    unsigned int t = v * vmax + 127u;
+    return (t + (t >> 8)) >> 8;
+}
+#else
+static unsigned int dc_q(unsigned int v, unsigned int vmax) {
+    return (vmax == 63u) ? (v >> 2) : ((vmax == 31u) ? (v >> 3) : (v >> 4));
+}
+#endif
+
 static unsigned short dc_pack(u8 r, u8 g, u8 b, u8 a) {
     switch (s_class) {
         case DC_TEX_OPAQUE:
-            return (unsigned short)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+            return (unsigned short)((dc_q(r, 31u) << 11) |
+                                    (dc_q(g, 63u) << 5) |
+                                     dc_q(b, 31u));
         case DC_TEX_BINARY:
             return (unsigned short)(((a >= 128) ? 0x8000u : 0u) |
-                                    ((unsigned)(r >> 3) << 10) |
-                                    ((unsigned)(g >> 3) << 5) |
-                                    (unsigned)(b >> 3));
+                                    (dc_q(r, 31u) << 10) |
+                                    (dc_q(g, 31u) << 5) |
+                                     dc_q(b, 31u));
         default:
-            return (unsigned short)(((unsigned)(a >> 4) << 12) |
-                                    ((unsigned)(r >> 4) << 8) |
-                                    ((unsigned)(g >> 4) << 4) |
-                                    (unsigned)(b >> 4));
+            return (unsigned short)((dc_q(a, 15u) << 12) |
+                                    (dc_q(r, 15u) << 8) |
+                                    (dc_q(g, 15u) << 4) |
+                                     dc_q(b, 15u));
     }
 }
 
@@ -922,10 +956,23 @@ void dc_pvr_texture_init(void) {
     s_clock = 1;
     s_bytes_resident = 0;
     s_stat_uploads = s_stat_hits = s_stat_evictions = s_stat_rejects = 0;
-    DC_LOG("[DC/TEX] init: ceiling %u B VRAM, scratch %u B, %d entries\n",
-           (unsigned int)DC_PVR_TEX_VRAM_BYTES,
-           (unsigned int)(DC_PVR_TEX_SCRATCH_TEXELS * 2),
-           (int)DC_PVR_TEX_MAX_ENTRIES);
+    /* pvr_mem_available() is the only honest answer to "how much VRAM is left
+     * for textures": everything pvr_init() reserved — two framebuffers, two
+     * vertex buffers, the OPBs with their overflow allowance, the tile
+     * matrices — is already deducted. The ceiling above is a POLICY number and
+     * the arithmetic behind it has never been checked against hardware; every
+     * other number in this project that stayed arithmetic turned out wrong. */
+    DC_LOGE("[DC/TEX] init: ceiling %u B VRAM, scratch %u B, %d entries, "
+            "pvr_mem_available=%u B\n",
+            (unsigned int)DC_PVR_TEX_VRAM_BYTES,
+            (unsigned int)(DC_PVR_TEX_SCRATCH_TEXELS * 2),
+            (int)DC_PVR_TEX_MAX_ENTRIES,
+#ifndef DC_HOST_STUB
+            (unsigned int)pvr_mem_available()
+#else
+            0u
+#endif
+            );
 }
 
 void dc_pvr_texture_shutdown(void) {
@@ -1053,6 +1100,47 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     /* Clears the NPOT pad AND gives unhandled formats a transparent image. */
     for (i = 0; i < texels; i++) s_scratch[i] = 0;
     decode_gc_texture(data, w, h, fmt, (const u8 (*)[4])palette);
+
+#ifndef DC_PVR_NO_TEX_EDGEPAD
+    /* EDGE-EXTEND THE POWER-OF-TWO PAD.
+     *
+     * The decoders fill [0,w) x [0,h); everything out to pot_w/pot_h keeps the
+     * zero written just above. dc_pvr.c samples with PVR_FILTER_BILINEAR, so
+     * at u just under u_scale (= w/pot_w) the hardware interpolates the last
+     * real column against that pad — which is TRANSPARENT black in
+     * ARGB1555/4444 and OPAQUE black in RGB565. Every NPOT texture therefore
+     * carries a dark or fading seam down its right edge and along its bottom.
+     *
+     * Worse, GX_CLAMP maps to PVR_UVCLAMP, which clamps to the PADDED edge at
+     * 1.0 rather than to u_scale: a clamped NPOT texture clamps to the black
+     * pad instead of to its own edge texel. And next_pot() floors at 8, so a
+     * 4x4 source (emu64.c:686's black texture) is three quarters pad.
+     *
+     * Replicating the edge row and column is exactly what CLAMP means, and it
+     * is strictly closer to correct under REPEAT than black is. It costs no
+     * VRAM, no .bss, and one pass over the pad per distinct upload — uploads
+     * are content-cached, so this is not a per-frame cost.
+     *
+     * This does NOT fix GX_REPEAT on a NPOT texture, which is wrong by
+     * construction: dc_pvr.c scales u by u_scale and the hardware then repeats
+     * at 1.0, so tile n starts at n*u_scale instead of at n. That needs either
+     * decode-time period replication or a real stride texture (which cannot be
+     * twiddled), and it needs a census of how many uploads are actually NPOT
+     * before it is worth paying for.
+     *
+     * Kill switch: -DDC_PVR_NO_TEX_EDGEPAD restores the zero pad verbatim. */
+    if (pot_w > w || pot_h > h) {
+        int px, py;
+        for (py = 0; py < h; py++) {
+            unsigned short edge = s_scratch[py * pot_w + (w - 1)];
+            for (px = w; px < pot_w; px++)
+                s_scratch[py * pot_w + px] = edge;
+        }
+        for (py = h; py < pot_h; py++)
+            memcpy(&s_scratch[py * pot_w], &s_scratch[(h - 1) * pot_w],
+                   (unsigned int)pot_w * 2u);
+    }
+#endif
 
 #ifdef DC_TEX_LOG
     /* One line per UPLOAD (not per bind — uploads are content-cached, so this
