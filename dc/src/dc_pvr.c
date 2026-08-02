@@ -79,7 +79,11 @@
  *   -DDC_PVR_PT_ALL         route BLENDED cutouts to PT too (default: only
  *                           GX_BM_NONE cutouts, i.e. opaque-with-holes)
  *   -DDC_PVR_PT_ALPHA_REF   the global PT threshold, 0..255 (default 144)
+ *   -DDC_PVR_PT_KEEP_VTXALPHA  let shade alpha multiply into the PT alpha test
+ *                           (2026-08-02 behaviour; deletes the train door)
  *   -DDC_PVR_PT_BUF_RECS    deferred PT records, 32 B each (default 2048)
+ *   -DDC_PVR_NO_TEVCONST_ALPHA  do not rescue the TEV constant ALPHA term
+ *                           (leaves the speaker name and replies invisible)
  *   -DDC_PVR_NO_FOG         no hardware fog; byte-identical to pre-fog output
  *   -DDC_PVR_FOG_LOG=<N>    one fog state line every Nth frame
  */
@@ -737,6 +741,85 @@ static int tev_const_color(float* out) {
     }
     return 0;
 }
+
+/* --- TEV stage 0: the ALPHA half of the same idea -------------------------
+ *
+ * THE FONT BUG, 2026-08-02. Exactly two things in the dialogue balloon never
+ * rendered: the speaker name (m_msg_draw_window.c_inc:48) and the reply
+ * options (m_choice_draw.c_inc:146). They are the only text that goes through
+ * mFont_SetLineStrings_AndSpace, which sets mFont_SENTENCE_FLAG_USE_POLY
+ * unconditionally (m_font_main.c_inc:518) and so draws real geometry
+ * (mFont_gppDrawCharPoly, m_font_main.c_inc:672-728) instead of a texture
+ * rectangle. The body text takes the rect path and works.
+ *
+ * mFont_SetVertex_dol (m_font_main.c_inc:348-362) writes cn[0..3] = 0 into
+ * every glyph vertex, and the font display list clears G_LIGHTING, so emu64
+ * programs GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_REG, GX_SRC_VTX, ...)
+ * (emu64.c:3327) — material source VTX. shade_vertex() therefore returns
+ * 0x00000000 and PVR_TXRENV_MODULATEALPHA multiplies the glyph away.
+ * Confirmed in a batch log before this was written: 47 balloon batches at
+ * verts=6 zt=0 st=1 tm=0,255 reading argb=00001E00, alpha byte zero, against
+ * body-text batches on the same frame reading argb=FFxxxxxx.
+ *
+ * On GX that zero is harmless: mFont_CC_FONT (m_font.c:17) is
+ * `0, 0, 0, PRIMITIVE, PRIMITIVE, 0, TEXEL0, 0` — colour = PRIM, alpha =
+ * PRIM.a * TEXEL0.a — and it never reads RASC or RASA. tev_const_color()
+ * above already restores the RGB half; this restores the alpha half.
+ *
+ * The rect path escapes because emu64::draw_rectangle re-programs
+ * GXSetChanCtrl(..., GX_SRC_REG, GX_SRC_REG, ...) (emu64.c:3076) and never
+ * declares GX_VA_CLR0 (emu64.c:3119-3123), so its vertices shade to the
+ * material register — which emu64 sets WHITE once (emu64.c:562) and never
+ * touches again.
+ *
+ * SHAPE, deliberately narrow: a = ZERO, c = TEXA, d = ZERO, b = a constant
+ * alpha register. Under GX's `d + (1-c)*a + c*b` that is exactly TEXA * const,
+ * and it is the form emu64 emits — both replace_combine_to_tev
+ * (emu64.c:1092-1096) and combine_auto (emu64.c:1245-1247) move the N64 `a`
+ * term into GX's `b` slot and force GX's `a` to ZERO. RASA is not referenced
+ * in this shape, so overriding the vertex alpha cannot discard anything the
+ * combiner asked for. GX_MODULATE's default (c = RASA, dc_gx.c:1012) does not
+ * match and is untouched.
+ *
+ * ⚠️ Blast radius, stated honestly: the `PRIMITIVE, 0, TEXEL0, 0` alpha shape
+ * occurs 446 times in src/. Everywhere it fires the constant is the correct
+ * answer and the current vertex alpha is the wrong one, but this reaches far
+ * more than the font. -DDC_PVR_TEVCONST_ALPHA_RESCUE_ONLY narrows it to the
+ * vertices that are currently fully invisible, which separates "the font came
+ * back" from "hundreds of world batches changed alpha" in one build.
+ *
+ * Kill switch: -DDC_PVR_NO_TEVCONST_ALPHA. -DDC_PVR_NO_TEVCONST kills both
+ * halves, as before. */
+#ifndef DC_PVR_NO_TEVCONST_ALPHA
+static int tev_const_alpha(float* out) {
+    const DCGXTevStage* ts;
+
+    if (g_gx.num_tev_stages < 1)
+        return 0;
+    ts = &g_gx.tev_stages[0];
+
+    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_c != GX_CA_TEXA ||
+        ts->alpha_d != GX_CA_ZERO)
+        return 0;
+
+    /* GX_CA_A0/A1/A2 are 1/2/3 and index tev_colors[] directly: [0] is
+     * GX_TEVPREV, [1..3] are GX_TEVREG0..2. emu64 parks the N64 primitive
+     * colour in GX_TEVREG1 and the environment colour in GX_TEVREG2
+     * (emu64.c:3171,3180), so a PRIMITIVE alpha arg lands on tev_colors[2][3]
+     * — the alpha gDPSetPrimColor set. */
+    if (ts->alpha_b >= GX_CA_A0 && ts->alpha_b <= GX_CA_A2) {
+        *out = g_gx.tev_colors[ts->alpha_b][3];
+        return 1;
+    }
+    if (ts->alpha_b == GX_CA_KONST) {
+        int k = ts->k_alpha_sel;   /* GX_TEV_KASEL_K0_A..K3_A are 0x1C..0x1F */
+        if (k < 0x1C || k > 0x1F) return 0;
+        *out = g_gx.tev_k_colors[k - 0x1C][3];
+        return 1;
+    }
+    return 0;
+}
+#endif /* !DC_PVR_NO_TEVCONST_ALPHA */
 #endif /* !DC_PVR_NO_TEVCONST */
 
 static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
@@ -1451,6 +1534,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 #ifndef DC_PVR_NO_TEVCONST
     float tevconst[3];
     int   have_tevconst = 0;
+#ifndef DC_PVR_NO_TEVCONST_ALPHA
+    float tevalpha = 1.0f;
+    int   have_tevalpha = 0;
+#endif
 #endif
     int i, j, step, per_prim;
 
@@ -1515,6 +1602,9 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     /* Per-batch, not per-vertex: the TEV stage and its registers cannot change
      * inside a batch, only between them. */
     have_tevconst = tev_const_color(tevconst);
+#ifndef DC_PVR_NO_TEVCONST_ALPHA
+    have_tevalpha = tev_const_alpha(&tevalpha);
+#endif
 #endif
 
 #ifdef DC_PVR_BATCH_LOG
@@ -1583,6 +1673,63 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 cv[k].v *= tex->v_scale;
             }
             cv[k].argb = shade_vertex(v, eye, nrm);
+#ifndef DC_PVR_NO_PUNCHTHRU
+#ifndef DC_PVR_PT_KEEP_VTXALPHA
+            /* SHADE ALPHA IS NOT AN OPACITY, AND IT MUST NOT REACH THE PT
+             * COMPARATOR.
+             *
+             * cxt.txr.env is PVR_TXRENV_MODULATEALPHA, so the alpha the
+             * hardware tests is vertex_alpha * texel_alpha. On the N64 the two
+             * were never multiplied: every alpha-tested display list in this
+             * game runs G_RM_FOG_SHADE_A, where the vertex alpha byte is the
+             * per-vertex FOG COEFFICIENT for the blender, and the alpha half of
+             * the colour combiner is (0,0,0,TEXEL0) — texel alpha, alone.
+             *
+             * DECODED out of the retail foresta.rel, then CONFIRMED in a batch
+             * log before this was written:
+             *   obj_romtrain_door_v[0..7]  (the door LEAF, obj_romtrain_door.c:70)
+             *       cn = (230,220,255,0) (190,180,220,0) (140,130,200,0)
+             *            (90,80,150,0)              -> alpha 0
+             *   rom_train_out_v[8..15]     (the window's TUNNEL MASK,
+             *                               rom_train_out.c:130)
+             *       cn = (50,50,50,50)              -> alpha 50
+             * and in the log, every frame: `pt=1 ... argb=32323232` on a 64x32
+             * with a window-sized bbox, and `pt=1 ... argb=005A5096` on a 32x64
+             * door-shaped one. Both are AA_ZB_TEX_EDGE2, so both route here,
+             * and 0 and 50 are both below the 144 threshold — so EVERY texel of
+             * both models failed the test and both vanished outright. Reported
+             * by a human as "the train door has disappeared entirely, the glass
+             * is there" (the glass is verts 8..11 at alpha 255 and is XLU, so
+             * it never comes here; the door's third joint, verts 12..14, is a
+             * degenerate zero-area triangle in the shipped data and was never
+             * visible) and as "a big weird light texture" in the window, which
+             * is the bgsky/bgcloud/bgtree scenery the deleted tunnel mask
+             * exists to cover.
+             *
+             * Forcing the vertex alpha opaque makes the tested alpha exactly
+             * the texel alpha, which is what the RDP combiner produced. RGB is
+             * untouched, so shade and lighting still modulate the colour.
+             *
+             * TEXTURED batches only. An UNTEXTURED punch-through poly has no
+             * texel alpha at all, and there the vertex alpha genuinely is the
+             * alpha GX would have tested — forcing it would turn a legitimate
+             * discard into a paint.
+             *
+             * Runs before lerp_vtx() so near-clipped vertices inherit it, and
+             * before the TEV-const override, which masks with 0xFF000000 and
+             * therefore preserves it.
+             *
+             * ⚠️ MODULATEALPHA is wrong for this game's alpha combiner
+             * everywhere, not only on PT — no display list read so far puts
+             * SHADE in the alpha combiner. The non-PT cutout path has the same
+             * defect. That is a wider change and wants its own measured pass.
+             *
+             * Kill switch: -DDC_PVR_PT_KEEP_VTXALPHA. -DDC_PVR_NO_PUNCHTHRU
+             * still removes this with the rest of the PT path. */
+            if (s_pt_route && tex && tex->base)
+                cv[k].argb |= 0xFF000000u;
+#endif
+#endif
 #ifndef DC_PVR_NO_TEVCONST
             /* Replace the RGB only. Alpha keeps coming from the lit/vertex
              * path so MODULATEALPHA still multiplies it by the texel alpha,
@@ -1601,6 +1748,29 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                              ((unsigned int)cr << 16) |
                              ((unsigned int)cg << 8) | (unsigned int)cb;
             }
+#ifndef DC_PVR_NO_TEVCONST_ALPHA
+            /* MODULATEALPHA computes a = vtx.a * tex.a, so writing the
+             * combiner's constant into the vertex alpha makes the hardware
+             * evaluate exactly PRIM.a * TEXEL0.a — what mFont_CC_FONT asked
+             * for and what the raster path cannot supply, because the glyph
+             * vertices carry alpha 0 by design.
+             *
+             * -DDC_PVR_TEVCONST_ALPHA_RESCUE_ONLY narrows this to the vertices
+             * that are currently fully invisible. Use it to separate "the font
+             * came back" from "hundreds of world batches changed alpha" in one
+             * build, without giving up the fix. */
+            if (have_tevalpha
+#ifdef DC_PVR_TEVCONST_ALPHA_RESCUE_ONLY
+                && (cv[k].argb & 0xFF000000u) == 0u
+#endif
+               ) {
+                int ca = (int)(tevalpha * 255.0f + 0.5f);
+                if (ca < 0) ca = 0;
+                if (ca > 255) ca = 255;
+                cv[k].argb = (cv[k].argb & 0x00FFFFFFu) |
+                             ((unsigned int)ca << 24);
+            }
+#endif
 #endif
         }
 
