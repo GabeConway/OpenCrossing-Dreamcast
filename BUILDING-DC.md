@@ -107,10 +107,16 @@ colima (4 cores), `-j4`:
 | `DC_STUB_KEEP` | logo list | `:`-separated sources the stubber leaves FULL SIZE. Generate it from a census with `tools/dcstub/census_keeplist.py` |
 | `DC_AUTOSTART` | unset | `<N>` → synthesise START/A from `PADRead` call N onward. **The only way an unattended run gets past the title screen** |
 | `DC_AUTOSTART_PERIOD` | `90` | calls between synthesised pulses (each pulse is 6 calls) |
+| `DC_AUTOSTART_START_EVERY` | `4` | every Nth pulse is START, the rest are A. **A-dominant on purpose** — past the title, dialogue takes A or B only (`m_msg_normal.c_inc:2`) and choice menus default to index 0, so a 1:1 alternation wasted half of every run. START is needed at exactly one place on the path to the town: ending the name-entry keyboard (`m_editor_ovl.c:447`). `=2` restores the old 1:1 pattern |
 | `DC_CONSOLE_LIMIT` | `1` | `0` → kill switch for the `printf`/`OSReport` flood limiter |
 | `DC_FB_IMAGE` | unset | `<1\|2\|4>` → with `DC_FB_PROBE`, stream the whole frame out as base64 `FBROW` lines, box-filtered by that factor. Decode with `tools/dcfb/fbimg_to_png.py` |
 | `DC_TEX_LOG` | unset | `1` → one line per texture **upload** describing what the decoder produced. Separates "never uploaded" from "uploaded as a blank rectangle", which the uploads/hits/evictions counters cannot |
-| `DC_PVR_BATCH_LOG` | unset | `<N>` → dump every renderer batch's state on every Nth frame. Set it to the **same** N as `DC_FB_PROBE` so the lines describe the captured frame |
+| `DC_PVR_BATCH_LOG` | unset | `<N>` → dump every renderer batch's state on every Nth frame. Set it to the **same** N as `DC_FB_PROBE` so the lines describe the captured frame. Fields: `ac=` alpha compare asked for, `cut=` treated as a cutout, `cu=` colour/alpha update, `tm=` stage 0/1 texmap (`255` = `GX_TEXMAP_NULL`), `st=` TEV stage count, `t1=` whether texmap1 binds a *different* image, plus screen bbox, z and uv ranges |
+| `DC_ARAM_TBL_PROBE` | unset (0) | `1` → log every 64-byte ARAM read. That size is uniquely `mMsg_Get_BodyParam`'s resource-TABLE fetch (`m_msg_main.c_inc:284,289`), and MESSAGE (works) and STRING/SELECT (broken) both use it, so one run gives the control and the failure side by side. Decision table is in the comment at the probe |
+| `DC_ARAM_AUDIO_DROP` | `1` | `0` → stop discarding jaudio's ARAM half, so `audiorom.img` becomes disc-backed and synthesis has real samples. **Unproven and risky** — jaudio streams ~8.5 MB *before* `JW_Init2` mounts `forest_1st.arc`, so it can exhaust the extent table and make archive content anonymous. A/B the `[DC/ARAM] LRU` line: `LOST=0`, `ext` under the cap, `mapped=` unchanged |
+| `DC_AUDIO` | `1` | `0` → no output device, no synthesis pump. Audio is ON by default but currently produces silence (see `kb/RESUME.md` item 8) |
+| `DC_AUDIO_BUDGET_US` | `4000` | per-frame ceiling on jaudio synthesis; on exhaustion the pump drops an audio frame rather than stalling the game loop |
+| `DC_AUDIO_HEADROOM` | `2048` | samples kept free at the top of the ring. ⚠️ Do **not** gate the pump on "ring less than half full" — a stalled consumer then leaves it half full forever and synthesis never runs (measured deadlock, `synth_frames=0`) |
 | `DC_XDEFS` | unset | raw extra `-D` flags, appended last. How the renderer kill switches are reached — see below |
 | `V` | unset | `V=1` echoes full compiler command lines |
 
@@ -129,6 +135,35 @@ question instead of an argument from source.
 | `DC_PVR_NO_LIGHTING` | skip GX channel evaluation, pass the vertex colour through |
 | `DC_PVR_NO_NEARCLIP` | drop straddling triangles instead of clipping them |
 | `DC_PVR_NO_TEXTURES` | untextured backend |
+| `DC_PVR_NO_TEXNULL` | restore the old behaviour where a draw with `GX_TEXMAP_NULL` still inherited `tex_handle[0]` — i.e. 2D panes sampling a stale texture's texel (0,0) |
+| `DC_PVR_NO_ALPHATEST` | restore the old cutout handling: alpha-tested batches keep `src=ONE dst=ZERO`, so fully transparent texels paint at full opacity and write depth |
+| `DC_PVR_NO_COLORMASK` | ignore `GXSetColorUpdate(GX_FALSE)`; depth-only passes paint solid geometry again |
+| `DC_PVR_NO_PUNCHTHRU` | **the punch-through kill switch.** Disables `PVR_LIST_PT_POLY` (`opb_sizes[4]` back to `PVR_BINSIZE_0`), so no batch is deferred and every cutout goes back through the 2026-08-02 blend approximation in the single general list. Restores the pre-punch-through behaviour verbatim |
+
+#### Punch-through tuning (all imply punch-through is ON)
+
+The PVR has no alpha test outside `PVR_LIST_PT_POLY`, and that list is number 4
+— last — so cutout geometry is transformed at submission time into a deferred
+32-byte-record buffer and replayed after the general list closes. See the
+"decision 1" block at the top of `dc/src/dc_pvr.c`.
+
+| define | default | effect |
+|---|---|---|
+| `DC_PVR_PT_ALPHA_REF` | `144` | the global `PT_ALPHA_REF` register (`0xA05F811C`), pinned to emu64's `tex_edge_alpha` default. It is ONE value for the whole render — the PVR has no per-polygon reference |
+| `DC_PVR_PT_BUF_RECS` | `2048` | deferred records, 32 B each = **65,536 B of `.bss`**. Raise it if `[DC/PVR] … ptdrop=` is ever nonzero |
+| `DC_PVR_PT_BINSIZE` | `32` | PT object-pointer bin size. VRAM only, ~153,600 B per buffer set. `16` halves it |
+| `DC_PVR_PT_ALL` | unset | also route **blended** cutouts (`GX_BM_BLEND` + alpha test) to PT. By default only `GX_BM_NONE` cutouts — opaque-with-holes — go there, because PT forces a passing fragment's alpha to 1.0 and would make a fading sprite pop opaque |
+
+The `[DC/PVR] pt …` line printed next to `[PERF]` every 30 frames carries
+`batches` / `verts` / `recs` routed to PT, `pthi=<worst frame>/<cap>` and
+`ptdrop=<triangles refused by a full buffer>`. **`ptdrop` must be 0**; anything
+else is cutout geometry missing from the screen. `DC_PVR_BATCH_LOG` gained a
+`pt=` field next to `cut=`: `cut=1 pt=0` is a cutout the router declined.
+
+⚠️ **A kill switch reverts one fix, not one symptom.** `DC_PVR_NO_UVCLAMP`
+built to test the train windows also un-fixes K.K. Slider's spotlight, because
+that is what the wrap fix repaired. Say what a given A/B is expected to break
+before anyone looks at it.
 
 ```bash
 DC_XDEFS='-DDC_PVR_NO_UVCLAMP' bash dc/build-dc.sh

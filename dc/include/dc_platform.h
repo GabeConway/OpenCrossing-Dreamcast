@@ -364,6 +364,9 @@ int  pc_audio_get_buffer_fill(void);
 int  pc_audio_is_active(void);
 void pc_audio_shutdown(void);
 void pc_audio_start_producer_thread(void);
+/* Drives jaudio synthesis and services the KOS stream. Called once per frame
+ * from VIWaitForRetrace; budgeted so it can never stall the game loop. */
+void dc_audio_pump(void);
 void pc_audio_mq_init(void);
 void pc_audio_mq_shutdown(void);
 void pc_audio_update_volumes(void);

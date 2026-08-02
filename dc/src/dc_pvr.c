@@ -8,25 +8,43 @@
  * THE FOUR DECISIONS THIS FILE MAKES, AND WHY
  * ==========================================================================
  *
- * 1. ONE LIST, NOT THREE.  The PVR bins geometry into Opaque / Punch-Through /
- *    Translucent lists, and KOS is explicit that "lists can never be opened
- *    again within a single frame once they have been closed". The game hands
- *    us OP-ish and TR-ish batches finely interleaved in emu64 display-list
- *    order, so honouring three lists would mean buffering two of them in main
- *    RAM until frame end — and main RAM is the project's blocking problem
- *    (kb/STATE.md: the full image is ~7 MB over 16 MB).
+ * 1. TWO LISTS: one general list, plus punch-through.  The PVR bins geometry
+ *    into Opaque / Punch-Through / Translucent lists, and KOS is explicit that
+ *    "lists can never be opened again within a single frame once they have
+ *    been closed". The game hands us OP-ish and TR-ish batches finely
+ *    interleaved in emu64 display-list order, so honouring OP *and* TR would
+ *    mean buffering one of them in main RAM until frame end — and main RAM is
+ *    the project's blocking problem (kb/STATE.md).
  *
- *    So: everything goes into PVR_LIST_TR_POLY with autosort DISABLED. That
- *    turns the translucent list into a plain submission-ordered, Z-buffered
- *    rasteriser with per-polygon blend factors — which is exactly the GX
- *    semantics the game was written against. Opaque geometry is simply a poly
- *    with src=ONE dst=ZERO. Nothing is reordered, nothing is buffered, and the
- *    additive-heap cost of the whole renderer is zero bytes of main RAM.
+ *    So: everything that is not a hard cutout goes into PVR_LIST_TR_POLY with
+ *    autosort DISABLED. That turns the translucent list into a plain
+ *    submission-ordered, Z-buffered rasteriser with per-polygon blend factors —
+ *    which is exactly the GX semantics the game was written against. Opaque
+ *    geometry is simply a poly with src=ONE dst=ZERO. Nothing is reordered.
  *
  *    The cost is the PVR's early-Z rejection, which the TR list does not do.
  *    That is a frame-rate problem, not a correctness problem, and it is the
  *    right trade for a bring-up. DC_PVR_LIST_MODE=1 puts everything in the
  *    opaque list instead (faster, no blending) for bisecting.
+ *
+ *    THE ONE EXCEPTION IS THE PUNCH-THROUGH LIST, added 2026-08-02. The PVR has
+ *    no alpha test outside PVR_LIST_PT_POLY, so `alpha_ref` (144 by default,
+ *    emu64.c:718) was read only to decide THAT a test existed and never applied
+ *    as a threshold. For a train door with alpha-punched window openings that
+ *    leaves no right answer: depth.write=true makes the transparent holes write
+ *    depth and occlude the scenery behind them, depth.write=false makes the
+ *    door occlude nothing and the passing trees paint through it. BOTH were
+ *    built, both were watched by a human, both were wrong (kb/traps.md).
+ *
+ *    PVR_LIST_PT_POLY = 4 is LAST in the TA's list order, so cutouts cannot be
+ *    interleaved: they are transformed at submission time into a small deferred
+ *    record buffer (headers and vertices are both 32-byte TA words), and the
+ *    buffer is replayed verbatim after the general list closes. The *render*
+ *    order is unaffected by that — the ISP always rasterises OP, then PT, then
+ *    TR — so a punched cutout still resolves against everything else through
+ *    the depth buffer, with a real hardware alpha test doing the discarding.
+ *    Kill switch: -DDC_PVR_NO_PUNCHTHRU restores the pre-2026-08-02 behaviour
+ *    verbatim, including the blend-based cutout approximation below.
  *
  * 2. THE SH-4 DOES THE TRANSFORM.  There is no hardware T&L. Per batch we fold
  *    projection * posmtx into one 4x4, then per vertex do one matrix-vector
@@ -57,6 +75,13 @@
  *   -DDC_PVR_NO_LIGHTING    skip the SH-4 lighting stage, use vertex colour
  *   -DDC_PVR_NO_NEARCLIP    drop straddling triangles instead of clipping
  *   -DDC_PVR_VERTBUF_BYTES  TA vertex buffer size in VRAM (default 768 KB)
+ *   -DDC_PVR_NO_PUNCHTHRU   no PT list; cutouts go back to the TR blend hack
+ *   -DDC_PVR_PT_ALL         route BLENDED cutouts to PT too (default: only
+ *                           GX_BM_NONE cutouts, i.e. opaque-with-holes)
+ *   -DDC_PVR_PT_ALPHA_REF   the global PT threshold, 0..255 (default 144)
+ *   -DDC_PVR_PT_BUF_RECS    deferred PT records, 32 B each (default 2048)
+ *   -DDC_PVR_NO_FOG         no hardware fog; byte-identical to pre-fog output
+ *   -DDC_PVR_FOG_LOG=<N>    one fog state line every Nth frame
  */
 
 #include "dc_platform.h"
@@ -140,6 +165,274 @@ static unsigned int s_bl_argb;
 static pvr_poly_hdr_t s_hdr;
 static unsigned int   s_hdr_key = 0xFFFFFFFFu;
 static int            s_hdr_valid;
+
+/* ==========================================================================
+ * Hardware fog
+ * ==========================================================================
+ * emu64.c:3219 asks for GX_FOG_PERSP_LIN with live startz/endz/near/far and a
+ * live colour whenever the N64 blender's P0 is G_BL_CLR_FOG and G_FOG is in
+ * the geometry mode. dc_gx.c:1277 has recorded all six parameters since M1 and
+ * nothing ever read them — the same "recorded, never consumed" bug family as
+ * the wrap mode, the TEV constants and the colour mask.
+ *
+ * WHY TABLE FOG, AND WHY IT IS EXACT HERE
+ * ---------------------------------------
+ * PVR table fog indexes a 128-entry table by the per-pixel 1/w scaled by the
+ * FOG_DENSITY register and clamped to [1.0, 259.999999]. Entry j stands for
+ * the scaled value
+ *     t(j) = 2^(j>>4) * ((j & 0xF) + 16) / 16,   j = 0..128,  t = 1 .. 256
+ * (Simon Fenney's formula, quoted in KOS pvr_fog.c; it is exactly what
+ * generates KOS's inverse_w_depth[]). Set FOG_DENSITY = endz and entry j sits
+ * at the eye depth w(j) = endz / t(j) — known in closed form.
+ *
+ * emit_projected() already writes pv.z = 1/w, and w is the fourth row of the
+ * GC projection, which GXSetProjection forces to (0,0,-1,0) for GX_PERSPECTIVE
+ * (dc_gx.c:835-839). So w IS the positive eye-space depth — the same quantity
+ * and the same units as emu64's startz/endz (emu64.c:3205-3208 negate
+ * guMtxXFM1F_dol3, which returns eye z).
+ *
+ * GX_FOG_PERSP_LIN is therefore exactly representable: evaluate
+ * f = clamp01((w - start) / (end - start)) at the w each entry really stands
+ * for. GX's nearz/farz exist only to invert a depth-buffer value back to eye
+ * z; we never left eye z, so they are not needed and are ignored — that is
+ * why this mapping is exact rather than fitted. Residual error is (a) 129-knot
+ * piecewise-linear interpolation of a curve smooth in 1/w, (b) 8 bits of fog
+ * factor, (c) nearer than end/256 the factor freezes instead of falling to 0,
+ * which only shows if start < end/256.
+ *
+ * Vertex fog is not an option: KOS's pvr_fog_vertex_color() is an
+ * assert_msg(0, "not implemented") stub, and it would cost a per-vertex oargb
+ * on the SH-4. Table fog costs nothing per vertex — pv.oargb stays 0 and
+ * emit_projected() is untouched.
+ *
+ * WHEN THE REGISTERS ARE WRITTEN
+ * ------------------------------
+ * The fog table, colour and density are GLOBAL registers, not part of a poly
+ * header, and pvr_fog.c is explicit that they must not be touched between
+ * pvr_scene_begin() and pvr_scene_finish(). So the batch path only LATCHES
+ * what it sees and dc_gx_backend_frame_begin() programs it right after
+ * pvr_wait_ready() — the one point in the frame with no render in flight.
+ * Consequence: a fog PARAMETER change lands one frame late, and if one frame
+ * uses two different fog settings the last one latched wins for that frame.
+ * Fog ON/OFF is per-poly (gen.fog_type) and has no latency.
+ *
+ * Main-RAM cost: 48 B of .bss here, ~344 B of KOS .text that --gc-sections is
+ * currently discarding, 516 B of transient stack in fog_program(). The table
+ * itself lives in PVR registers at 0xA05F8200 — zero main RAM, zero VRAM.
+ * Using pvr_fog_table_custom() rather than pvr_fog_table_linear/exp keeps
+ * KOS's own 2 KB of exp/inverse-w tables discarded as well.
+ *
+ * Kill switch: -DDC_PVR_NO_FOG. Diagnostic: -DDC_PVR_FOG_LOG=<N>.
+ */
+#ifndef DC_PVR_NO_FOG
+/* What the last fogged batch asked for, latched during the frame. */
+static int   s_fog_pend;
+static float s_fog_pend_start, s_fog_pend_end, s_fog_pend_col[3];
+/* What is actually in the registers right now. */
+static int   s_fog_hw;
+static float s_fog_hw_start, s_fog_hw_end, s_fog_hw_col[3];
+#ifdef DC_PVR_FOG_LOG
+static unsigned int s_fog_batches, s_fog_programs;
+#endif
+
+/* Does the CURRENT g_gx ask for fog we can actually render? */
+static int fog_active(void) {
+    if (g_gx.fog_type == GX_FOG_NONE) return 0;
+    /* GX_FOG_ORTHO_* would need a different table build, and the 2D/UI path is
+     * orthographic with w == 1, which would collapse every pixel into a single
+     * table entry. Neither is worth guessing at. */
+    if (g_gx.projection_type != GX_PERSPECTIVE) return 0;
+    /* Degenerate parameters: emu64 emits (0,0,0,0) on its GX_FOG_NONE path and
+     * the min/max arithmetic at emu64.c:3197 can invert. */
+    if (!(g_gx.fog_end > g_gx.fog_start)) return 0;
+    if (!(g_gx.fog_end > 0.0f)) return 0;
+    return 1;
+}
+
+/* Program FOG_TABLE_COLOR + FOG_DENSITY + the 128 table registers. MUST be
+ * called with no render in flight. Re-programs only on a real change. */
+static void fog_program(void) {
+    float table[129];
+    float start, end;
+    int j;
+
+    if (!s_fog_pend) return;
+    if (s_fog_hw &&
+        s_fog_hw_start  == s_fog_pend_start &&
+        s_fog_hw_end    == s_fog_pend_end &&
+        s_fog_hw_col[0] == s_fog_pend_col[0] &&
+        s_fog_hw_col[1] == s_fog_pend_col[1] &&
+        s_fog_hw_col[2] == s_fog_pend_col[2])
+        return;
+
+    start = s_fog_pend_start;
+    end   = s_fog_pend_end;
+    if (start < 0.0f) start = 0.0f;
+
+    /* Alpha 1.0 DELIBERATELY. KOS cannot set alpha in FOG_TABLE_COLOR, so it
+     * fakes it by scaling every table entry by the alpha last handed to
+     * pvr_fog_table_color() — which makes that argument a fog STRENGTH, not a
+     * colour channel. g_gx.fog_color[3] is the N64 fog colour's alpha and is
+     * not a strength; feeding it in would silently delete the fog whenever the
+     * game left it at 0. Must be called BEFORE the table build: the table
+     * builder reads the latched alpha. */
+    pvr_fog_table_color(1.0f, s_fog_pend_col[0], s_fog_pend_col[1],
+                        s_fog_pend_col[2]);
+    pvr_fog_far_depth(end);
+
+    for (j = 0; j <= 128; j++) {
+        /* t(j) = the scaled 1/w this entry stands for; w(j) = end / t(j). */
+        float t = (float)(1 << (j >> 4)) * (float)((j & 0xF) + 16) *
+                  (1.0f / 16.0f);
+        float w = end / t;
+        float f = (w - start) / (end - start);
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        table[j] = f;              /* table[0] is farthest; 1.0 = full fog */
+    }
+    pvr_fog_table_custom(table);
+
+    s_fog_hw = 1;
+    s_fog_hw_start  = s_fog_pend_start;
+    s_fog_hw_end    = s_fog_pend_end;
+    s_fog_hw_col[0] = s_fog_pend_col[0];
+    s_fog_hw_col[1] = s_fog_pend_col[1];
+    s_fog_hw_col[2] = s_fog_pend_col[2];
+#ifdef DC_PVR_FOG_LOG
+    s_fog_programs++;
+#endif
+}
+
+/* One call per batch from dc_gx_backend_submit(). NOT done inside
+ * compile_header(): that only runs when header_key() changes, and the fog
+ * PARAMETERS are deliberately absent from the key — they do not alter the
+ * compiled header, only the global registers. */
+static void fog_latch(void) {
+    if (!fog_active()) return;
+    s_fog_pend = 1;
+    s_fog_pend_start  = g_gx.fog_start;
+    s_fog_pend_end    = g_gx.fog_end;
+    s_fog_pend_col[0] = g_gx.fog_color[0];
+    s_fog_pend_col[1] = g_gx.fog_color[1];
+    s_fog_pend_col[2] = g_gx.fog_color[2];
+#ifdef DC_PVR_FOG_LOG
+    s_fog_batches++;
+#endif
+}
+#endif /* !DC_PVR_NO_FOG */
+
+/* ==========================================================================
+ * The punch-through list — a real hardware alpha test
+ * ==========================================================================
+ * See decision 1 in the file header for WHY. This block is the HOW.
+ *
+ * PVR_LIST_PT_POLY is 4, i.e. last in the TA's list enum (pvr_header.h:65),
+ * and pvr_list_finish() latches `lists_closed` so a list "can never be opened
+ * again within a single frame once closed" (pvr_scene.c). The frame therefore
+ * has to be TR (or OP) first and PT last, which means cutout geometry must be
+ * held somewhere until the general list closes.
+ *
+ * WHAT IS BUFFERED, AND WHY IT IS THE CHEAP THING. Not GX state and not source
+ * vertices: the finished TA words. A pvr_poly_hdr_t is 32 bytes and a
+ * pvr_vertex_t is 32 bytes (both asserted below), so one flat array of 32-byte
+ * records holds the interleaved header/vertex stream in submission order and
+ * the replay is a straight memcpy loop into the store queues. Transform,
+ * lighting, near clip and texgen all still happen exactly once, at submission
+ * time, in the order the game asked for. Nothing is re-derived at replay.
+ *
+ * SIZING. Cutouts were measured at 13.6 % of batches (316 of 2331) and the
+ * renderer averages ~400 triangles per frame over a 600 s run, so the expected
+ * steady-state load is on the order of 50-80 triangles = 150-240 records. 2048
+ * records is ~10x that, and it costs 65,536 B of .bss — the one place in this
+ * file that spends main RAM, so it is capped, counted, and reported rather
+ * than grown on faith. Raise it with -DDC_PVR_PT_BUF_RECS and watch `pthi=` in
+ * the [DC/PVR] line, which is the frame high-water mark against the cap.
+ *
+ * OVERFLOW IS NOT CORRUPTION. A full buffer drops whole TRIANGLES, never a
+ * partial one: emit_triangle() marks the write position, and if any record of
+ * that triangle did not fit the position is rolled back so the replayed stream
+ * can never contain a strip that was cut off before its EOL vertex. Dropped
+ * triangles are counted in `ptdrop=`; a nonzero value there means geometry is
+ * missing from the screen and the buffer needs raising.
+ *
+ * THE THRESHOLD IS ONE GLOBAL REGISTER. PT_ALPHA_REF lives at 0xA05F811C and
+ * is latched for the whole render, not per polygon — KOS 2.3 does not name it
+ * at all (pvr_regs.h stops at PVR_UNK_0118 = 0x0118 and resumes at
+ * PVR_TA_OPB_START = 0x0124), so it is written here by offset through KOS's
+ * own PVR_SET. It is pinned to 144 to match emu64's `tex_edge_alpha` default
+ * (emu64.c:718), which kb/tev-map-alpha.md §5.5 option (a) identifies as the
+ * dominant reference; per-draw references that differ from it are approximated
+ * rather than honoured, and that is a known, bounded wrong. */
+#ifndef DC_PVR_NO_PUNCHTHRU
+
+_Static_assert(sizeof(pvr_poly_hdr_t) == 32, "PT buffer record size");
+_Static_assert(sizeof(pvr_vertex_t) == 32, "PT buffer record size");
+
+/* The PT alpha comparison value. KOS has no symbol for it; this is the raw
+ * register offset from 0xA05F8000, used with KOS's PVR_SET(). */
+#define DC_PVR_REG_PT_ALPHA_REF 0x011c
+
+#ifndef DC_PVR_PT_ALPHA_REF
+#define DC_PVR_PT_ALPHA_REF 144
+#endif
+
+#ifndef DC_PVR_PT_BUF_RECS
+#define DC_PVR_PT_BUF_RECS 2048
+#endif
+
+/* The object-pointer bin size for the PT list. VRAM only — it comes out of the
+ * PVR's own 4 MB half, not out of main RAM, and not out of the texture pool's
+ * ceiling until that half is exhausted (it is not: two buffer sets of
+ * ~1.7 MB each leave ~4.9 MB free against a 4 MB texture ceiling).
+ *
+ * Set to _32, matching the general list, rather than the _16 that 13.6 % of
+ * batches would suggest: an OPB is indexed PER TILE, and PT's population is
+ * exactly the large-area geometry — foliage canopies, the station roof, the
+ * train door and tunnel — so its objects-per-tile count is not proportional to
+ * its share of batch COUNT. Undersizing costs dropped geometry (the OPB
+ * overflow allowance is finite) to save ~76 KB of a resource that is not
+ * scarce. -DDC_PVR_PT_BINSIZE=16 is the A/B if VRAM ever does get tight. */
+#ifndef DC_PVR_PT_BINSIZE
+#define DC_PVR_PT_BINSIZE PVR_BINSIZE_32
+#endif
+
+typedef struct { unsigned int w[8]; } dc_pt_rec_t;
+
+/* 32-byte aligned: pvr_prim() rejects anything not 8-byte aligned and the SQ
+ * path copies in 32-byte units. */
+static dc_pt_rec_t s_pt_buf[DC_PVR_PT_BUF_RECS] __attribute__((aligned(32)));
+static unsigned int s_pt_n;         /* records written this frame            */
+static int          s_pt_route;     /* the batch being submitted goes to PT  */
+static int          s_pt_trunc;     /* a record was dropped since the mark   */
+
+static unsigned int s_pt_batches;   /* batches routed to PT (cumulative)     */
+static unsigned int s_pt_verts;     /* vertices replayed through PT          */
+static unsigned int s_pt_recs;      /* records replayed through PT           */
+static unsigned int s_pt_hi;        /* worst single-frame record count       */
+static unsigned int s_pt_drop;      /* triangles dropped to buffer overflow  */
+static int          s_pt_warned;    /* the one-shot overflow shout, below    */
+
+/* One 32-byte TA record into the deferred stream. Records are uniform, so once
+ * the buffer is full it stays full for the rest of the frame — which is what
+ * makes "drop the whole triangle" implementable as a position rollback. */
+static void pt_defer(const void* src) {
+    if (s_pt_n >= (unsigned int)DC_PVR_PT_BUF_RECS) {
+        s_pt_trunc = 1;
+        return;
+    }
+    memcpy(&s_pt_buf[s_pt_n], src, 32);
+    s_pt_n++;
+}
+#endif /* !DC_PVR_NO_PUNCHTHRU */
+
+/* Every TA word in this file goes through here. Outside a PT batch it is
+ * pvr_prim() unchanged; inside one it lands in the deferred buffer instead. */
+static void submit_prim(const void* p, unsigned int size) {
+#ifndef DC_PVR_NO_PUNCHTHRU
+    if (s_pt_route) { pt_defer(p); return; }
+#endif
+    pvr_prim(p, size);
+}
 
 /* ==========================================================================
  * Small helpers
@@ -491,6 +784,32 @@ static unsigned int header_key(const dc_pvr_tex_t* tex) {
     k = (k * 33u) + (unsigned int)g_gx.z_compare_func;
     k = (k * 33u) + (unsigned int)g_gx.z_update_enable;
     k = (k * 33u) + (unsigned int)g_gx.cull_mode;
+    /* The alpha test rewrites blend and depth.write in compile_header, so it is
+     * part of the header's identity. Leave it out and the dedup below latches
+     * whichever variant compiled first and the fix silently does nothing for
+     * every batch that shares the rest of the state. */
+    k = (k * 33u) + (unsigned int)g_gx.alpha_comp0;
+    k = (k * 33u) + (unsigned int)g_gx.alpha_ref0;
+    k = (k * 33u) + (unsigned int)g_gx.alpha_comp1;
+    k = (k * 33u) + (unsigned int)g_gx.alpha_ref1;
+    k = (k * 33u) + (unsigned int)g_gx.color_update_enable;
+#ifndef DC_PVR_NO_FOG
+    /* Fog ON/OFF is a header bit (gen.fog_type below), so it belongs in the
+     * key — leave it out and the first batch of a scene latches whichever
+     * variant compiled first and every later batch inherits it. The fog
+     * PARAMETERS must NOT be here: they live in global registers, do not
+     * change the compiled header, and hashing them would churn the cache. */
+    k = (k * 33u) + (unsigned int)g_gx.fog_type;
+    k = (k * 33u) + (unsigned int)g_gx.projection_type;
+#endif
+#ifndef DC_PVR_NO_PUNCHTHRU
+    /* The list type is baked into the compiled header, so a PT header and a TR
+     * header are different objects even when every other input agrees. Folding
+     * the routing decision in is belt-and-braces — it is derived from state
+     * already hashed above — but a header latched into the wrong list is a
+     * whole-frame corruption, not a wrong pixel. */
+    k = (k * 33u) + (unsigned int)s_pt_route;
+#endif
     k = (k * 33u) + (unsigned int)(uintptr_t)tex;
     if (tex) {
         k = (k * 33u) + tex->pvr_fmt;
@@ -504,9 +823,66 @@ static unsigned int header_key(const dc_pvr_tex_t* tex) {
     return k ? k : 1u;
 }
 
+/* Is the game asking for a real alpha TEST (a cutout), as opposed to "always
+ * pass"? emu64 expresses one as GX_GEQUAL with a reference taken from
+ * blend_color.a / tex_edge_alpha, and "no test" as GX_ALWAYS with ref 0
+ * (emu64.c:2310-2319). A GX_GEQUAL with ref 0 passes everything, so it is not a
+ * test either. g_gx is zero-initialised, which makes the untouched state
+ * GX_NEVER/0 — inert here, so a batch drawn before anyone calls
+ * GXSetAlphaCompare keeps today's behaviour. */
+static int alpha_test_active(void) {
+    return (g_gx.alpha_comp0 == GX_GEQUAL && g_gx.alpha_ref0 > 0) ||
+           (g_gx.alpha_comp1 == GX_GEQUAL && g_gx.alpha_ref1 > 0);
+}
+
+/* The general (non-PT) list this build submits everything else to. */
+#define DC_PVR_BASE_LIST \
+    ((DC_PVR_LIST_MODE == 1) ? PVR_LIST_OP_POLY : PVR_LIST_TR_POLY)
+
+/* Does the batch about to be submitted belong in the punch-through list?
+ *
+ * Three exclusions, each of which would be a regression rather than a fix:
+ *
+ *  - No alpha test: nothing to punch. Straight to the general list.
+ *  - GX_BM_BLEND + alpha test: kb/tev-map-alpha.md §5.3 B3, a genuinely
+ *    TRANSLUCENT cutout. PT forces a passing fragment's alpha to 1.0, so
+ *    routing it here would make a fading sprite pop to fully opaque. §5.4
+ *    option (b) says route the outliers to TR, and the existing blended-cutout
+ *    path already handles them acceptably; -DDC_PVR_PT_ALL overrides this and
+ *    sends every alpha-tested batch to PT, which is the one-flag experiment if
+ *    a blended cutout still looks wrong.
+ *  - GXSetColorUpdate(FALSE): a depth-only pass, expressed here as
+ *    src=ZERO dst=ONE (see the colour-mask block in compile_header). The PT
+ *    list is the wrong place for a pass whose entire purpose is to not paint.
+ *
+ * Read on EVERY batch, not just on a header miss, because ensure_header()'s
+ * cache can hit and the caller still has to know where the vertices go. */
+static int pt_route_active(void) {
+#ifdef DC_PVR_NO_PUNCHTHRU
+    return 0;
+#else
+    if (!alpha_test_active())
+        return 0;
+    if (!g_gx.color_update_enable)
+        return 0;
+#ifndef DC_PVR_PT_ALL
+    if (g_gx.blend_mode == GX_BM_BLEND)
+        return 0;
+#endif
+    return 1;
+#endif
+}
+
 static void compile_header(const dc_pvr_tex_t* tex) {
     pvr_poly_cxt_t cxt;
-    int list = (DC_PVR_LIST_MODE == 1) ? PVR_LIST_OP_POLY : PVR_LIST_TR_POLY;
+#ifdef DC_PVR_NO_PUNCHTHRU
+    int list = DC_PVR_BASE_LIST;
+#else
+    int list = s_pt_route ? PVR_LIST_PT_POLY : DC_PVR_BASE_LIST;
+#endif
+#ifndef DC_PVR_NO_ALPHATEST
+    int cutout = alpha_test_active();
+#endif
 
     if (tex && tex->base)
         pvr_poly_cxt_txr(&cxt, list, (int)tex->pvr_fmt, tex->w, tex->h,
@@ -515,6 +891,16 @@ static void compile_header(const dc_pvr_tex_t* tex) {
         pvr_poly_cxt_col(&cxt, list);
 
     cxt.gen.culling = cull_gx_to_pvr(g_gx.cull_mode);
+#ifndef DC_PVR_NO_FOG
+    /* pvr_poly_cxt_col/txr already default this to PVR_FOG_DISABLE, so
+     * -DDC_PVR_NO_FOG is byte-identical to the pre-fog build. Gated on
+     * s_fog_hw: enabling table fog before the table registers have ever been
+     * written would fog against whatever the PVR powered up holding.
+     * s_hdr_valid is cleared at every frame boundary, so a 0->1 flip of
+     * s_fog_hw can never be cached stale. */
+    cxt.gen.fog_type = (s_fog_hw && fog_active()) ? PVR_FOG_TABLE
+                                                  : PVR_FOG_DISABLE;
+#endif
     cxt.depth.comparison = g_gx.z_compare_enable
                                ? depth_gx_to_pvr(g_gx.z_compare_func)
                                : PVR_DEPTHCMP_ALWAYS;
@@ -533,6 +919,102 @@ static void compile_header(const dc_pvr_tex_t* tex) {
         cxt.blend.src = PVR_BLEND_ONE;
         cxt.blend.dst = PVR_BLEND_ZERO;
     }
+
+#ifndef DC_PVR_NO_ALPHATEST
+    /* THE CUTOUT FIX.
+     *
+     * GX's alpha test discards a texel outright. The PVR has no alpha test
+     * outside the punch-through list, and this backend deliberately runs a
+     * single translucent list (see the header of this file), so 23 of the 101
+     * TEV configs were asking for a test that silently did not happen.
+     *
+     * The damage was not subtle. emu64 draws cutouts — foliage, fences, grass,
+     * hair, the town-gate lattice — with GX_BM_NONE, which lands in the branch
+     * above as src=ONE dst=ZERO. So every FULLY TRANSPARENT texel of a cutout
+     * texture was written at full opacity AND, with z_update on, wrote depth.
+     * The result is a solid rectangle of garbage that also occludes everything
+     * behind it: reported by a human as "textures are not layered properly" and
+     * as missing textures, which are the same bug seen twice.
+     *
+     * Approximation, deliberately: alpha-blend the cutout so transparent texels
+     * contribute nothing, and stop it writing depth so it cannot occlude. It is
+     * still depth-TESTED, so opaque geometry in front still hides it correctly;
+     * what is lost is cutout-vs-cutout ordering, which now follows submission
+     * order. That is a visible-but-plausible error in place of an opaque block.
+     * The exact fix is a real PVR punch-through list — see kb/tev-map-alpha.md.
+     * It now exists; read on.
+     *
+     * ⚠️ SUPERSEDED FOR MOST CUTOUTS, 2026-08-02 (second fix). This whole block
+     * is skipped when the batch is going to the punch-through list, where the
+     * hardware does the real thing: the alpha test discards below-threshold
+     * texels, depth.write stays exactly as the game asked, and the blend
+     * factors stay src=ONE dst=ZERO. Applying the approximation there would
+     * undo the fix — a PT poly that both alpha-blends and drops depth write is
+     * the "trees draw through the door" build again, just with a hardware alpha
+     * test bolted on. The block survives for the batches pt_route_active()
+     * declines (GX_BM_BLEND cutouts) and for -DDC_PVR_NO_PUNCHTHRU builds.
+     *
+     * Kill switch: -DDC_PVR_NO_ALPHATEST restores the pre-2026-08-02 behaviour. */
+    if (cutout && list != PVR_LIST_PT_POLY) {
+        cxt.blend.src = PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+        /* ⚠️ Only surrender depth write when the GAME asked for blending.
+         *
+         * MEASURED 2026-08-02: dropping it unconditionally broke the train
+         * door. `AA_ZB_TEX_EDGE2` is the game's ordinary OPAQUE-WITH-HOLES
+         * mode — the door frame and leaf use it (obj_romtrain_door.c:44,71),
+         * as does the tunnel (rom_train_out.c:135) — it is not a foliage-only
+         * mode. Such a batch must still occlude: with one submission-ordered
+         * list and autosort off, geometry that writes no depth is painted over
+         * by everything submitted after it, and all the XLU window scenery is
+         * submitted after all the OPA geometry. The passing trees and clouds
+         * drew straight through the closed door.
+         *
+         * GX_BM_NONE + alpha test = opaque with punched holes -> keep depth.
+         * GX_BM_BLEND + alpha test = a real translucent cutout -> drop it.
+         *
+         * The transparent-texel bug this whole block fixes is cured by the
+         * blend factors above on their own; the depth-write change was an
+         * over-correction. */
+        if (g_gx.blend_mode == GX_BM_BLEND)
+            cxt.depth.write = false;
+    }
+    /* ON THE REFERENCE VALUE. g_gx.alpha_ref0/ref1 is still not read as a
+     * per-batch threshold, because the PVR does not have one: PT_ALPHA_REF is
+     * a single global register latched for the whole render
+     * (kb/tev-map-alpha.md §5.2). It is pinned to DC_PVR_PT_ALPHA_REF = 144,
+     * emu64's tex_edge_alpha default (emu64.c:718), which §5.5 option (a)
+     * expects to cover the overwhelming majority of draws. A draw that asked
+     * for a different reference gets a slightly wrong cutoff — a texel or two
+     * of edge — instead of no test at all, which is what it got before.
+     *
+     * For the batches that do NOT reach PT (blended cutouts, and every batch in
+     * a -DDC_PVR_NO_PUNCHTHRU build) the old caveat still stands verbatim:
+     * texels between 1 and the reference were discarded on GC and are drawn
+     * semi-transparently here, so those cutout edges keep their faint halo. */
+#endif
+
+#ifndef DC_PVR_NO_COLORMASK
+    /* A depth-only pass must not paint. GXSetColorUpdate(GX_FALSE) is how emu64
+     * writes the decal mask (emu64.c:2347-2349, the G_DECAL_GEQUAL|SPECIAL
+     * path): fill the depth buffer, touch no pixels. dc_gx.c has stored
+     * color_update_enable since M1 and set DIRTY(DC_GX_DIRTY_COLOR_MASK) for it,
+     * and nothing ever read it — so those passes drew SOLID geometry, usually
+     * with GX_BM_NONE i.e. src=ONE dst=ZERO. Ground shadows, footprints and
+     * puddle decals came out as opaque blobs over the scene.
+     *
+     * The PVR has no colour write mask, but it does not need one: src=ZERO
+     * dst=ONE leaves the destination exactly as it was, while cxt.depth.write
+     * still governs depth. That is precisely GX's colour-update-off semantics.
+     *
+     * Safe by construction: dc_gx.c:475 initialises color_update_enable to 1, so
+     * this branch is only ever taken because the game explicitly asked for it.
+     * Kill switch: -DDC_PVR_NO_COLORMASK. */
+    if (!g_gx.color_update_enable) {
+        cxt.blend.src = PVR_BLEND_ZERO;
+        cxt.blend.dst = PVR_BLEND_ONE;
+    }
+#endif
 
     if (tex && tex->base) {
         int uv_clamp, uv_flip;
@@ -556,7 +1038,7 @@ static void ensure_header(const dc_pvr_tex_t* tex) {
         return;
     compile_header(tex);
     s_hdr_key = key;
-    pvr_prim(&s_hdr, sizeof(s_hdr));
+    submit_prim(&s_hdr, sizeof(s_hdr));
 }
 
 /* ==========================================================================
@@ -581,7 +1063,10 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
     pv.v = c->v;
     pv.argb = c->argb;
     pv.oargb = 0;
-    pvr_prim(&pv, sizeof(pv));
+    submit_prim(&pv, sizeof(pv));
+#ifndef DC_PVR_NO_PUNCHTHRU
+    if (s_pt_route) s_pt_verts++;
+#endif
 
 #ifdef DC_PVR_BATCH_LOG
     /* Accumulate what the TA was actually handed, not what we think it was.
@@ -639,7 +1124,8 @@ static void lerp_vtx(ClipVtx* out, const ClipVtx* a, const ClipVtx* b, float t) 
  * no near plane; without this a vertex behind the eye divides by a negative w
  * and streaks across the whole framebuffer. Sutherland-Hodgman on three
  * vertices yields at most four, i.e. at most two triangles. */
-static void emit_triangle(const ClipVtx* a, const ClipVtx* b, const ClipVtx* c) {
+static void emit_triangle_raw(const ClipVtx* a, const ClipVtx* b,
+                              const ClipVtx* c) {
     const ClipVtx* in[3];
     ClipVtx out[4];
     int n_out = 0;
@@ -695,6 +1181,36 @@ static void emit_triangle(const ClipVtx* a, const ClipVtx* b, const ClipVtx* c) 
 #endif
 }
 
+/* All-or-nothing against the PT record buffer.
+ *
+ * The replayed stream is read by the TA as a command sequence, so a strip that
+ * stops before its EOL vertex is not "a missing triangle", it is a malformed
+ * list — the next poly header would be consumed as if it were the strip's
+ * continuation. Marking the write position and rewinding it if any record of
+ * this triangle did not fit makes overflow a clean, countable loss instead.
+ *
+ * Only vertices are written between the mark and here (ensure_header() runs
+ * once per batch, before the triangle loop), so the s_pt_verts adjustment is
+ * exact. s_tris_out is deliberately NOT rewound: it is a census of what the
+ * transform stage produced, and ptdrop= is the census of what the buffer then
+ * refused. Two different questions. */
+static void emit_triangle(const ClipVtx* a, const ClipVtx* b, const ClipVtx* c) {
+#ifndef DC_PVR_NO_PUNCHTHRU
+    if (s_pt_route) {
+        unsigned int mark = s_pt_n;
+        s_pt_trunc = 0;
+        emit_triangle_raw(a, b, c);
+        if (s_pt_trunc) {
+            s_pt_verts -= (s_pt_n - mark);
+            s_pt_n = mark;
+            s_pt_drop++;
+        }
+        return;
+    }
+#endif
+    emit_triangle_raw(a, b, c);
+}
+
 /* Texgen. Slot ids are GX_TEXMTX0..9 stepping by 3 (GXEnum.h:294); GX_IDENTITY
  * and anything else means "use the texcoord as given". dc_gx.c stores the 3x4
  * matrix row-major, so a 2x4 texgen is rows 0 and 1. */
@@ -742,7 +1258,17 @@ void dc_gx_backend_init(void) {
     p.opb_sizes[1] = PVR_BINSIZE_0;
     p.opb_sizes[2] = (DC_PVR_LIST_MODE == 1) ? PVR_BINSIZE_0 : PVR_BINSIZE_32;
     p.opb_sizes[3] = PVR_BINSIZE_0;
+#ifdef DC_PVR_NO_PUNCHTHRU
     p.opb_sizes[4] = PVR_BINSIZE_0;
+#else
+    /* Enabling list 4 costs VRAM only — an OPB lives in the PVR's own 4 MB
+     * half (pvr_buffers.c: pvr_allocate_buffers), not in main RAM. At
+     * PVR_BINSIZE_32 that is opb_sizes[4]*4 * 20*15 tiles * (1 + overflow 3) =
+     * 153,600 B per buffer set, 307,200 B total, against ~4.9 MB of free VRAM
+     * and a 4 MB texture ceiling. A zero-length bin disables the list, which is
+     * exactly what -DDC_PVR_NO_PUNCHTHRU restores. */
+    p.opb_sizes[4] = DC_PVR_PT_BINSIZE;
+#endif
     p.vertex_buf_size = DC_PVR_VERTBUF_BYTES;
     p.dma_enabled = 0;
     p.fsaa_enabled = 0;
@@ -766,11 +1292,23 @@ void dc_gx_backend_init(void) {
     pvr_set_zclip(0.0f);
     pvr_set_bg_color(0.0f, 0.0f, 0.0f);
 
+#ifndef DC_PVR_NO_PUNCHTHRU
+    PVR_SET(DC_PVR_REG_PT_ALPHA_REF, (unsigned int)(DC_PVR_PT_ALPHA_REF) & 0xFFu);
+#endif
+
     dc_pvr_texture_init();
 
+#ifdef DC_PVR_NO_PUNCHTHRU
     DC_LOGE("[DC/PVR] backend up: list=%s autosort=off vertbuf=%d B "
-            "opb=32 overflow=3\n",
+            "opb=32 overflow=3 pt=off\n",
             (DC_PVR_LIST_MODE == 1) ? "OP" : "TR", DC_PVR_VERTBUF_BYTES);
+#else
+    DC_LOGE("[DC/PVR] backend up: list=%s autosort=off vertbuf=%d B "
+            "opb=32 overflow=3 pt=on binsize=%d ref=%d buf=%d recs/%u B\n",
+            (DC_PVR_LIST_MODE == 1) ? "OP" : "TR", DC_PVR_VERTBUF_BYTES,
+            (int)DC_PVR_PT_BINSIZE, (int)DC_PVR_PT_ALPHA_REF,
+            (int)DC_PVR_PT_BUF_RECS, (unsigned int)sizeof(s_pt_buf));
+#endif
 }
 
 void dc_gx_backend_shutdown(void) {
@@ -784,9 +1322,41 @@ void dc_gx_backend_frame_begin(void) {
     if (!dc_pvr_ready) return;
 
     pvr_wait_ready();
+#ifndef DC_PVR_NO_FOG
+    /* Between pvr_wait_ready() and pvr_scene_begin() is the only point in the
+     * frame with no render in flight. KOS pvr_fog.c: "You should only call
+     * these functions outside of the pvr_scene_begin, pvr_scene_finish. If you
+     * call to change fog parameters while the pvr is rendering the scene you
+     * will get artifacts in the image." */
+    fog_program();
+#ifdef DC_PVR_FOG_LOG
+    /* ask=0 means the game never asked for fog at all — that is the single
+     * question this diagnostic exists to answer. hw=1 means the table is
+     * programmed; batches is how many batches wanted fog in the last frame. */
+    if ((s_frames % (unsigned int)(DC_PVR_FOG_LOG)) == 0)
+        DC_LOGE("[FOG] frame=%u ask=%d hw=%d batches=%u start=%.2f end=%.2f "
+                "rgb=%.2f,%.2f,%.2f progs=%u\n",
+                s_frames, s_fog_pend, s_fog_hw, s_fog_batches,
+                (double)s_fog_hw_start, (double)s_fog_hw_end,
+                (double)s_fog_hw_col[0], (double)s_fog_hw_col[1],
+                (double)s_fog_hw_col[2], s_fog_programs);
+    s_fog_batches = 0;
+#endif
+#endif
     pvr_scene_begin();
     s_scene_open = 1;
     s_list_open = 0;
+#ifndef DC_PVR_NO_PUNCHTHRU
+    /* Re-assert the threshold every frame. It is one uncached 32-bit store and
+     * the register is global, undocumented in KOS, and written by nobody else
+     * in this build — but "nobody else" is an assumption about every library in
+     * the image, and a silently reset PT_ALPHA_REF would present as cutouts
+     * losing their holes again, i.e. as this whole fix having been reverted. */
+    PVR_SET(DC_PVR_REG_PT_ALPHA_REF, (unsigned int)(DC_PVR_PT_ALPHA_REF) & 0xFFu);
+    s_pt_n = 0;
+    s_pt_route = 0;
+    s_pt_trunc = 0;
+#endif
     /* The header cache cannot survive a scene boundary: the TA latches state
      * per list, and a new list starts with nothing latched. */
     s_hdr_valid = 0;
@@ -819,12 +1389,50 @@ void dc_gx_backend_frame_end(void) {
     /* Open the list even if nothing was drawn: KOS submits a blank one to
      * satisfy the hardware, and skipping it leaves the TA waiting. */
     if (!s_list_open) {
-        pvr_list_begin((DC_PVR_LIST_MODE == 1) ? PVR_LIST_OP_POLY
-                                               : PVR_LIST_TR_POLY);
+        pvr_list_begin(DC_PVR_BASE_LIST);
         s_list_open = 1;
     }
     pvr_list_finish();
     s_list_open = 0;
+
+#ifndef DC_PVR_NO_PUNCHTHRU
+    /* THE REPLAY. The general list is closed, so list 4 is now the only one
+     * that may still be opened this frame (lists must be submitted in strictly
+     * increasing order; PT is last). The buffer already holds a valid
+     * header/vertex command stream in submission order, so this is a straight
+     * copy — no state is recompiled and no geometry is re-derived.
+     *
+     * Skipping the open when the buffer is empty is safe: pvr_scene_finish()
+     * submits a blank poly header for every enabled-but-unused list
+     * (pvr_scene.c), which is exactly what an empty PT list needs. */
+    if (s_pt_n) {
+        unsigned int i;
+        pvr_list_begin(PVR_LIST_PT_POLY);
+        for (i = 0; i < s_pt_n; i++)
+            pvr_prim(&s_pt_buf[i], 32);
+        pvr_list_finish();
+        s_pt_recs += s_pt_n;
+        if (s_pt_n > s_pt_hi) s_pt_hi = s_pt_n;
+        s_pt_n = 0;
+    }
+    /* Say it ONCE, loudly, the first time it happens. The periodic [DC/PVR]
+     * line carries ptdrop= forever after, but a full buffer means cutouts are
+     * silently absent from the screen — and "a model is missing" is exactly the
+     * symptom this whole change exists to stop being unattributable. The
+     * default 2048 records was sized from an ambiguous measurement (316 of 2331
+     * cutout batches, over a sample whose frame count is not recorded), so this
+     * is the line that turns the guess into a number. */
+    if (s_pt_drop && !s_pt_warned) {
+        s_pt_warned = 1;
+        DC_LOGE("[DC/PVR] PT RECORD BUFFER FULL: %u triangles dropped, cap %d "
+                "records (%u B). Cutout geometry is MISSING from the frame. "
+                "Rebuild with a larger -DDC_PVR_PT_BUF_RECS and watch pthi= "
+                "in the periodic [DC/PVR] pt line.\n",
+                s_pt_drop, (int)DC_PVR_PT_BUF_RECS,
+                (unsigned int)sizeof(s_pt_buf));
+    }
+#endif
+
     pvr_scene_finish();
     s_scene_open = 0;
 #ifdef DC_PVR_BATCH_LOG
@@ -860,14 +1468,47 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     if (count < per_prim) return;
 
     if (!s_list_open) {
-        pvr_list_begin((DC_PVR_LIST_MODE == 1) ? PVR_LIST_OP_POLY
-                                               : PVR_LIST_TR_POLY);
+        pvr_list_begin(DC_PVR_BASE_LIST);
         s_list_open = 1;
         s_hdr_valid = 0;
         s_hdr_key = 0xFFFFFFFFu;
     }
 
+    /* A draw that asks for NO texture must not get one. GXSetTevOrder's tex_map
+     * is GX_TEXMAP_NULL for the whole JSystem 2D path — J2DGrafContext::setup2D
+     * (J2DGrafContext.cpp:29-31) sets GX_PASSCLR + GX_TEXMAP_NULL +
+     * GXSetNumTexGens(0) — but this used to bind g_gx.tex_handle[0]
+     * unconditionally, and nothing ever clears that handle. Since
+     * GXPosition3f32 resets texcoord to (0,0) per vertex (dc_gx.c:654), such a
+     * pane sampled texel (0,0) of whatever emu64 happened to bind last and
+     * MODULATEALPHA multiplied it into both colour AND alpha: an opaque-black
+     * texel blacked the pane out, a zero-alpha texel made it vanish, and which
+     * one you got depended on draw order that frame. Letterbox bars, dialogue
+     * frames and fade quads all live on this path.
+     *
+     * Only GX_TEXMAP_NULL suppresses the bind. g_gx is zero-initialised, so
+     * tex_map == 0 == GX_TEXMAP0 is the "nobody called GXSetTevOrder" default
+     * and must keep its texture. Kill switch: -DDC_PVR_NO_TEXNULL. */
     tex = dc_pvr_tex_get(g_gx.tex_handle[0]);
+#ifndef DC_PVR_NO_TEXNULL
+    if (g_gx.tev_stages[0].tex_map == GX_TEXMAP_NULL) tex = NULL;
+#endif
+
+#ifndef DC_PVR_NO_PUNCHTHRU
+    /* Decide the destination list BEFORE the header is compiled or looked up:
+     * header_key() folds it in and compile_header() bakes it into the TA
+     * command word, and every submit_prim() below this line reads it. */
+    s_pt_route = pt_route_active();
+    if (s_pt_route) s_pt_batches++;
+#endif
+
+#ifndef DC_PVR_NO_FOG
+    /* Remember what this batch wants; frame_begin programs it. Must run every
+     * batch, not only on a header-key change — the fog parameters are not in
+     * the key. */
+    fog_latch();
+#endif
+
     ensure_header(tex);
 
 #ifndef DC_PVR_NO_TEVCONST
@@ -978,7 +1619,8 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     if (s_batch_log_now) {
         DC_LOG("BATCH b=%u %s n=%d verts=%d tex=%d %dx%d fmt=0x%X a=%d "
                "us=%.3f wrap=%d,%d bm=%d,%d,%d cull=%d zt=%d zf=%d zw=%d "
-               "chans=%d argb=%08X bbox=%.1f,%.1f..%.1f,%.1f z=%.5f..%.5f "
+               "chans=%d argb=%08X ac=%d/%d,%d/%d cut=%d pt=%d cu=%d,%d tm=%d,%d "
+               "st=%d t1=%d bbox=%.1f,%.1f..%.1f,%.1f z=%.5f..%.5f "
                "uv=%.2f,%.2f..%.2f,%.2f\n",
                s_batches, (per_prim == 4) ? "QUAD" : "TRI", count, s_bl_n,
                tex ? 1 : 0,
@@ -990,6 +1632,31 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                g_gx.blend_mode, g_gx.blend_src, g_gx.blend_dst,
                g_gx.cull_mode, g_gx.z_compare_enable, g_gx.z_compare_func,
                g_gx.z_update_enable, g_gx.num_chans, s_bl_argb,
+               /* ac = the alpha compare the game asked for, cut = whether we
+                * treated it as a cutout, pt = whether it went to the
+                * punch-through list (cut=1 pt=0 is a cutout the PT router
+                * declined — a blended cutout, or a colour-masked pass, or a
+                * -DDC_PVR_NO_PUNCHTHRU build), cu = colour/alpha update (a
+                * `0,1` is a pass that GX would have made invisible), tm =
+                * stage 0/1 texmap (0xFF is GX_TEXMAP_NULL), st = TEV stage
+                * count (>1 means the combine is being collapsed to stage 0). */
+               g_gx.alpha_comp0, g_gx.alpha_ref0,
+               g_gx.alpha_comp1, g_gx.alpha_ref1, alpha_test_active(),
+               pt_route_active(),
+               g_gx.color_update_enable, g_gx.alpha_update_enable,
+               g_gx.tev_stages[0].tex_map, g_gx.tev_stages[1].tex_map,
+               g_gx.num_tev_stages,
+               /* t1: is texmap1's bound texture a DIFFERENT image from
+                * texmap0's? 52 % of batches request two texmaps, but the PVR
+                * has one texture unit and this backend binds tex_handle[0]
+                * only. If t1=0 the second bind is the same tile (N64 2-cycle
+                * LOD interpolation, which the PVR does in hardware anyway and
+                * which is therefore free to drop); if t1=1 a genuinely second
+                * image is being discarded and the material really is losing a
+                * layer. This single bit decides whether multi-texture is worth
+                * a two-pass implementation. */
+               (g_gx.tex_handle[1] != 0 &&
+                g_gx.tex_handle[1] != g_gx.tex_handle[0]) ? 1 : 0,
                (double)s_bl_x0, (double)s_bl_y0, (double)s_bl_x1,
                (double)s_bl_y1, (double)s_bl_z0, (double)s_bl_z1,
                (double)s_bl_u0, (double)s_bl_v0, (double)s_bl_u1,
@@ -998,6 +1665,9 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 #endif
 
     s_batches++;
+#ifndef DC_PVR_NO_PUNCHTHRU
+    s_pt_route = 0;
+#endif
 }
 
 void dc_gx_backend_set_viewport(int x, int y, int w, int h,
@@ -1023,6 +1693,19 @@ void dc_pvr_report(void) {
             "dropped=%u unsupported_prims=%u\n",
             s_frames, s_batches, s_tris_in, s_tris_out, s_tris_clipped,
             s_tris_dropped, s_prim_unsupported);
+#ifndef DC_PVR_NO_PUNCHTHRU
+    /* Emitted next to [PERF] (dc_vi.c calls this straight after it, every 30
+     * presented frames). ptdrop MUST be 0: any other value is geometry that
+     * was transformed and then refused by the record buffer, i.e. cutouts
+     * missing from the screen, and the fix is -DDC_PVR_PT_BUF_RECS. pthi is
+     * the worst single frame's record count against the cap, which is the
+     * number to size the buffer from rather than from this comment. */
+    DC_LOGE("[DC/PVR] pt batches=%u verts=%u recs=%u pthi=%u/%d ptdrop=%u "
+            "ref=%d buf=%u B\n",
+            s_pt_batches, s_pt_verts, s_pt_recs, s_pt_hi,
+            (int)DC_PVR_PT_BUF_RECS, s_pt_drop, (int)DC_PVR_PT_ALPHA_REF,
+            (unsigned int)sizeof(s_pt_buf));
+#endif
     dc_pvr_texture_report();
 }
 
