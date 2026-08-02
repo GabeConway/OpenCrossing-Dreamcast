@@ -43,12 +43,24 @@ from the linker symbols, and its compile-time check tests
 `DC_HEAP_ADDITIVE ≤ DC_RAM_USABLE_BYTES` rather than summing every bucket (a
 sum cannot detect a double-count).
 
+Derived form, which is what the plan below is costed against:
+
+```
+usable RAM                                    16,646,144
+  − additive heap                              3,545,184
+  − .text 6,318,552 + .data 2,638,852          8,957,404
+  ────────────────────────────────────────────────────────
+  = .bss ceiling                                4,143,556
+    .bss today                                 12,415,508  → shed 8,271,952
+```
+
 `.text` + `.data` = 8,957,404 B and neither can shrink — `-O0` is mandatory, so
-`.text` can only be *relocated*. That leaves **`.bss` at ~4.14 MB maximum**
-against 12,415,508 B today: it must fall by **~67%**.
+`.text` can only be *relocated*. `.bss` must fall by **~67%**.
 
 The one lever big enough is demand-loading the 8,771,358 B of asset destination
-arrays (`kb/levers.md` L1). Nothing else is close.
+arrays (`kb/levers.md` L1) — that alone lands `.bss` at 3,644,150, under the
+ceiling. **But the pool it loads into is additive heap, so it may be at most
+~498,250 B.** That constraint drives the whole plan below.
 
 ## Boot status — failure fully explained
 
@@ -89,29 +101,99 @@ bash harness/dc/crash.sh <cdi>   # symbolise a fault
 point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`. Details:
 `BUILDING-DC.md`. Gotchas: `kb/traps.md`.
 
-## Next actions
+## Next actions — the agreed plan
 
-The gap is 8,273,108 B and one lever covers most of it. Everything below is
-downstream of picking a path — see the options writeup in the session summary
-or `kb/levers.md`.
+**User chose this sequence on 2026-08-01 (S1 → S4, in order).** Do not
+re-litigate the ordering; execute it. The reasoning behind each step is below
+so a fresh context does not have to re-derive it.
 
-1. **Implement the `pc_assets.c` runtime loader against `assets.pak`**, then
-   demand-load the 8,771,358 B of destination arrays into pooled storage.
-   Loader-only, no codegen. `kb/levers.md` L1 + L2, contract in
-   `kb/asset-pack.md`. **This is the critical path.**
-2. **Take `kb/levers.md` L3** (~4.3 MB of measured, independent `.bss`/`.data`
-   moves) — needed *in addition* to L1, since L1 alone leaves `.bss` above the
-   ~4.14 MB ceiling only if the pool is generous.
-3. **Decide the `.text` question** (`kb/levers.md` L4). MMU paging is dead, so
-   the live options are ScummVM-style code overlays, asset decimation, or
-   accepting that content must be cut. **The decimation/cuts branch is the
-   user's call, not an engineering one.**
-4. **Re-link, re-run `smoke.sh`.** Expect a *real* crash to symbolise once the
-   image fits — the first one will be informative, and it is also the first
-   test the trampoline has ever had.
+### The two findings that shaped this plan
+
+1. **`.text` overlays (`kb/levers.md` L4) are NOT needed.** The gap closes
+   without touching `.text`. L4 was previously written up as "the fork in the
+   road for the project" — that framing was wrong. Do not spend a session on
+   the ScummVM `R_SH_DIR32` loader unless the arithmetic below stops holding.
+2. **The asset pool is the binding constraint, not the arrays.** L1 removes
+   8,771,358 B of `.bss` (→ 3,644,150), but the pool it loads *into* is
+   additive heap. Solve the inequality for it: **the pool can be at most
+   ~498,250 B** unless something else also moves. That is uncomfortably tight
+   for streaming 8.9 MB of assets, which is why S3 comes before S4.
+
+### Complication to budget for in S4
+
+L1 is billed as "loader-only, no codegen". True, but it understates the work.
+The destination arrays are referenced **by address** from initialised `.data`:
+
+```c
+Vtx glider_v[0xB0 / sizeof(Vtx)];                          /* .bss dest   */
+Gfx glider_model[] = { … gsSPVertex(glider_v, 11, 0) … };  /* .data, baked ptr */
+```
+
+Pooling the storage means **fixing up every such reference at load time** —
+`dcasset`'s round trip already replays **16,365** of them, so the tool has the
+data, but the loader must apply relocations, not just `memcpy`.
+
+### The structural risk S1 exists to kill
+
+**Zero lines of this port have ever executed.** Not on hardware, not in
+Flycast. The boot failure is size alone, so `dc_main.c`'s trampoline, KOS init,
+the platform layer, the GX stubs and `dc_mem_ledger.c`'s new `MEMLEDGER FIT`
+line have never run once. Every RAM estimate assumes a platform layer nobody
+has observed working. If S4 lands after a week and *then* the trampoline turns
+out to be broken, the two failures are tangled and hard to attribute.
+
+---
+
+### S1. Stub the assets and BOOT IT. ⭐ Start here.
+
+Build a **throwaway** image with the destination arrays sized `[1]`: a
+`DC_ASSET_STUB` build mode that rewrites generator output into a scratch tree.
+**No `src/` edits, nothing committed to the real tree** — `src/data/**/*.c` is
+output of `pc/tools/gen_runtime_assets.py`, so regenerating small is a
+*generator* change, legal under the `-O0` rule.
+
+`.bss` → ~3,644,150, under the 4,143,556 ceiling with ~500 KB spare. **The
+image fits and should boot.**
+
+The game renders garbage the moment it touches an asset. That is expected and
+fine. What S1 buys is the first execution of the trampoline, KOS init, the
+console path, `MEMLEDGER FIT`, and `crash.sh` symbolising a real fault —
+surfacing every platform-layer bug *now*, separately from the loader.
+
+Cost: small. Buys: the largest available reduction in unknown-unknowns, plus
+the first end-to-end validation of the harness. Throwaway once S4 lands.
+
+### S2. Measure L6 — generator table dedup.
+
+`src/data` is generator output; hashing table contents and aliasing duplicates
+in `gen_runtime_assets.py` is a generator change, not codegen. **Nobody has
+looked.** Could be 0, could be megabytes.
+
+Cost: small — a host-side hash pass over the generated tables gives the number
+without changing the build. Worth doing purely because the answer is cheap and
+currently unknown.
+
+### S3. Bank the independent savings — `kb/levers.md` L3, ~4.3 MB.
+
+Six measured, mutually independent moves. Does **not** close the gap alone
+(still ~3.97 MB over), but it is what turns S4's ~498 KB pool into a
+comfortable ~4.8 MB one. Genuinely parallelizable; each item is separable and
+independently measurable. Low risk — relocations of known-size objects.
+
+### S4. Build the loader — `kb/levers.md` L1 + L2.
+
+`pc_assets.c` against `assets.pak`, with relocation fixups for the 16,365
+references. Contract: `kb/asset-pack.md`. The biggest single piece of work left
+in the project, now attempted against a platform layer that S1 proved runs and
+with a pool S3 made generous.
+
+---
 
 **Be honest in reporting.** "Still N MB short with `-O0` mandatory" is a valid
-and important result.
+and important result. If the levers do not close the gap, cutting content
+(`kb/levers.md` L5 — the user's call, not engineering's) or declaring a
+stock-16 MB build infeasible are the honest options; quietly reopening the
+optimization question is not.
 
 ## Standing constraints
 

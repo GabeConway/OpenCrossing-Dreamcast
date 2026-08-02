@@ -4,7 +4,17 @@ Every way found so far to close the RAM gap, with status. **Read this before
 planning any size work.** Read `kb/closed.md` before *proposing* any — several
 obvious ideas are already dead.
 
-Current gap: **8,273,108 B** over. See `kb/STATE.md` for the inequality.
+Current gap: **8,273,108 B** over; the `.bss` ceiling is **4,143,556 B** against
+12,415,508 today. See `kb/STATE.md` for the inequality and **for the agreed
+S1–S4 execution order** — this file is the ledger, that file is the plan.
+
+Two results that reorder this list, both derived in `kb/STATE.md`:
+
+- **L4 (`.text` overlays) is NOT needed.** The gap closes without touching
+  `.text`. Earlier docs called it "the fork in the road"; that was wrong.
+- **L1's pool is the binding constraint.** L1 lands `.bss` at 3,644,150, but
+  the pool it loads into is additive heap and may be at most ~498,250 B unless
+  L3 also lands. L1 alone is not really sufficient.
 
 Only **layout** levers are legal. `-O0` is a user directive, so anything that
 changes instruction selection is banned:
@@ -128,14 +138,18 @@ From `kb/research-size-reduction.md`, measured against the real ELF + map:
 | `dc_gx` | −0.24 MB |
 | emu64 `texture_buffer_data` → VRAM | partly taken in A2 |
 
-## L4. `.text` relocation — the open architectural question
+## L4. `.text` relocation — NOT NEEDED. Do not start this.
 
 `-O0` is mandatory, so `.text` (6,318,552 B) cannot shrink; it can only move.
-MMU paging is **DEAD** (`kb/closed.md`). What survives:
+MMU paging is **DEAD** (`kb/closed.md`). The surviving mechanism would be
+**ScummVM-style code overlays** — a real, shipping SH-4 `R_SH_DIR32` ELF loader
+(`backends/platform/dc/dcloader.cpp` + `plugin.x`, in production since 0.7.0).
 
-- **ScummVM-style code overlays.** A real, shipping SH-4 `R_SH_DIR32` ELF
-  loader — `backends/platform/dc/dcloader.cpp` + `plugin.x`, in production
-  since 0.7.0. Not yet costed for this codebase.
+**But the arithmetic says it is unnecessary:** L1 + L3 close the gap with
+`.text` untouched. Earlier docs framed this as "the fork in the road for the
+project" — that was wrong, and acting on it would be a large piece of work for
+no required byte. Revisit **only** if L1 or L3 come in materially under their
+measured estimates.
 
 ## L5. Offline asset decimation — not costed. **User's call, not engineering's.**
 
