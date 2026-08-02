@@ -84,6 +84,13 @@
  *   -DDC_PVR_PT_BUF_RECS    deferred PT records, 32 B each (default 2048)
  *   -DDC_PVR_NO_TEVCONST_ALPHA  do not rescue the TEV constant ALPHA term
  *                           (leaves the speaker name and replies invisible)
+ *   -DDC_PVR_NO_TEVCONST_ALPHA_MIRROR  match only the (ZERO,const,TEXA,ZERO)
+ *                           spelling, not the 17x more common mirrored one
+ *   -DDC_PVR_TEVCONST_ALPHA_LODONLY  narrow the mirror to PRIM_LOD_FRAC (A0):
+ *                           134 sites instead of 688, enough for the train
+ *                           window's day/night shine on its own
+ *   -DDC_PVR_NO_TEVCONST_COLOR_A  do not accept a flat constant colour written
+ *                           in the `a` slot rather than `d` (5 sites)
  *   -DDC_PVR_NO_FOG         no hardware fog; byte-identical to pre-fog output
  *   -DDC_PVR_FOG_LOG=<N>    one fog state line every Nth frame
  */
@@ -714,23 +721,41 @@ static int tev_creg_of(int arg) {
 static int tev_const_color(float* out) {
     const DCGXTevStage* ts;
     int creg;
+    int arg;
 
     if (g_gx.num_tev_stages < 1)
         return 0;
     ts = &g_gx.tev_stages[0];
 
-    if (ts->color_a != GX_CC_ZERO || ts->color_b != GX_CC_ZERO ||
-        ts->color_c != GX_CC_ZERO)
+    /* Two spellings of the same flat colour. GX evaluates d + (1-c)*a + c*b,
+     * so with b = c = ZERO both `d = <const>, a = ZERO` and
+     * `a = <const>, d = ZERO` are exactly <const>. emu64 emits the second for
+     * rom_train_out_shineglass_modelT (emu64.c:1777 — the train window's
+     * shine, whose colour is the sun+ambient light colour PRIM) and for
+     * act_ant / act_bee (emu64.c:1901). 5 sites in src/ in total.
+     * Kill switch: -DDC_PVR_NO_TEVCONST_COLOR_A. */
+    if (ts->color_b != GX_CC_ZERO || ts->color_c != GX_CC_ZERO)
         return 0;
+    if (ts->color_a == GX_CC_ZERO) {
+        arg = ts->color_d;
+    }
+#ifndef DC_PVR_NO_TEVCONST_COLOR_A
+    else if (ts->color_d == GX_CC_ZERO) {
+        arg = ts->color_a;
+    }
+#endif
+    else {
+        return 0;
+    }
 
-    creg = tev_creg_of(ts->color_d);
+    creg = tev_creg_of(arg);
     if (creg >= 0) {
         out[0] = g_gx.tev_colors[creg][0];
         out[1] = g_gx.tev_colors[creg][1];
         out[2] = g_gx.tev_colors[creg][2];
         return 1;
     }
-    if (ts->color_d == GX_CC_KONST) {
+    if (arg == GX_CC_KONST) {
         int k = ts->k_color_sel;          /* GX_TEV_KCSEL_K0..K3 are 0xC..0xF */
         if (k < 0xC || k > 0xF) return 0;
         k -= 0xC;
@@ -793,25 +818,88 @@ static int tev_const_color(float* out) {
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
 static int tev_const_alpha(float* out) {
     const DCGXTevStage* ts;
+    int konst;
 
     if (g_gx.num_tev_stages < 1)
         return 0;
     ts = &g_gx.tev_stages[0];
 
-    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_c != GX_CA_TEXA ||
-        ts->alpha_d != GX_CA_ZERO)
+    /* --- THE MIRRORED FORM, 2026-08-02: the train window's shine ----------
+     *
+     * The RDP alpha cycle is (a - b) * c + d, so `TEXEL0.a * PRIM.a` can be
+     * written either way round, and this game writes it BOTH ways.
+     * combine_auto moves the N64 `a` term into GX's `b` slot and the N64 `c`
+     * term into GX's `c` slot (emu64.c:1226-1230), so the two spellings do
+     * NOT collapse:
+     *
+     *   N64 (PRIMITIVE, 0, TEXEL0, 0) -> GX (ZERO, A1,   TEXA, ZERO)   40 sites
+     *   N64 (TEXEL0, 0, PRIMITIVE, 0) -> GX (ZERO, TEXA, A1,   ZERO)  688 sites
+     *
+     * The original shape recognised only the first, which is why it fired on
+     * the font and almost nowhere else. The second is 17x more common and it
+     * carries the train window's day/night gate.
+     *
+     * (Counted semantically: every gsDPSetCombineLERP in src/ pushed through
+     * emu64's real combine_auto tables and its 33 combine_manual cases, then
+     * matched at GX stage 0 — which is what this function actually tests. An
+     * earlier note in kb/RESUME.md said "446", but that was a raw text grep
+     * for `PRIMITIVE, 0, TEXEL0, 0` which also hits COLOUR slots.)
+     *
+     * rom_train_out_shineglass_modelT (rom_train_out.c:114-116), the literal
+     * "shine on the glass", is
+     *     gsDPSetCombineLERP(0,0,0,PRIMITIVE, TEXEL0,0,TEXEL1,0,
+     *                        0,0,0,COMBINED,  COMBINED,0,PRIM_LOD_FRAC,0)
+     * and combine_manual (emu64.c:1775-1786) turns it into
+     *     stage0 alpha = (ZERO, TEXA,  A0,   ZERO) = TEXEL0.a * PRIM_LOD_FRAC
+     *     stage1 alpha = (ZERO, APREV, TEXA, ZERO) =           * TEXEL1.a
+     * PRIM_LOD_FRAC is GX_CA_A0 = GX_TEVREG0.a, which emu64 loads out of
+     * fill_tev_color (emu64.c:3238) whose .a is gsDPSetPrimColor's `l` field
+     * (emu64.c:4377). The actor writes window->lod_factor there
+     * (ac_train_window.c:534), and lod_factor IS the time of day: 0 before
+     * 04:00, ramping to 160/255 at noon, back to 0 by 20:00
+     * (ac_train_window.c:279-289).
+     *
+     * Dropping it made the glare permanent. rom_train_out_v[32..47], decoded
+     * out of the retail foresta.rel, carry cn.a = 178 and 88, so
+     * MODULATEALPHA drew the shine at a fixed 70 % / 35 % of its texel alpha
+     * day AND night. shineglass has no gsDPSetRenderMode of its own — it
+     * inherits ZB_XLU_SURF2 from bgtree — so it is a plain alpha-blended XLU
+     * quad over a flat constant colour: its alpha is the whole of its
+     * appearance.
+     *
+     * Kill switch for the mirror alone: -DDC_PVR_NO_TEVCONST_ALPHA_MIRROR.
+     * -DDC_PVR_TEVCONST_ALPHA_LODONLY narrows it to PRIM_LOD_FRAC (GX_CA_A0),
+     * 134 of the 688, which is enough for the window on its own. */
+    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_d != GX_CA_ZERO)
         return 0;
+
+    /* One of b/c is the texel, the other is the constant. If both are TEXA
+     * the first arm takes it and konst == GX_CA_TEXA falls through to 0. */
+    if (ts->alpha_c == GX_CA_TEXA) {
+        konst = ts->alpha_b;
+    }
+#ifndef DC_PVR_NO_TEVCONST_ALPHA_MIRROR
+    else if (ts->alpha_b == GX_CA_TEXA) {
+        konst = ts->alpha_c;
+#ifdef DC_PVR_TEVCONST_ALPHA_LODONLY
+        if (konst != GX_CA_A0) return 0;
+#endif
+    }
+#endif
+    else {
+        return 0;
+    }
 
     /* GX_CA_A0/A1/A2 are 1/2/3 and index tev_colors[] directly: [0] is
      * GX_TEVPREV, [1..3] are GX_TEVREG0..2. emu64 parks the N64 primitive
      * colour in GX_TEVREG1 and the environment colour in GX_TEVREG2
      * (emu64.c:3171,3180), so a PRIMITIVE alpha arg lands on tev_colors[2][3]
      * — the alpha gDPSetPrimColor set. */
-    if (ts->alpha_b >= GX_CA_A0 && ts->alpha_b <= GX_CA_A2) {
-        *out = g_gx.tev_colors[ts->alpha_b][3];
+    if (konst >= GX_CA_A0 && konst <= GX_CA_A2) {
+        *out = g_gx.tev_colors[konst][3];
         return 1;
     }
-    if (ts->alpha_b == GX_CA_KONST) {
+    if (konst == GX_CA_KONST) {
         int k = ts->k_alpha_sel;   /* GX_TEV_KASEL_K0_A..K3_A are 0x1C..0x1F */
         if (k < 0x1C || k > 0x1F) return 0;
         *out = g_gx.tev_k_colors[k - 0x1C][3];
@@ -1759,7 +1847,21 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
              * that are currently fully invisible. Use it to separate "the font
              * came back" from "hundreds of world batches changed alpha" in one
              * build, without giving up the fix. */
+            /* ⚠️ NEVER on a punch-through batch. The PT block above forces the
+             * vertex alpha opaque so the comparator sees the texel alpha
+             * alone; letting a constant land here afterwards would put a
+             * product back in front of the 144 threshold and re-delete any
+             * cutout whose constant alpha is below ~0.56 — which is exactly
+             * the train door that was just recovered. GX really did test the
+             * product, but this backend has already, deliberately, stopped
+             * doing that for PT (see the block above); doing it by halves is
+             * worse than either. Blended/opaque batches are unaffected, and
+             * the train window's shine is XLU, so the fix this guard protects
+             * still lands where it is needed. */
             if (have_tevalpha
+#ifndef DC_PVR_NO_PUNCHTHRU
+                && !s_pt_route
+#endif
 #ifdef DC_PVR_TEVCONST_ALPHA_RESCUE_ONLY
                 && (cv[k].argb & 0xFF000000u) == 0u
 #endif
