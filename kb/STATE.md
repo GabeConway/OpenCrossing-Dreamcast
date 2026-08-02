@@ -16,39 +16,58 @@ not yet known to be viable.**
 - **The harness works and is verified against real CDIs**, not asserted.
 - **The image is 21,374,996 B** (text 6,318,568 / data 2,638,852 / bss
   12,415,508), ending at `0x8d472814`.
-- **The image budget is 8,035,072 B**, so **13,339,924 B must still be shed.**
+- **The image budget is 10,306,464 B** (corrected — see below), so
+  **~11,068,532 B must still be shed.**
 
 ## The one paragraph that matters
 
-`.text` (6,318,568) + `.data` (2,638,852) = **8,957,420 B, which already
-exceeds the 8,035,072 B budget with `.bss` at exactly zero.** Subtracting
-`.text` alone leaves **1,716,504 B for all of `.data` + `.bss` combined**;
-they are 15,054,360 B today. Every plan written so far targets `.bss`, and
-**even deleting all of `.bss` does not make the image fit.** Since `-O0` is
-mandatory, `.text` cannot shrink — it can only be *relocated*.
+`.text` (6,318,568) + `.data` (2,638,852) = **8,957,420 B.** Against the
+corrected image budget of 10,306,464 B that leaves **1,349,044 B of headroom
+for all of `.bss`** — which is 12,415,508 B today. Every plan written so far
+targets `.bss`, and `.bss` must shrink by **89%** for the image to fit. Since
+`-O0` is mandatory, `.text` cannot shrink; it can only be relocated, and the
+only mechanism for that (MMU paging) came back **DEAD** — see below.
 
-So viability rests on two unanswered questions:
+**Required cut: ~11,068,532 B** (was reported as 14,451,476; see the budget
+correction below for why that was wrong in kind, not just magnitude).
 
-1. **Is the 7.61 MB heap budget real?** Bucket 6 is 4 MB that was **never
-   measured** — `jsyswrap.cpp:547` sets the game heap to
-   `JKRHeap_getFreeSize(systemHeap) - 0x10000`, i.e. the port hands the game
-   whatever is left rather than sizing to need. If the true peak is 1.5 MB,
-   the image budget grows by ~2.5 MB. **Cheapest possible win in the project.**
-2. **Can `.text` leave RAM?** Only two candidate mechanisms: SH-4 MMU demand
-   paging (KOS supports it — see below) or ScummVM-style code overlays.
+## Budget corrected — ~3.4 MB found, none of it by shrinking anything
 
-Research on both was in flight when the session ended; see "Unfinished" below.
+`kb/research-budget-premises.md` re-derived the budget and found the old one
+**double-counted**: three "heap buckets" are not heap at all — they are `.bss`
+already inside the image — and a fourth counts bytes twice.
 
-## Why the budget is what it is
+| Input | Claimed | Corrected | Why |
+|---|---:|---:|---|
+| KOS baseline | −1,000,000 | **−262,144** | KOS/newlib/libstdc++ are *inside* our ELF (304,829 B in the map); only ~151 KB is additive |
+| Bucket 9 audio | −700,000 | **−0** | not heap — `jaudio_NES` is 1,265,101 B of `.bss`, already in the image |
+| Bucket 10 disc I/O | −384,000 | **−0** | not heap — `dc_dvd.c.o` `.bss` is 13,320 B; no read-ahead ring exists yet |
+| Bucket 11 PVR staging | −384,000 | **−0** | not heap — `g_gx` is 334,764 B of `.bss` in `dc_gx.c.o` |
+| Bucket 12 stacks | −131,072 | −65,536 | KOS's 64 KB kernel stack was already subtracted |
+| **image budget** | **8,035,072** | **10,306,464** | |
 
-**KOS's `mm_sbrk()` starts at the ELF `end` symbol. No MMU by default, no lazy
+State the fit as one inequality rather than two pools — splitting it is what
+caused the error:
+
+```
+(image span) + (genuinely additive heap) ≤ 16,646,144
+  image span today  21,374,996   (0x8c010000 → _end 0x8d472814)
+  additive heap      4,839,680   (KOS 262,144 + arena 4,000,000
+                                  + ARAM window 512,000 + threads 65,536)
+  ⇒ over by          9,568,532
+```
+
+Bucket 6 (the 4,000,000 B `__osMalloc` arena) is **still unmeasured**, but
+**≥1,294,497 B of it is provably dead** — remove the dead XFB/FIFO allocations
+and the required cut falls to **9,774,035 B**.
+
+## Why `.bss` is not free
+
+**KOS's `mm_sbrk()` starts at the ELF `end` symbol. No MMU is enabled, no lazy
 commit. Every `.bss` byte literally destroys a heap byte.** This is the fact
 the whole size problem turns on, and it is why compression and debug-stripping
 are worth exactly zero (`.bss` is `NOBITS` — there is nothing in the file to
 compress).
-
-Budget = 16 MB − 7.61 MB heap (`dc/include/dc_mem_budget.h` buckets 6–12) −
-~1 MB KOS = 8,035,072 B. Both subtrahends are unverified; see question 1.
 
 ## Standing constraint — the `-O0` directive
 
@@ -67,7 +86,7 @@ optimization as a size or speed lever; that argument has been had and retired.
 | `-O1/-O2/-Os`, LTO, `-mrelax` | yes | **no** |
 | `.bss` right-sizing, arena sizing | no | yes |
 | Moving data/code to `/cd`, demand loading | no | yes |
-| Linker script placement, overlays, MMU paging | no | yes |
+| Linker script placement, code overlays | no | yes (MMU paging is DEAD — see below) |
 | Offline asset conversion / decimation | no | yes |
 
 ## Boot status — failure fully explained
@@ -95,10 +114,21 @@ merely not implicated.
    yet implemented.** Confirmed to the byte by *three* independent methods
    (`mem-budget.md` §2 symbol attribution, the asset agent's loader replay, the
    build agent's `nm -S` sweep). These are `#ifdef TARGET_PC` placeholder
-   arrays that `pc_assets.c` fills eagerly at boot — **scaffolding the PC port
-   added**, not something the game needs; the GameCube original read straight
-   from the REL. Fix is demand-loading into pooled storage: a **loader-only
-   change, no codegen**. Everything else is a rounding error next to this.
+   arrays that `pc_assets.c` fills eagerly at boot. Fix is demand-loading into
+   pooled storage: a **loader-only change, no codegen**. Everything else is a
+   rounding error next to this.
+
+   ⚠️ **Correction to an earlier framing.** This session claimed the 8.5 MB was
+   "free PC scaffolding" that would vanish by reverting to the GameCube path.
+   `kb/research-budget-premises.md` §6.2 says that is **probably FALSE as a RAM
+   lever**: under the non-`TARGET_PC` branch those arrays become *initialised*
+   data — the same resident bytes moved from `.bss` to `.data`, plus disc bytes.
+   On a no-MMU sbrk machine that is neutral at best. It may still be true as a
+   description of history. **The saving comes from demand-loading, not from
+   flipping the define.** Also unverified: whether `src/data/**/assets/*.inc`
+   even exist in the repo — a partial check suggested **only 4 `.inc` files
+   exist repo-wide**, which if true means the non-`TARGET_PC` branch does not
+   build at all and reverting is not an available option. One `ls` settles it.
 2. **Resident REL blob — 16.56 MB peak. SOLVED, tool built and verified.**
    `dcasset pack` emits `assets.pak` (8,917,568 B) + a 51,104 B resident index,
    replacing the resident `foresta.rel` + `main.dol` (16,558,776 B). Round trip
@@ -172,36 +202,41 @@ merely not implicated.
   `sys_matrix.c`, overlap-safe `Jac_bcopy` in `sample.c`). `-DTARGET_DC` is
   added *alongside* it for genuinely DC-only branches.
 
-## Unfinished — three research agents were stopped mid-flight
+## Research that landed at the end of this session
 
-Each was told to dump partial findings before stopping. **Check whether these
-files exist and what state they are in — they may be complete, partial, or
-absent:**
+All three agents hit the session limit. Two wrote their documents; the third
+was salvaged from its scratchpad by the main thread.
 
-- `kb/research-mmu-paging.md` — **the SH-4 has an MMU and KOS supports it.**
-  Verified present in our image:
-  `/opt/toolchains/dc/kos/kernel/arch/dreamcast/include/arch/mmu.h` exposes a
-  two-level sparse page table, `mmu_page_map`, `mmu_page_map_static`, and
-  crucially **`mmu_map_set_callback()`** — a fault-handler hook returning a
-  `mmupage_t*` for a faulting virtual page, i.e. demand paging. KOS's own
-  header text: *"a few very interesting things that this functionality could be
-  used for (like mapping large files into memory that wouldn't otherwise
-  fit)"*. `kb/research-size-reduction.md`'s "no MMU" is true of KOS's default
-  config, **false of the hardware.** Open: is the fault path complete enough;
-  page size (64 UTLB × 4 KB = only 256 KB reach, but SH-4 supports 64 KB and
-  1 MB pages); TLB-miss cost at 200 MHz; whether store queues and PVR DMA
-  survive MMU-on; **and whether Flycast emulates the UTLB at all** — if it does
-  not, we cannot iterate in the emulator and that alone may be decisive.
-- `kb/research-second-tier-memory.md` — VRAM (8 MB, maybe ~4 MB spare) and
-  AICA (2 MB, ~40 MB/s over G2) reconsidered as a *paging backing store* rather
-  than as addressable memory, which is the framing that dodges the
-  disqualification above. CD-R at ~500 KB/s is ~8 ms per 4 KB page and is
-  almost certainly unusable as primary swap. A benchmark source
-  (`bench_mem2.c`) for the missing SH-4↔VRAM bandwidth figure was being written
-  — **check whether it was ever actually run before trusting any number.**
-- `kb/research-budget-premises.md` — bucket 6 (see question 1 above), an audit
-  of `dc_mem_budget.h` buckets 6–12, the real KOS+GLdc baseline, and a `.data`
-  vs `.rodata` audit.
+- **`kb/research-mmu-paging.md` — VERDICT: DEAD.** Read it before ever
+  reconsidering MMU paging. The killer: **the MMU cannot create memory, and we
+  have no backing store to page against.** On SH-4 the entire 29-bit physical
+  space is already directly addressable with the MMU off via P1/P2, so the MMU
+  buys only protection (don't need it) and oversubscription against a backing
+  store (don't have one). The only store big enough for 8.5 MB is the CD-R at
+  ~500 KB/s: one 4 KB page is **8.19 ms of transfer against a 33.3 ms frame
+  budget — 24.6% of a frame per fault** — while the fault mechanism itself
+  costs ~1.5–2.5 µs. **The backing store costs ~4,000× the fault.** And the
+  comparison that settles it: `assets.pak` already pages the same bytes off the
+  same CD, but at asset granularity, in load order, pre-swapped, with zero
+  seeks — MMU paging would replace that with 4 KB faults at arbitrary
+  instruction boundaries with no prefetch, batching, or load-order knowledge.
+  *A strictly worse implementation of something the project is already
+  building.* Four secondary findings each sink it independently: KOS's dynamic
+  mapper forces every paged page **uncached**; TLB reach is 253,952 B against
+  8.6 MB; KOS has **no eviction path at all**; and MMU-on makes store queues
+  fault-prone on SH7750 silicon.
+- **`kb/research-budget-premises.md`** — the corrected budget above. Two of six
+  questions only partly answered; its §6 lists exactly what is missing and how
+  to finish it. **Read §6 before starting any budget work.**
+- **`kb/research-second-tier-memory.md` — salvaged fragment, not a real doc.**
+  The agent died before writing. Recovered: a complete but **never-compiled,
+  never-run** benchmark at `harness/dc/bench/bench_mem.c` that probes every
+  main-RAM↔VRAM and main-RAM↔AICA path in both directions with checksum
+  verification; plus uncited community bandwidth figures (SQ→RAM 495 MB/s,
+  cacheline read+writeback 223.5 MB/s). **No VRAM *read* figure** — the
+  original gap is still open. Now low priority: with MMU paging dead, VRAM and
+  AICA are only interesting as destinations for specific buffers
+  (`texture_buffer_data`, audio), not as general storage.
 
 ## Traps already paid for — do not re-discover these
 
