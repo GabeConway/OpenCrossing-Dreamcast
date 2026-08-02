@@ -751,17 +751,56 @@ void dc_pvr_report(void) {
  * speaks this protocol; nothing in the game build emitted it until now:
  *
  *   MARK:FRAME <n>
+ *   FBSRC <which surface> addr=<where>
+ *   FBNONZERO <lit pixels> of 307200
  *   FBHASH <fnv1a-32 over the whole front buffer>
  *   FBTHUMB 16x12 <base64 RGB565>
  *
- * The hash is the regression signal (byte-identical across runs, so a hex
- * string can be checked in as a golden). The 16x12 thumbnail is the part a
- * human — or I — can actually read: it is enough to tell "black", "sky above
- * grass" and "logo on dark" apart, for ~256 chars instead of a 614 KB dump.
+ * FBNONZERO is the assertion; the hash is only the regression golden
+ * (byte-identical across runs, so a hex string can be checked in) and cannot
+ * on its own tell "black" from "reading the wrong surface" — kb/traps.md. The
+ * 16x12 thumbnail is the part a human — or I — can actually read: enough to
+ * tell "black", "sky above grass" and "logo on dark" apart, for ~256 chars
+ * instead of a 614 KB dump.
  *
  * Reading 614,400 B back out of VRAM is slow, which is exactly why this is
  * gated and periodic rather than per-frame. DC_FB_PROBE is the interval in
  * frames; 0 (the default) compiles it out.
+ *
+ * ==========================================================================
+ * THE ANSWER, MEASURED 2026-08-02 — READ THIS BEFORE DEBUGGING A BLACK PROBE
+ * ==========================================================================
+ * This probe reported FBNONZERO 0 for two sessions while a human could see
+ * the title logo, and three wrong explanations were tried before the right
+ * one. All of them were addressing theories, and all of them were wrong:
+ *
+ *   - "nothing is drawn"              — the renderer census said otherwise
+ *   - "vram_s is the wrong offset"    — true but not sufficient; the display
+ *                                       scans out from PVR_FB_R_SOF1, and
+ *                                       reading there was still 0
+ *   - "the SOF registers are in the
+ *      64-bit aperture's terms"       — no. KOS's own vid_set_start() writes
+ *                                       FB_R_SOF1 and sets vram_s to
+ *                                       0xa5000000|base from the same value,
+ *                                       so A5 + SOF1 was right all along
+ *
+ * The answer is that **Flycast's hardware renderer never writes the rendered
+ * frame back into emulated VRAM**, and the guest was reading real, writable,
+ * genuinely empty memory. Two measurements settle it and both are produced by
+ * this function in a single run:
+ *
+ *   FBWTEST — writes a pattern into each candidate aperture and reads it
+ *             back. All four SOF-derived apertures returned writable=1, so
+ *             "the probe is reading a hole" is dead.
+ *   FBMAP32 / FBMAP64 — 8 MB of VRAM as one density character per 64 KB.
+ *             Without --fb-writeback the only nonzero blocks in either
+ *             aperture are the guest's own texture uploads; the ten blocks
+ *             the framebuffer occupies are empty. With --fb-writeback those
+ *             ten blocks light up and A5+SOF1 reads 13,711 of 307,200.
+ *
+ * So `harness/dc/smoke.sh --fb-writeback` is REQUIRED for this probe, not an
+ * optimisation. It costs frame rate (Flycast has to emulate the framebuffer),
+ * which is why it stays opt-in rather than being on for every run.
  */
 #ifndef DC_FB_PROBE
 #define DC_FB_PROBE 0
@@ -771,10 +810,156 @@ void dc_pvr_report(void) {
 static const char s_b64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/* The PVR's memory-mapped register block. Only the display/framebuffer
+ * registers are used here; KOS does not expose them all. */
+#define DC_PVR_REG(off) (*(volatile unsigned int*)(0xA05F8000u + (off)))
+#define DC_FB_R_CTRL       DC_PVR_REG(0x044)  /* pixel depth, enable, vclk    */
+#define DC_FB_W_CTRL       DC_PVR_REG(0x048)  /* format the TA renders into   */
+#define DC_FB_W_LINESTRIDE DC_PVR_REG(0x04C)  /* render-target stride / 8     */
+#define DC_FB_R_SOF1       DC_PVR_REG(0x050)  /* scanout base, odd field      */
+#define DC_FB_R_SOF2       DC_PVR_REG(0x054)  /* scanout base, even field     */
+#define DC_FB_R_SIZE       DC_PVR_REG(0x05C)  /* x words-1 | y lines-1 | mod  */
+#define DC_FB_W_SOF1       DC_PVR_REG(0x060)  /* where the PVR WRITES, field 1*/
+#define DC_FB_W_SOF2       DC_PVR_REG(0x064)
+
+/* The two windows onto the same 8 MB of VRAM. 0xA5000000 is the 32-bit
+ * sequential area (bank 0 then bank 1); 0xA4000000 is the 64-bit
+ * bank-interleaved area. Which one the SOF registers are expressed in is
+ * exactly what this probe is here to settle, so both are tried. */
+#define DC_VRAM32 0xA5000000u
+#define DC_VRAM64 0xA4000000u
+#define DC_VRAM_BYTES (8u * 1024u * 1024u)
+
+#define DC_FB_PIXELS ((unsigned int)(DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT))
+#define DC_FB_BYTES  (DC_FB_PIXELS * 2u)
+
+/* Return `window + off` only if a whole 640x480x16 frame fits inside VRAM
+ * from there. A candidate that would read off the end of the aperture is not
+ * a candidate; reading it would fault or alias and neither is informative. */
+static const unsigned short* dc_fb_at(unsigned int window, unsigned int off) {
+    off &= ~3u;
+    if (off > DC_VRAM_BYTES || off + DC_FB_BYTES > DC_VRAM_BYTES) return 0;
+    return (const unsigned short*)(window + off);
+}
+
+/* Same guard for a pointer KOS handed us rather than one we computed. A bogus
+ * pvr_get_front_buffer() must be reported as out-of-range, not dereferenced —
+ * an unhandled TLB miss here would look like a renderer crash. */
+static const unsigned short* dc_fb_ptr(const void* p) {
+    unsigned int a = (unsigned int)(unsigned long)p;
+    if ((a & 0xFF000000u) == DC_VRAM32) return dc_fb_at(DC_VRAM32, a - DC_VRAM32);
+    if ((a & 0xFF000000u) == DC_VRAM64) return dc_fb_at(DC_VRAM64, a - DC_VRAM64);
+    return 0;
+}
+
+/* One pass over a candidate surface: FNV-1a over every 16-bit word (stride 1
+ * — sampling would make the hash blind to exactly the small sprites this is
+ * meant to catch) plus the nonzero-pixel population count.
+ *
+ * The count is the assertion and the hash is only the golden. kb/traps.md:
+ * "a framebuffer HASH is not a framebuffer TEST". */
+static unsigned int dc_fb_scan(const unsigned short* fb, unsigned int* hash_out) {
+    unsigned int hash = 2166136261u;
+    unsigned int nonzero = 0;
+    unsigned int i;
+
+    for (i = 0; i < DC_FB_PIXELS; i++) {
+        unsigned short px = fb[i];
+        hash = (hash ^ (px & 0xFF)) * 16777619u;
+        hash = (hash ^ (px >> 8)) * 16777619u;
+        if (px) nonzero++;
+    }
+    *hash_out = hash;
+    return nonzero;
+}
+
+/* 8 MB of VRAM as 128 characters, one per 64 KB block, through ONE window.
+ *
+ * The previous sweep printed only a hot/not count and the first four hot
+ * block indices, and that was not enough to act on: a framebuffer is a *run*
+ * of ~10 consecutive DENSE blocks (614,400 B / 65,536), while an uploaded
+ * texture is one or two blocks that are mostly zero. A density character per
+ * block separates those by eye in one line:
+ *
+ *   '.' = every word zero      '0' = nonzero but under 10% of words
+ *   '1'..'9' = 10%..90% dense  '#' = every word nonzero
+ *
+ * So the framebuffer, wherever it is and whichever window it is visible
+ * through, shows up as a contiguous smear of digits. */
+static void dc_fb_map(const char* tag, unsigned int window) {
+    const unsigned int* vram = (const unsigned int*)window;
+    const unsigned int block_words = 65536u / 4u;
+    const unsigned int blocks = DC_VRAM_BYTES / 65536u;
+    char map[129];
+    unsigned int b, w, hot = 0;
+
+    for (b = 0; b < blocks; b++) {
+        const unsigned int* p = vram + b * block_words;
+        unsigned int n = 0;
+        for (w = 0; w < block_words; w++)
+            if (p[w]) n++;
+        if (n) hot++;
+        map[b] = (n == 0)              ? '.'
+               : (n >= block_words)    ? '#'
+               : (char)('0' + (n * 10u / block_words));
+    }
+    map[blocks] = '\0';
+    DC_LOGE("FBMAP%s hot=%u/%u %s\n", tag, hot, blocks, map);
+}
+
+/* Is this address real, writable VRAM at all?
+ *
+ * Without this, a zero read has two causes that need opposite fixes — "the
+ * probe is pointed at the wrong place" and "the place is right but the
+ * emulator never writes the rendered frame back into it" — and no amount of
+ * re-reading distinguishes them. Writing a pattern and reading it back does:
+ * a successful round-trip proves the aperture is live memory, so a zero read
+ * there is the emulator's silence, not our arithmetic.
+ *
+ * Eight pixels in the top-left corner, restored immediately. If the surface
+ * is the one being scanned out this is a single-frame red speck in the
+ * corner, which is harmless and, on a human-watched run, is itself a
+ * confirmation that the address is the visible one. */
+static int dc_fb_write_test(const unsigned short* fb) {
+    volatile unsigned short* p = (volatile unsigned short*)fb;
+    unsigned short save[8];
+    int k, ok = 1;
+
+    for (k = 0; k < 8; k++) save[k] = p[k];
+    for (k = 0; k < 8; k++) p[k] = (unsigned short)(0xF800u | (unsigned)k);
+    for (k = 0; k < 8; k++)
+        if (p[k] != (unsigned short)(0xF800u | (unsigned)k)) ok = 0;
+    for (k = 0; k < 8; k++) p[k] = save[k];
+    return ok;
+}
+
 void dc_pvr_fb_probe(void) {
     static unsigned int probe_no = 0;
+    /* Once a surface has produced a nonzero frame the aperture question is
+     * answered, and re-answering it costs ten 614,400 B scans plus two 8 MB
+     * sweeps per probe. So the full diagnostic runs only while the answer is
+     * unknown — the first probe, and any later probe whose surface has gone
+     * black again (which is itself the signal that something moved). */
+    static int s_settled = 0;
+    static int s_src = 0;
+    int full;
+    /* Candidate surfaces, in the order they are reported. Ten of them because
+     * ten hypotheses were live at once and a run costs a build plus two
+     * minutes of a machine whose window steals focus: scanning them all costs
+     * ten passes over 614,400 B and settles in ONE run which — if any — the
+     * guest can actually read. See kb/STATE.md 2026-08-02. */
+    enum { DC_FB_NCAND = 10 };
+    static const char* const cand_name[DC_FB_NCAND] = {
+        "A5+R  ", "A4+R  ", "A4+2R ", "A5+2R ", "A5+W  ",
+        "A4+2W ", "A5+0  ", "A4+0  ", "KOSFRNT", "KOSBACK"
+    };
+    const unsigned short* cand[DC_FB_NCAND];
+    unsigned int cand_nz[DC_FB_NCAND];
+    unsigned int cand_hash[DC_FB_NCAND];
+    unsigned int rsof1, rsof2, wsof1;
+    int best = -1;
     const unsigned short* fb;
-    unsigned int hash = 2166136261u;
+    unsigned int hash = 0;
     unsigned short thumb[16 * 12];
     unsigned char raw[16 * 12 * 2];
     char out[((16 * 12 * 2 + 2) / 3) * 4 + 1];
@@ -792,41 +977,210 @@ void dc_pvr_fb_probe(void) {
 
     /* ASK THE HARDWARE WHERE IT IS SCANNING OUT FROM. Do not assume.
      *
-     * MEASURED 2026-08-02, and this cost two wrong conclusions before the
-     * sweep below settled it. `pvr_get_front_buffer()` and `vram_s` both read
-     * all-zero while the window showed the title logo, which was read first as
-     * "nothing is drawn" (wrong — the renderer census said otherwise) and then
-     * as "Flycast never writes back" (also wrong). The truth is simpler:
-     * pvr_init() allocates its own buffers inside VRAM and programs the
-     * display controller to scan out from them, so the framebuffer is nowhere
-     * near the base of VRAM. PVR_FB_R_SOF1 read 0x000E7480 — 947,840 bytes in
-     * — while this probe was reading offset 0.
+     * MEASURED 2026-08-02. `vram_s` is the base of VRAM and is NOT the
+     * displayed surface once pvr_init() has run: the PVR allocates its own
+     * buffers inside VRAM and programs the display controller at them.
+     * PVR_FB_R_SOF1 read 0x000E7480 — 947,840 bytes in — and page-flips to
+     * 0x004E7480 and back, while this probe was reading offset 0. Reading
+     * SOF1 was necessary; it was not sufficient (see the header block:
+     * Flycast also has to be told to write frames back at all).
      *
-     * SOF1 is the odd-field / progressive base; on the interlaced 640x480
-     * mode this port sets up, SOF2 is the even field one line further on.
-     * Hashing from SOF1 is what the display is showing. */
-    {
-        volatile unsigned int* sof1_reg = (volatile unsigned int*)0xA05F8050u;
-        unsigned int off = *sof1_reg & 0x00FFFFFCu;
-        fb = (const unsigned short*)(0xA5000000u + off);
+     * SOF1 is the odd-field / progressive base; SOF2 is one line further on,
+     * so both fields live in the same 640x480 buffer. FB_W_SOF1 is a separate
+     * register: it is where the PVR *renders*, which need not be the surface
+     * being displayed this instant, and is the other place a finished frame
+     * can be found. Both are reported.
+     *
+     * WHY THERE IS A `2 *` HERE. Read from the KOS 2.3 source in the SDK
+     * image, not guessed:
+     *
+     *   pvr_misc.c:pvr_sync_view()  -> vid_set_start(frame_buffers[i].frame)
+     *   video.c:vid_set_start(base) -> PVR_SET(PVR_FB_ADDR, base);
+     *                                  vram_s = (uint16_t*)(PVR_RAM_BASE|base)
+     *
+     * so FB_R_SOF1 is a byte offset in the 32-bit *sequential* aperture
+     * (PVR_RAM_BASE = 0xa5000000), and `A5 + SOF1` is the textbook-correct
+     * read. But pvr_misc.c:pvr_get_frame_buffer() returns
+     *
+     *   (pvr_ptr_t)(addr * 2 + PVR_RAM_BASE)
+     *
+     * with the comment "convert its address to make it addressable from the
+     * 64-bit memory" — the doubling is the 32-bit-offset -> 64-bit-offset
+     * conversion for bank 0, but the base added is the 32-BIT one. Either KOS
+     * has an off-by-one-aperture bug there or the doubling means something
+     * else; both readings are cheap to test, so both `A4 + 2*SOF1` (the
+     * doubling applied to the interleaved aperture, which is what the comment
+     * describes) and `A5 + 2*SOF1` (verbatim what KOS returns) are candidates.
+     *
+     * VERDICT, 2026-08-02: neither doubled candidate ever carried a frame, and
+     * once the display's own second buffer is in use (SOF1 = 0x004E7480) both
+     * of them fall off the end of the 8 MB aperture entirely — which is itself
+     * evidence that pvr_get_front_buffer() cannot be trusted as a framebuffer
+     * address. `A5 + SOF1` is the correct read and is what FBSRC reports. The
+     * candidates are kept because they cost one pass each on the first probe
+     * only, and because "we checked" is worth more in a log than in a
+     * comment. */
+    rsof1 = DC_FB_R_SOF1;
+    rsof2 = DC_FB_R_SOF2;
+    wsof1 = DC_FB_W_SOF1;
+
+    cand[0] = dc_fb_at(DC_VRAM32, rsof1);
+    cand[1] = dc_fb_at(DC_VRAM64, rsof1);
+    cand[2] = dc_fb_at(DC_VRAM64, rsof1 * 2u);
+    cand[3] = dc_fb_at(DC_VRAM32, rsof1 * 2u);
+    cand[4] = dc_fb_at(DC_VRAM32, wsof1);
+    cand[5] = dc_fb_at(DC_VRAM64, wsof1 * 2u);
+    cand[6] = dc_fb_at(DC_VRAM32, 0);
+    cand[7] = dc_fb_at(DC_VRAM64, 0);
+    cand[8] = dc_fb_ptr(pvr_get_front_buffer());
+    cand[9] = dc_fb_ptr(pvr_get_back_buffer());
+
+    for (i = 0; i < DC_FB_NCAND; i++) { cand_nz[i] = 0; cand_hash[i] = 0; }
+
+    /* Bounded, not "until it works". MEASURED: a run without
+     * `--fb-writeback` never settles, and an unbounded full diagnostic then
+     * costs ten 614,400 B scans plus two 8 MB sweeps on EVERY probe forever —
+     * which halves the frame rate of the very run whose frame rate is being
+     * reported, and buries the console in identical maps. Three probes is
+     * enough to see the aperture picture twice and watch it not change. */
+    full = !s_settled && probe_no < 3u;
+
+    if (!s_settled && probe_no == 3u)
+        DC_LOGE("FBPROBE giving up on the aperture sweep: no surface has "
+                "produced a pixel in 3 probes, and every candidate was "
+                "writable. That is Flycast not writing frames back to VRAM, "
+                "not an address — re-run with `smoke.sh --fb-writeback`.\n");
+
+    if (!full) {
+        /* Settled: one scan of the surface that has been producing pixels.
+         * The index is what is remembered, not the address, because the two
+         * page-flipped buffers swap every frame and cand[] is rebuilt from
+         * the live registers each time. */
+        best = s_src;
+        if (!cand[best]) { full = 1; s_settled = 0; }
+        else cand_nz[best] = dc_fb_scan(cand[best], &cand_hash[best]);
     }
-    if (!fb) return;
+
+    if (full) {
+        /* Registers first, raw. Decoding them host-side beats guessing at
+         * their meaning in guest code: FB_R_CTRL bits 3:2 are the display
+         * depth (1 = RGB565) and FB_R_SIZE packs x words-1 | y lines-1 |
+         * modulus, so a frame that is not 640x480x16 is visible in the log
+         * rather than silently mis-strided by this probe.
+         *
+         * MEASURED 2026-08-02: rctl=00000005 (enabled, RGB565),
+         * rsize=1413bd3f (x=320 32-bit words = 640 px, y=239+1 = 240 lines
+         * per field, modulus 321 = one line skipped between them, i.e. an
+         * interlaced 640x480), and rsof1 alternating 000e7480 / 004e7480 as
+         * KOS page-flips. So the assumed 640x480x16 geometry is correct and
+         * this probe's flat 640*480 read of SOF1 sees both fields. */
+        DC_LOGE("FBREGS rctl=%08x rsize=%08x rsof1=%08x rsof2=%08x "
+                "wctl=%08x wstride=%08x wsof1=%08x wsof2=%08x "
+                "kosfront=%08x kosback=%08x\n",
+                DC_FB_R_CTRL, DC_FB_R_SIZE, rsof1, rsof2,
+                DC_FB_W_CTRL, DC_FB_W_LINESTRIDE, wsof1, DC_FB_W_SOF2,
+                (unsigned int)(unsigned long)pvr_get_front_buffer(),
+                (unsigned int)(unsigned long)pvr_get_back_buffer());
+
+        for (i = 0; i < DC_FB_NCAND; i++) {
+            int dup = -1;
+            if (!cand[i]) {
+                DC_LOGE("FBCAND %s addr=--------  (out of range)\n",
+                        cand_name[i]);
+                continue;
+            }
+            for (o = 0; o < i; o++)
+                if (cand[o] == cand[i]) { dup = o; break; }
+            if (dup >= 0) {
+                cand_nz[i] = cand_nz[dup];
+                cand_hash[i] = cand_hash[dup];
+            } else {
+                cand_nz[i] = dc_fb_scan(cand[i], &cand_hash[i]);
+            }
+            DC_LOGE("FBCAND %s addr=%08x nz=%u of %u hash=%08x%s\n",
+                    cand_name[i], (unsigned int)(unsigned long)cand[i],
+                    cand_nz[i], DC_FB_PIXELS, cand_hash[i],
+                    dup >= 0 ? " (same as an earlier candidate)" : "");
+        }
+
+        /* WHICH SURFACE TO REPORT. Not "whichever scored highest" — that
+         * heuristic misfired the first time it ran: on a probe taken before
+         * any frame had been written back, A4+0 scored 18 nonzero pixels (a
+         * corner of the guest's own texture pool, read as if it were a frame)
+         * and beat the real framebuffer's 0, so FBSRC and FBHASH changed
+         * surface between probes of the same run and the golden was worthless.
+         *
+         * A5+R is the surface the display controller is scanning out. It is
+         * the answer by definition, and FBWTEST proves it is live memory, so
+         * report it unless another candidate is not merely larger but plainly
+         * a DIFFERENT SURFACE: at least 1/64 of the frame lit and at least 8x
+         * A5+R's count. That bar is far above any texture-pool false positive
+         * and far below a real frame (measured: 13,711 of 307,200 at the
+         * title screen). */
+        best = cand[0] ? 0 : -1;
+        for (i = 0; i < DC_FB_NCAND; i++) {
+            if (!cand[i]) continue;
+            if (best < 0) { best = i; continue; }
+            if (cand_nz[i] >= DC_FB_PIXELS / 64u &&
+                cand_nz[i] > cand_nz[best] * 8u)
+                best = i;
+        }
+
+        /* The two block maps. If a run of dense blocks appears in FBMAP64 and
+         * not in FBMAP32, the SOF registers are in 64-bit-area terms and the
+         * window was the bug; if it appears in FBMAP32 at a block the
+         * candidates do not cover, the offset is the bug; if neither map
+         * shows a dense run at all, nothing ever wrote a frame into VRAM and
+         * the fix is not addressing at all. One run, three verdicts.
+         *
+         * MEASURED 2026-08-02 — this is what settled N2. Without
+         * `--fb-writeback` the ONLY nonzero blocks in all 8 MB, through either
+         * aperture, are the guest's own texture uploads (FBMAP32 blocks 0,
+         * 12, 14, 23-26, mirrored at +64 because Flycast's 32-bit aperture
+         * repeats every 4 MB); the ten blocks the framebuffer occupies are
+         * '.' throughout. With `--fb-writeback` blocks 20-23 light up and
+         * A5+R reads 13,711 nonzero pixels. So the black frame was never an
+         * addressing bug: Flycast's hardware renderer simply does not write
+         * the rendered frame back into emulated VRAM unless asked to. */
+        dc_fb_map("32", DC_VRAM32);
+        dc_fb_map("64", DC_VRAM64);
+
+        /* Round-trip the four SOF-derived apertures. All four came back
+         * writable=1, which is what turned "the probe is reading a hole" from
+         * a live hypothesis into a dead one. */
+        for (i = 0; i < 4; i++)
+            if (cand[i])
+                DC_LOGE("FBWTEST %s writable=%d\n", cand_name[i],
+                        dc_fb_write_test(cand[i]));
+    }
+
+    /* Report the winner through the unchanged MARK:FRAME / FBNONZERO /
+     * FBHASH / FBTHUMB protocol that harness/dc/screenshot.sh already parses,
+     * plus FBSRC so a golden hash is never compared across two different
+     * source surfaces. With every candidate at zero this still emits, from
+     * A5+R, so "all black" remains a reportable result rather than silence. */
+    if (best < 0 || !cand[best]) { s_settled = 0; return; }
+    fb = cand[best];
+    nonzero = cand_nz[best];
+    hash = cand_hash[best];
+    /* A surface that produced pixels is the surface; one that has gone black
+     * re-opens the question on the next probe rather than reporting a
+     * confident zero forever. */
+    s_settled = (nonzero > 0);
+    s_src = best;
 
     memset(acc_r, 0, sizeof(acc_r));
     memset(acc_g, 0, sizeof(acc_g));
     memset(acc_b, 0, sizeof(acc_b));
 
-    /* One pass does all three jobs: FNV-1a over the 16-bit words (stride 1 —
-     * sampling would make the hash blind to exactly the small sprites this is
-     * meant to catch), the nonzero-pixel count, and the box filter. */
+    /* Box filter only — the hash and the population count already came from
+     * dc_fb_scan() over the same surface, and recomputing the hash here once
+     * cost a second full pass for a number that must agree by construction. */
     for (y = 0; y < DC_SCREEN_HEIGHT; y++) {
         unsigned int cell_row = (unsigned int)(y * 12 / DC_SCREEN_HEIGHT) * 16u;
         for (x = 0; x < DC_SCREEN_WIDTH; x++) {
             unsigned short px = fb[y * DC_SCREEN_WIDTH + x];
             unsigned int c = cell_row + (unsigned int)(x * 16 / DC_SCREEN_WIDTH);
-            hash = (hash ^ (px & 0xFF)) * 16777619u;
-            hash = (hash ^ (px >> 8)) * 16777619u;
-            if (px) nonzero++;
             acc_r[c] += (px >> 11) & 0x1F;
             acc_g[c] += (px >> 5) & 0x3F;
             acc_b[c] += px & 0x1F;
@@ -852,53 +1206,14 @@ void dc_pvr_fb_probe(void) {
     }
     out[o] = '\0';
 
-    /* VRAM SWEEP — the diagnostic that tells us WHOSE bug a black frame is.
-     *
-     * MEASURED 2026-08-02: with Flycast's full framebuffer emulation on, the
-     * guest still read 0 of 307,200 nonzero pixels at vram_s while the window
-     * showed the logo. Two explanations survive that — the guest is reading
-     * the wrong surface, or the emulator never writes any surface back — and
-     * they have opposite fixes, so guessing is expensive.
-     *
-     * This separates them. PVR_FB_R_SOF1/SOF2 (0xA05F8050/54) are the display
-     * controller's scanout base registers: whatever the hardware is actually
-     * showing starts there. Sweeping all 8 MB of VRAM in 64 KB blocks then
-     * says whether ANY of it is nonzero. All-zero VRAM plus a visible window
-     * means the emulator is compositing somewhere the guest cannot see;
-     * nonzero blocks away from vram_s mean the probe is simply looking in the
-     * wrong place, and the block index says where to look instead. */
-    {
-        volatile unsigned int* sof1 = (volatile unsigned int*)0xA05F8050u;
-        volatile unsigned int* sof2 = (volatile unsigned int*)0xA05F8054u;
-        const unsigned int* vram = (const unsigned int*)0xA5000000u;
-        const unsigned int block_words = 65536u / 4u;
-        unsigned int blocks = (8u * 1024u * 1024u) / 65536u;
-        unsigned int b, w, hot = 0, first[4];
-        int nfirst = 0;
-
-        for (b = 0; b < blocks; b++) {
-            const unsigned int* p = vram + (unsigned int)b * block_words;
-            for (w = 0; w < block_words; w++) {
-                if (p[w]) {
-                    hot++;
-                    if (nfirst < 4) first[nfirst++] = b;
-                    break;
-                }
-            }
-        }
-        DC_LOGE("FBSWEEP sof1=%08x sof2=%08x hot_blocks=%u/%u first=%u,%u,%u,%u\n",
-                *sof1, *sof2, hot, blocks,
-                nfirst > 0 ? first[0] : 0u, nfirst > 1 ? first[1] : 0u,
-                nfirst > 2 ? first[2] : 0u, nfirst > 3 ? first[3] : 0u);
-    }
-
     DC_LOGE("MARK:FRAME %u\n", probe_no++);
+    DC_LOGE("FBSRC %s addr=%08x\n", cand_name[best],
+            (unsigned int)(unsigned long)fb);
     /* The count is the part a script can assert on without decoding anything:
      * "0 of 307200" is a black frame, full stop, and any other number means
      * the guest can see its own output. The hash alone cannot distinguish
      * "black" from "the probe is reading the wrong surface". */
-    DC_LOGE("FBNONZERO %u of %u\n", nonzero,
-            (unsigned)(DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT));
+    DC_LOGE("FBNONZERO %u of %u\n", nonzero, DC_FB_PIXELS);
     DC_LOGE("FBHASH %08x\n", hash);
     DC_LOGE("FBTHUMB 16x12 %s\n", out);
 }

@@ -116,17 +116,35 @@ for those see `kb/closed.md`.
   framebuffer works now"; adding `FBNONZERO <n> of 307200` showed n = 0 every
   time. Any probe that reports a digest must report a population count next to
   it, or the digest will eventually be mistaken for content.
-- **`config:rend.EmulateFramebuffer=yes` (`smoke.sh --fb-writeback`) does NOT
-  by itself make the guest see pixels.** Turning on Flycast's full framebuffer
-  emulation left `FBNONZERO` at 0 while the window plainly showed the title
-  logo. It costs 24.8 → 16.8 FPS. Keep it opt-in and do not treat it as the
-  fix; `FBSWEEP` (scanout registers + an 8 MB VRAM sweep) is the diagnostic
-  that actually attributes the black frame.
+- **`config:rend.EmulateFramebuffer=yes` (`smoke.sh --fb-writeback`) is
+  REQUIRED for any guest-side framebuffer read in Flycast.** ⚠️ This bullet
+  previously said the opposite — that the flag "does NOT by itself make the
+  guest see pixels" — and that was **falsified 2026-08-02** by an A/B on one
+  image: without it every candidate surface reads `0 of 307200`; with it,
+  `13711 of 307200`. The earlier negative was reached by reading the wrong
+  address *and* omitting the flag, so neither variable was isolated.
+  Its frame-rate cost is **unmeasured**: the old "24.8 → 16.8 FPS" did not
+  reproduce (25.0 with, 16.5 without) and no controlled pair exists, because
+  every run dies at a different point in the title demo.
+- **Flycast's 32-bit VRAM aperture repeats every 4 MB.** A sweep of all 8 MB
+  therefore reports each block twice, at N and N+64. That mirroring is what
+  cross-checks a 32-bit block index against its 64-bit counterpart (×2), and
+  it will otherwise read as twice as much resident data as exists.
 - **`vram_s` is not the displayed surface once `pvr_init()` has run.** The PVR
   allocates its own buffers inside VRAM and programs the display controller at
   them: `PVR_FB_R_SOF1` (0xA05F8050) read **0x000E7480**, i.e. 947,840 bytes
   in, while the probe was hashing offset 0. Read the scanout register; never
-  assume the framebuffer is at the base of VRAM.
+  assume the framebuffer is at the base of VRAM. `SOF1` page-flips between
+  `0x000e7480` and `0x004e7480`.
+- **KOS's `pvr_get_front_buffer()` is not a usable framebuffer address.** It
+  returns `addr * 2 + PVR_RAM_BASE`, mixing a 64-bit-area offset with the
+  32-bit-area base; on the second buffer it points off the end of VRAM
+  entirely. Use `0xA5000000 + FB_R_SOF1`.
+- **"Hot VRAM blocks" are not evidence of a rendered frame.** A sweep that
+  flags a 64 KB block on one nonzero word counts the guest's own texture
+  uploads. An earlier reading of "hot blocks grow 3 → 12 → 20 over a run" as
+  writeback was exactly this mistake; the ten blocks the framebuffer occupies
+  were empty the whole time.
 - **A 16×12 thumbnail must box-filter, not point-sample.** The title logo
   covers a few per cent of a 640×480 frame, so a grid of 192 single pixels can
   report an all-black thumb off a frame that is not black. `dc_pvr_fb_probe()`

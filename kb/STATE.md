@@ -135,7 +135,6 @@ believing its numbers; P7's did not reproduce exactly.
 
 | worktree | task | owns |
 |---|---|---|
-| `agent-a3b073c5f8580cec4` | N2, the framebuffer probe | `dc/src/dc_pvr.c`, `harness/**` |
 | `agent-a7f2880fe06b3a5f7` | the vertex/model working-set census | `dc/src/dc_gx.c`, `dc_asset_census.c`, `census_resolve.py` |
 | `agent-af1b1ce21d43307e6` | VMU save — `CARD*` backend | `dc/src/dc_card.c`, `tools/savebench/**`, `kb/save-*.md` |
 | `agent-ab7b5a9310ecbe98d` | ARAM disc-backed LRU (PLAN §3.1) | `dc/src/dc_aram.c`, `dc_dvd.c` |
@@ -175,15 +174,25 @@ symbols, 111,136 B — see "Latest measurements" above). Two follow-ups, in orde
    111 KB of textures fits trivially; the models will not, and *that* boundary
    is the S4 pool-sizing measurement N1 was always after.
 
-### N2. STILL OPEN, one step from done. [blocks all unattended visual work]
+### N2. ✅ DONE 2026-08-02 — the unattended visual gate works.
 
-Attributed, not fixed. VRAM holds content (20 of 128 blocks by the end of a
-run) and the display scans out from offset 947,840, so the old `vram_s` read
-was looking at the wrong place — but `0xA5000000 + SOF1` still reads zero.
-Next: try the 64-bit VRAM window `0xA4000000 + SOF1`, and hash the hot blocks
-`FBSWEEP` names (12, 14, 20, 23) to locate the image directly. Fallback is
-`pvr_scene_begin_txr()` into a guest-owned texture. Full evidence in
-`kb/state-log.md`. **One build and one run should close it.**
+```bash
+bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --fb-golden 25789d43
+```
+
+`fb_saw_pixels` and `fb_golden` come back in the JSON. The golden is the stub
+title screen at `DC_ARAM_WINDOW=851968 DC_ARENA_BYTES=1900000`;
+`FBNONZERO 13711 of 307200`, reproduced across four runs. The decoded 16×12
+thumbnail shows two centred text bands in the lower third over black — "PRESS
+START" above the copyright line, which is what a human reported seeing.
+
+**`--fb-writeback` is required, not optional**, and my earlier note in this file
+saying otherwise was wrong: without it every candidate surface reads zero, with
+it the scanout surface reads real pixels. `0xA5000000 + FB_R_SOF1` was the right
+address all along; the 64-bit-aperture hypothesis was wrong and Flycast's
+32-bit aperture merely mirrors every block at +4 MB. The frame-rate cost of the
+flag is **unmeasured** — the old 24.8 → 16.8 FPS did not reproduce and no
+controlled pair exists.
 
 ### N3. Correct the TEV mapping. [the logo renders; is it renders *right*?]
 

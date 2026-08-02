@@ -59,10 +59,16 @@ void dc_pvr_texture_report(void);
  * Safe to call before the backend is up. */
 void dc_pvr_report(void);
 
-/* Emit MARK:FRAME / FBHASH / FBTHUMB for the current front buffer, the
- * protocol harness/dc/screenshot.sh already parses. Compiled out unless
- * -DDC_FB_PROBE=<interval in frames>. This is how the port is verified with
- * nobody watching the emulator window — see the long comment in dc_pvr.c. */
+/* Emit MARK:FRAME / FBSRC / FBNONZERO / FBHASH / FBTHUMB for the surface the
+ * display controller is scanning out — the protocol harness/dc/screenshot.sh
+ * already parses. Compiled out unless -DDC_FB_PROBE=<interval in frames>.
+ * This is how the port is verified with nobody watching the emulator window.
+ *
+ * ⚠️ IT NEEDS `harness/dc/smoke.sh --fb-writeback`. Flycast's hardware
+ * renderer does not write the rendered frame back into emulated VRAM, so
+ * without that flag every probe correctly reports FBNONZERO 0 while the
+ * window plainly shows the title screen. MEASURED 2026-08-02, both ways, on
+ * one image; see the comment block in dc_pvr.c for the full attribution. */
 void dc_pvr_fb_probe(void);
 
 /* Non-zero once pvr_init() has succeeded. dc_pvr_texture.c must refuse to

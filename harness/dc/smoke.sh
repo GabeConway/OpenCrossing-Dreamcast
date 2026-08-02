@@ -13,6 +13,8 @@
 #   ./smoke.sh IMG --expect 'MARK:TITLE_UP' # extra required console line (repeatable)
 #   ./smoke.sh IMG --fb-writeback           # VRAM framebuffer emulation, so a
 #                                           # DC_FB_PROBE build can see pixels
+#   ./smoke.sh IMG --fb-check               # ...and assert it DID see pixels
+#   ./smoke.sh IMG --fb-check --fb-golden 25789d43   # ...and that they match
 #   ./smoke.sh IMG --no-crash-triage        # don't auto-run crash.sh on a dump
 #
 # On a failure whose console contains a KOS register dump or assertion, this
@@ -33,6 +35,13 @@
 #   7. OC-DC-HARNESS-END rc=0
 #   8. zero `ASSERT fail` records
 #   9. every --expect regex matched some console line
+#  10. --fb-check only: the guest emitted FBNONZERO and at least one probe saw
+#      a nonzero pixel count. NOT the hash -- see kb/traps.md.
+#  11. --fb-golden only: some probe's FBHASH matched the given digest.
+#
+# For a game image, 3/6/7 can never hold (the game never returns), so the
+# console log is the artefact and `exited_early` is normal. 10/11 are the
+# checks that mean something on a game run: read them out of the JSON.
 #
 # The 16 MB hardware contract is enforced mechanically on every run:
 # _runner.py always passes config:Dreamcast.RamMod32MB=no. Never remove it.
@@ -69,6 +78,8 @@ RUN_DIR=""
 FAST_GDROM=1
 AUTO_CRASH=1
 FB_WRITEBACK=0
+FB_CHECK=0
+FB_GOLDEN=""
 EXPECT=()
 EXTRA=()
 
@@ -81,8 +92,10 @@ while [ $# -gt 0 ]; do
         --expect)        EXPECT+=("$2"); shift 2 ;;
         --no-crash-triage) AUTO_CRASH=0; shift ;;
         --fb-writeback)  FB_WRITEBACK=1; shift ;;
+        --fb-check)      FB_CHECK=1; FB_WRITEBACK=1; shift ;;
+        --fb-golden)     FB_GOLDEN="$2"; FB_CHECK=1; FB_WRITEBACK=1; shift 2 ;;
         -c|--config)     EXTRA+=(-c "$2"); shift 2 ;;
-        -h|--help)       sed -n '2,58p' "$0"; exit 0 ;;
+        -h|--help)       sed -n '2,65p' "$0"; exit 0 ;;
         -*)              echo "unknown arg: $1" >&2; exit 2 ;;
         *)               IMAGE="$1"; shift ;;
     esac
@@ -105,14 +118,28 @@ mkdir -p "$RUN_DIR"
 
 # --fb-writeback: make DC_FB_PROBE's guest-side screenshot actually see pixels.
 #
-# MEASURED 2026-08-02. Flycast's hardware renderer draws into a host GPU
-# surface and does NOT write the result back into emulated VRAM, so a guest
-# that reads vram_s (or pvr_get_front_buffer()) hashes an all-zero frame while
-# the window on screen plainly shows the title logo. That false negative cost a
-# debugging cycle and is written up in kb/traps.md. `rend.EmulateFramebuffer`
-# turns on full VRAM framebuffer emulation and the hashes become real and
-# frame-varying — at roughly two thirds of the frame rate (24.8 -> 16.8 FPS
-# measured), which is why it is opt-in rather than on for every run.
+# MEASURED 2026-08-02, both ways, on one image, and this is now settled.
+# Flycast's hardware renderer draws into a host GPU surface and does NOT write
+# the result back into emulated VRAM. The guest-side probe reads the address
+# the display controller is actually scanning out from (PVR_FB_R_SOF1) and
+# still sees nothing:
+#
+#   without --fb-writeback   FBNONZERO 0 of 307200      (every probe)
+#   with    --fb-writeback   FBNONZERO 13711 of 307200  (title screen)
+#
+# and the probe's own FBWTEST proves the address is live writable memory while
+# its FBMAP sweep proves the ten 64 KB blocks the framebuffer occupies are
+# empty in BOTH VRAM apertures. So this flag is REQUIRED for any DC_FB_PROBE
+# build, not an optimisation.
+#
+# It stays opt-in because framebuffer emulation is extra work for Flycast and
+# should not sit under an unrelated perf run. Its actual cost here is UNKNOWN:
+# an earlier note claimed 24.8 -> 16.8 FPS, and four runs of one image on
+# 2026-08-02 did not reproduce that (25.0 FPS with the flag, 16.5 without),
+# but every one of those runs died early at a different point in the title
+# demo with a different draw count, so none of them is a controlled
+# comparison. Do not quote a number for this until someone runs a matched
+# pair to a fixed frame count.
 if [ "$FB_WRITEBACK" -eq 1 ]; then
     EXTRA+=(-c config:rend.EmulateFramebuffer=yes)
 fi
@@ -135,11 +162,14 @@ EXPECT_FILE="$RUN_DIR/expect.txt"
 for e in ${EXPECT[@]+"${EXPECT[@]}"}; do printf '%s\n' "$e" >> "$EXPECT_FILE"; done
 
 set +e
-python3 - "$RUN_DIR/runner.json" "$EXPECT_FILE" > "$RUN_DIR/smoke.json" <<'PY'
+python3 - "$RUN_DIR/runner.json" "$EXPECT_FILE" "$FB_CHECK" "$FB_GOLDEN" \
+    > "$RUN_DIR/smoke.json" <<'PY'
 import json, re, sys
 
 d = json.load(open(sys.argv[1]))
 expects = [l.rstrip("\n") for l in open(sys.argv[2]) if l.strip()]
+fb_check = sys.argv[3] == "1"
+fb_golden = sys.argv[4]
 lines = open(d["console"]).read().splitlines() if d.get("console") else []
 rec = d.get("records", {})
 marks = {r["name"] for r in rec.get("mark", [])}
@@ -163,6 +193,28 @@ check("no_failed_asserts", not d.get("failed_asserts"),
 for e in expects:
     rx = re.compile(e)
     check("expect:%s" % e, any(rx.search(l) for l in lines))
+
+# The guest-side framebuffer probe (-DDC_FB_PROBE=<n>, dc/src/dc_pvr.c).
+# FBNONZERO is the assertion and FBHASH is only the golden: kb/traps.md, "a
+# framebuffer HASH is not a framebuffer TEST" -- bae41dc5 is the FNV-1a of
+# 614,400 zero bytes and was twice mistaken for content. So --fb-check gates on
+# the population count, and --fb-golden adds the digest on top of it, never
+# instead of it.
+fbnz = [int(m.group(1)) for m in
+        (re.match(r"^FBNONZERO\s+(\d+)\s+of\s+(\d+)$", l) for l in lines) if m]
+fbhashes = [m.group(1) for m in
+            (re.match(r"^FBHASH\s+([0-9a-f]+)$", l) for l in lines) if m]
+fbsrc = sorted({m.group(1).strip() for m in
+                (re.match(r"^FBSRC\s+(\S+)", l) for l in lines) if m})
+if fb_check:
+    check("fb_probe_ran", bool(fbnz), "%d probes" % len(fbnz))
+    check("fb_saw_pixels", any(n > 0 for n in fbnz),
+          "max nonzero=%s of 307200 (needs smoke.sh --fb-writeback: Flycast's "
+          "hw renderer does not write frames back to VRAM)"
+          % (max(fbnz) if fbnz else "none"))
+    if fb_golden:
+        check("fb_golden", fb_golden in fbhashes,
+              "want %s, saw %s" % (fb_golden, sorted(set(fbhashes))))
 
 ok = all(c["ok"] for c in checks)
 
@@ -188,6 +240,8 @@ out = {
     "perf": [r["kv"] for r in rec.get("perf", [])],
     "mem": [r["kv"] for r in rec.get("mem", [])],
     "fbhash": [r["hash"] for r in rec.get("fbhash", [])],
+    "fbnonzero": fbnz,
+    "fbsrc": fbsrc,
     "checks": checks,
     "console": d.get("console"),
     "run_dir": d.get("run_dir"),
