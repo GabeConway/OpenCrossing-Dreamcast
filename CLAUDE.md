@@ -52,10 +52,11 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 
 | order | file | why |
 |---|---|---|
-| 1 | **`kb/STATE.md`** | current numbers, boot status, next actions. Short by design. |
+| 1 | **`kb/STATE.md`** | current numbers, the fit inequality, next actions. ~200 lines, short by design. |
 | 2 | `kb/closed.md` | **read before proposing any RAM/size/architecture idea** — what is already dead, and why |
-| 3 | `kb/traps.md` | read before touching the build, harness, or prelude |
+| 3 | `kb/traps.md` | read before touching the build, harness, prelude, or instrumentation |
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
+| — | `kb/state-log.md` | only when you need the evidence behind a number in `STATE.md` |
 
 **The port draws the title screen.** A `DC_ASSET_STUB=1` + `DC_DISC_ROOT=…`
 image boots in Flycast, runs the game loop at **29.3 FPS / 98 % speed**, and
@@ -63,7 +64,7 @@ renders the Animal Crossing title overlay — "PRESS START" and the copyright
 line — through a real PowerVR backend (`dc/src/dc_pvr.c` +
 `dc_pvr_texture.c`). The town behind the logo is black because only 53,792 B
 of real assets are in that image; that is the S4 loader's job, not a renderer
-bug. Read `kb/STATE.md` **top section** before assuming anything is untested.
+bug. Read `kb/STATE.md` before assuming anything is untested.
 
 **Status (2026-08-02): M0/M1 met, M2 has first pixels, still blocked on RAM
 for a real-asset build.** All 3917 TUs compile and link for sh-elf.
@@ -71,8 +72,8 @@ for a real-asset build.** All 3917 TUs compile and link for sh-elf.
 ⚠️ **The heap is TWO pools that compete** — the arena (`__osMalloc`) and KOS
 `sbrk` (libc `malloc`) are carved from the same region. Growing the arena
 starves libc and makes the game get *less* far. The "Out of memory. Requested
-sbrk_base …" message is sbrk, not the arena. `kb/STATE.md` has the measurements;
-this cost a full debug cycle.
+sbrk_base …" message is sbrk, not the arena. `kb/heap-two-pools.md` is the rule
+and the measurements; this cost a full debug cycle.
 
 State the *image* fit as **one inequality**, never two pools; splitting it has
 already produced two wrong numbers.
@@ -85,7 +86,10 @@ already produced two wrong numbers.
 
 | file | contents |
 |---|---|
-| `kb/STATE.md` | headline numbers, the fit inequality, boot status, next actions |
+| `kb/STATE.md` | headline numbers, the fit inequality, the ranked next actions. **Short by design — start here** |
+| `kb/state-log.md` | the evidence behind those numbers: what was observed running, when, and what it cost. Newest first |
+| `kb/heap-two-pools.md` | the arena-vs-sbrk rule. **Read before touching `DC_ARENA_BYTES` / `DC_ARAM_WINDOW`** |
+| `kb/plan-stages.md` | the agreed S1→S5 RAM plan and the reasoning behind each step |
 | `kb/levers.md` | **the ranked RAM ledger** — applied cuts, and every lever still live |
 | `kb/closed.md` | settled questions: `-O0`, MMU paging (dead), `--icf`, emu64-is-not-an-emulator, strip/compress = 0 |
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
@@ -176,13 +180,15 @@ varying cwds. Full rationale for each: `kb/traps.md`.
 
 ## 5. Keeping this current
 
-`PLAN.md`, `kb/STATE.md`, `kb/levers.md`, `kb/closed.md` and `kb/traps.md` are
-the project memory. Update them as facts change — the plan is expected to be
-revised repeatedly as measurements come in.
+`PLAN.md`, `kb/STATE.md`, `kb/state-log.md`, `kb/levers.md`, `kb/closed.md` and
+`kb/traps.md` are the project memory. Update them as facts change — the plan is
+expected to be revised repeatedly as measurements come in.
 
 **When you settle something, move it:** a dead idea goes to `kb/closed.md`, a
-debugging gotcha to `kb/traps.md`, a live saving to `kb/levers.md`. `STATE.md`
-stays short. If you add a document, add a row to §3.
+debugging gotcha to `kb/traps.md`, a live saving to `kb/levers.md`, and the
+narrative of what was observed goes to `kb/state-log.md`. **`STATE.md` stays
+short** — if a section there is growing a history, that history belongs in the
+log. If you add a document, add a row to §3.
 
 ⚠️ kb docs from the first fan-out were written by agents whose adversarial
 verifiers all died: **treat their numbers as claims until verified.** Three have

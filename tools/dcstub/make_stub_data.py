@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-make_stub_data.py — build the DC_ASSET_STUB source tree (kb/STATE.md, step S1).
+make_stub_data.py — build the DC_ASSET_STUB source tree (kb/plan-stages.md, S1).
 
 WHY THIS EXISTS
 ---------------
 The Dreamcast image is over 16 MB and therefore never executes a single
 instruction: KOS's startup .bss zeroing runs off the end of physical memory
 before scif_init(), so there is not even console output to look at
-(kb/STATE.md, "Boot status"). Every RAM estimate in this project assumes a
+(kb/state-log.md, "Boot status"). Every RAM estimate in this project assumes a
 platform layer that has never been observed running.
 
 S1 breaks that deadlock cheaply: shrink the asset *destination* arrays to one
