@@ -100,6 +100,7 @@ has already produced two wrong numbers.
 | file | contents |
 |---|---|
 | `kb/levers.md` | start here for any size work |
+| `kb/ram-plan.md` | **the solution stack that closes the gap** — eight ranked moves P1–P8 with closing arithmetic, second-rank levers, experiment queue. Documentation only, nothing implemented |
 | `kb/research-budget-premises.md` | audit of the budget's premises; §2.4 is the bucket-6 measurement recipe, §6 lists what is unfinished |
 | `kb/research-size-reduction.md` | fitting in 16 MB without changing codegen — source of `kb/levers.md` L3 |
 | `kb/mem-budget.md` | the original 16 MB ledger. ⚠️ superseded in parts — its own header lists two corrections, and its `-O2`/`-Os` remedies are void |

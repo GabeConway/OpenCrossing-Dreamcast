@@ -216,6 +216,10 @@ point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`. Details:
 re-litigate the ordering; execute it. The reasoning behind each step is below
 so a fresh context does not have to re-derive it.
 
+**`kb/ram-plan.md` (2026-08-01) is the costed solution stack for S3's remainder
++ S4** — eight moves with closing arithmetic, gates, and the experiment queue.
+Execute S4 from it.
+
 ### The two findings that shaped this plan
 
 1. **`.text` overlays (`kb/levers.md` L4) are NOT needed.** The gap closes
