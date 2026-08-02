@@ -99,15 +99,40 @@ static unsigned int s_prim_unsupported;
 #include <dc/pvr.h>
 
 /* --- Viewport shadow -------------------------------------------------------
- * GXSetViewport hands us GameCube screen pixels. The PVR framebuffer is
- * 640x480 and Y-down, same as GX, so there is no flip — only a scale and
- * offset baked here so the per-vertex path is two multiply-adds. */
+ * GXSetViewport hands us GameCube screen pixels, baked here into a scale and
+ * offset so the per-vertex path is two multiply-adds.
+ *
+ * ⚠️ This comment used to say "Y-down, same as GX, so there is no flip". That
+ * is wrong about the code directly below it: emit_projected() computes
+ *     pv.y = s_vp_cy - s_vp_hh * (y * inv_w)
+ * — the NDC->screen Y negation IS there, and it is correct. Believing the
+ * comment instead of the code is what produced the inverted cull mapping that
+ * made every character render inside-out (see cull_gx_to_pvr below). */
 static float s_vp_cx = 320.0f, s_vp_cy = 240.0f;
 static float s_vp_hw = 320.0f, s_vp_hh = 240.0f;
 
 /* Set when a list is open inside the current scene. */
 static int s_scene_open;
 static int s_list_open;
+
+/* --- Per-batch state dump (-DDC_PVR_BATCH_LOG=<N>, every Nth frame) ---------
+ * Pair it with DC_FB_PROBE=<N> at the SAME N and the log lines describe the
+ * frame the screenshot captured, which is the only way to attribute a region
+ * of a decoded PNG to the state that drew it. Two questions it exists to
+ * answer, neither of which the [PERF]/[DC/PVR] counters can:
+ *   - a draw call is counted, but does its geometry land on screen at all?
+ *     (BBOX + Z)
+ *   - which blend/tex/wrap state produced a given region? (the rest)
+ * DC_LOG bypasses the dc_misc.c flood limiter, so identical-format lines are
+ * NOT collapsed and the per-batch sequence survives intact. */
+#ifdef DC_PVR_BATCH_LOG
+static int   s_batch_log_now;
+static int   s_bl_n;
+static float s_bl_x0, s_bl_y0, s_bl_x1, s_bl_y1;
+static float s_bl_z0, s_bl_z1;
+static float s_bl_u0, s_bl_v0, s_bl_u1, s_bl_v1;
+static unsigned int s_bl_argb;
+#endif
 
 /* The compiled poly header currently latched into the TA, and the state hash
  * it was compiled from. Recompiling costs ~100 cycles; comparing an int is
@@ -145,6 +170,39 @@ static int depth_gx_to_pvr(int func) {
     }
 }
 
+/* GX wrap mode -> the PVR's two separate U/V controls.
+ *
+ * The PVR splits what GX keeps in one enum. `uv_clamp` pins a coordinate at
+ * 1.0; `uv_flip` mirrors it at every unit boundary; neither set is the plain
+ * repeat GX calls GX_REPEAT, which is the hardware default. Clamp overrides
+ * flip in hardware, so the two never have to be reconciled here.
+ *
+ * ⚠️ NPOT. dc_pvr_texture.c pads a non-power-of-two source up to a POT image
+ * and hands back u_scale/v_scale < 1.0; emit_triangle scales the texcoords by
+ * them. Clamping then pins at the edge of the PADDED image, not at the edge of
+ * the real one, so a clamped NPOT texture bleeds into padding rather than
+ * repeating into it. That is strictly less wrong than before and is NOT a fix
+ * for NPOT — the real fix is to replicate the edge texel when padding.
+ *
+ * DC_PVR_NO_UVCLAMP restores the old unconditional PVR_UVCLAMP_NONE. */
+static void wrap_gx_to_pvr(int wrap_s, int wrap_t, int* clamp, int* flip) {
+#ifdef DC_PVR_NO_UVCLAMP
+    (void)wrap_s; (void)wrap_t;
+    *clamp = PVR_UVCLAMP_NONE;
+    *flip  = PVR_UVFLIP_NONE;
+#else
+    int c = PVR_UVCLAMP_NONE, f = PVR_UVFLIP_NONE;
+    /* PVR_UVCLAMP_U/_V and PVR_UVFLIP_U/_V are bit flags in the same order in
+     * both enums (V = 1, U = 2), so the two axes OR together. */
+    if (wrap_s == GX_CLAMP)       c |= PVR_UVCLAMP_U;
+    else if (wrap_s == GX_MIRROR) f |= PVR_UVFLIP_U;
+    if (wrap_t == GX_CLAMP)       c |= PVR_UVCLAMP_V;
+    else if (wrap_t == GX_MIRROR) f |= PVR_UVFLIP_V;
+    *clamp = c;
+    *flip  = f;
+#endif
+}
+
 /* GX and the PVR share the hardware quirk that a blend factor named after the
  * SOURCE colour means the DESTINATION colour when used in the source slot.
  * That makes this a straight numeric remap rather than a slot-dependent one.
@@ -164,12 +222,36 @@ static int blend_gx_to_pvr(int f) {
     }
 }
 
-/* pc_gx.c:1295 maps GX_CULL_BACK -> GL_BACK against GL's default CCW front
- * face, i.e. GX's front face is CCW in a Y-UP screen space. Our screen space
- * is Y-DOWN, which reverses the sign of every cross product, so GX-front
- * becomes CW here. Hence FRONT->CW and BACK->CCW, not the other way round.
- * If the world renders inside-out, -DDC_PVR_CULL_INVERT is the one-line test
- * before anything else gets blamed. */
+/* ⚠️ FIXED 2026-08-02, and the old reasoning is kept because it was seductive.
+ *
+ * This used to map FRONT->CW / BACK->CCW, arguing: "pc_gx.c:1295 maps
+ * GX_CULL_BACK -> GL_BACK against GL's default CCW front face, and our screen
+ * space is Y-DOWN, which reverses the sign of every cross product, so GX-front
+ * becomes CW here." **That double-counts the flip.** Both APIs name their
+ * winding modes in terms of the DISPLAYED image, so the intermediate
+ * coordinate handedness cancels; the Y negation in emit_projected is already
+ * what makes the displayed image upright.
+ *
+ * Worked, on one NDC triangle A(0,0) B(1,0) C(0,1) — visually CCW:
+ *
+ *   PC/GL   window coords (cx,cy) (cx+hw,cy) (cx,cy+hh) -> det +hw*hh
+ *           -> GL_CCW -> FRONT -> glCullFace(GL_BACK) KEEPS it
+ *   DC/PVR  screen coords (cx,cy) (cx+hw,cy) (cx,cy-hh) -> det -hw*hh
+ *           -> PVR_CULLING_CCW is "cull if negative" -> CULLED
+ *
+ * Same triangle, opposite verdict. KOS's own header is explicit:
+ * pvr_header.h:77-82, CCW = 2 "cull if counterclockwise" = cull if the
+ * determinant is negative, CW = 3 = cull if positive.
+ *
+ * SYMPTOM WHEN IT WAS WRONG, observed by a human on the train intro: every
+ * character rendered inside-out — you saw the far side of each closed mesh, so
+ * "everyone is standing backwards". The title screen looked fine throughout,
+ * which is exactly what hid it: the logo overlay draws with GX_CULL_NONE.
+ *
+ * -DDC_PVR_CULL_INVERT restores the old mapping; -DDC_PVR_NO_CULL disables
+ * culling entirely (models look right but every interior surface is overdrawn,
+ * which is how "culling is the axis" was separated from "culling is
+ * irrelevant"). */
 static int cull_gx_to_pvr(int mode) {
 #ifdef DC_PVR_NO_CULL
     (void)mode;
@@ -180,8 +262,8 @@ static int cull_gx_to_pvr(int mode) {
     cw = PVR_CULLING_CCW; ccw = PVR_CULLING_CW;
 #endif
     switch (mode) {
-        case GX_CULL_FRONT: return cw;
-        case GX_CULL_BACK:  return ccw;
+        case GX_CULL_FRONT: return ccw;
+        case GX_CULL_BACK:  return cw;
         default:            return PVR_CULLING_NONE;
     }
 #endif
@@ -268,6 +350,102 @@ static float chan_component(int ci, int is_alpha,
 }
 #endif /* !DC_PVR_NO_LIGHTING */
 
+/* --- TEV stage 0: constant colour inputs -----------------------------------
+ *
+ * `kb/tev-map.md` catalogues 101 TEV configurations and this backend
+ * implements one of them: PVR_TXRENV_MODULATEALPHA, i.e. "texel times the
+ * rasterised colour". That is the right answer whenever the stage's colour
+ * really is the raster colour. It is the WRONG answer, in a way that is
+ * invisible in the counters and obvious on screen, whenever the stage's colour
+ * is a CONSTANT — a TEV register or a konst — because the constant is then
+ * dropped and the texture's own RGB stands in for it.
+ *
+ * MEASURED 2026-08-02, the case that forced this. The opening's shade quad is
+ * `src/data/field/bg/acre/grd_player_select/grd_player_select.c:69`:
+ *
+ *     gsDPSetCombineLERP(0, 0, 0, PRIMITIVE,  0, 0, 0, TEXEL0, ...)
+ *     gsDPSetPrimColor(0, 255, 0, 0, 0, 255)          // PRIM = BLACK
+ *     gsDPLoadTextureBlock_4b_Dolphin(rom_open_shade_tex, G_IM_FMT_I, ...)
+ *
+ * — colour is (0-0)*0 + PRIMITIVE = black, alpha is TEXEL0. An I-format
+ * texture expands to (I,I,I,I) on GX, so modulating it by a WHITE vertex gave
+ * a full-screen WHITE vignette where a BLACK one belongs: 27.9 % of the frame,
+ * pure 0xFFFF. Folding the constant into the vertex colour fixes it exactly,
+ * because MODULATEALPHA then computes rgb = 0 * I = 0 and a = 255 * I = I,
+ * which is what the combiner asked for.
+ *
+ * SCOPE, deliberately narrow. Only the `a = b = c = ZERO, d = <constant>`
+ * shape is recognised — the "flat colour, texture supplies alpha" idiom. Every
+ * other configuration returns 0 and the caller keeps the existing raster path,
+ * so this cannot regress a case it does not understand. Widening it is the
+ * rest of N3.
+ *
+ * DC_PVR_NO_TEVCONST is the kill switch. */
+#ifndef DC_PVR_NO_TEVCONST
+/* Which of g_gx.tev_colors[] a colour arg names, or -1 if it is not a constant
+ * TEV register. Index order is GX_TEVPREV, GX_TEVREG0..2, matching
+ * GXSetTevColor's own `id` (dc_gx.c:1112).
+ *
+ * This is where the N64 side lands. libforest's TEV_* constants are laid out
+ * to alias GXTevColorArg exactly, which is why emu64 casts them straight
+ * across (emu64.c:1423): TEV_PRIMITIVE 4 == GX_CC_C1, TEV_ENVIRONMENT 6 ==
+ * GX_CC_C2, TEV_TEXEL0 8 == GX_CC_TEXC, TEV_SHADE 10 == GX_CC_RASC
+ * (include/libforest/gbi_extensions.h:156-167). And emu64 writes the matching
+ * registers: primitive -> GX_TEVREG1, environment -> GX_TEVREG2
+ * (emu64.c:3171,3180). So a `PRIMITIVE` combiner arg resolves to
+ * tev_colors[2], which is the colour gsDPSetPrimColor set.
+ *
+ * ⚠️ GX_CC_CPREV is DELIBERATELY absent. It is 0, and so is libforest's
+ * TEV_COMBINED (gbi_extensions.h:156) — the alias that makes the rest of the
+ * table work bites here, because `COMBINED` means "the previous cycle's
+ * result", not a constant. Accepting it would read whatever the last
+ * GXSetTevColor(GX_TEVPREV) happened to leave — usually black — and black out
+ * the ~245 `(0, 0, 0, COMBINED)` cycle-0 draws in src/data/model/. */
+static int tev_creg_of(int arg) {
+    switch (arg) {
+        case GX_CC_C0: return 1;
+        case GX_CC_C1: return 2;
+        case GX_CC_C2: return 3;
+        default:       return -1;
+    }
+}
+
+/* Non-zero if stage 0's colour is a constant, and if so writes it to out[3].
+ * GX_CC_KONST resolves through the stage's k_color_sel; only the four plain
+ * "whole konst register" selectors are handled, since the swizzling ones
+ * (GX_TEV_KCSEL_K0_R and friends) do not appear in this scene. */
+static int tev_const_color(float* out) {
+    const DCGXTevStage* ts;
+    int creg;
+
+    if (g_gx.num_tev_stages < 1)
+        return 0;
+    ts = &g_gx.tev_stages[0];
+
+    if (ts->color_a != GX_CC_ZERO || ts->color_b != GX_CC_ZERO ||
+        ts->color_c != GX_CC_ZERO)
+        return 0;
+
+    creg = tev_creg_of(ts->color_d);
+    if (creg >= 0) {
+        out[0] = g_gx.tev_colors[creg][0];
+        out[1] = g_gx.tev_colors[creg][1];
+        out[2] = g_gx.tev_colors[creg][2];
+        return 1;
+    }
+    if (ts->color_d == GX_CC_KONST) {
+        int k = ts->k_color_sel;          /* GX_TEV_KCSEL_K0..K3 are 0xC..0xF */
+        if (k < 0xC || k > 0xF) return 0;
+        k -= 0xC;
+        out[0] = g_gx.tev_k_colors[k][0];
+        out[1] = g_gx.tev_k_colors[k][1];
+        out[2] = g_gx.tev_k_colors[k][2];
+        return 1;
+    }
+    return 0;
+}
+#endif /* !DC_PVR_NO_TEVCONST */
+
 static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
                                  const float* nrm) {
 #ifdef DC_PVR_NO_LIGHTING
@@ -317,6 +495,11 @@ static unsigned int header_key(const dc_pvr_tex_t* tex) {
     if (tex) {
         k = (k * 33u) + tex->pvr_fmt;
         k = (k * 33u) + (unsigned int)(uintptr_t)tex->base;
+        /* Wrap is a property of the BIND, not the upload: two GXTexObjs can
+         * share one cached VRAM image and wrap differently, so the same `tex`
+         * pointer does NOT imply the same header. */
+        k = (k * 33u) + (unsigned int)g_gx.tex_obj_wrap_s[0];
+        k = (k * 33u) + (unsigned int)g_gx.tex_obj_wrap_t[0];
     }
     return k ? k : 1u;
 }
@@ -352,10 +535,14 @@ static void compile_header(const dc_pvr_tex_t* tex) {
     }
 
     if (tex && tex->base) {
+        int uv_clamp, uv_flip;
         /* MODULATEALPHA is px = ARGB(col) * ARGB(tex): the GX "modulate"
          * TEV config, which kb/tev-map.md shows dominating the 101 configs. */
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
-        cxt.txr.uv_clamp = PVR_UVCLAMP_NONE;
+        wrap_gx_to_pvr(g_gx.tex_obj_wrap_s[0], g_gx.tex_obj_wrap_t[0],
+                       &uv_clamp, &uv_flip);
+        cxt.txr.uv_clamp = (pvr_uv_clamp_t)uv_clamp;
+        cxt.txr.uv_flip  = (pvr_uv_flip_t)uv_flip;
         cxt.gen.alpha = true;
     }
 
@@ -395,6 +582,34 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
     pv.argb = c->argb;
     pv.oargb = 0;
     pvr_prim(&pv, sizeof(pv));
+
+#ifdef DC_PVR_BATCH_LOG
+    /* Accumulate what the TA was actually handed, not what we think it was.
+     * "Submitted" and "on screen" are different claims and the draw-call
+     * counter cannot tell them apart. */
+    if (s_batch_log_now) {
+        if (!s_bl_n) {
+            s_bl_x0 = s_bl_x1 = pv.x;
+            s_bl_y0 = s_bl_y1 = pv.y;
+            s_bl_z0 = s_bl_z1 = pv.z;
+            s_bl_u0 = s_bl_u1 = pv.u;
+            s_bl_v0 = s_bl_v1 = pv.v;
+        } else {
+            if (pv.x < s_bl_x0) s_bl_x0 = pv.x;
+            if (pv.x > s_bl_x1) s_bl_x1 = pv.x;
+            if (pv.y < s_bl_y0) s_bl_y0 = pv.y;
+            if (pv.y > s_bl_y1) s_bl_y1 = pv.y;
+            if (pv.z < s_bl_z0) s_bl_z0 = pv.z;
+            if (pv.z > s_bl_z1) s_bl_z1 = pv.z;
+            if (pv.u < s_bl_u0) s_bl_u0 = pv.u;
+            if (pv.u > s_bl_u1) s_bl_u1 = pv.u;
+            if (pv.v < s_bl_v0) s_bl_v0 = pv.v;
+            if (pv.v > s_bl_v1) s_bl_v1 = pv.v;
+        }
+        s_bl_n++;
+        s_bl_argb = pv.argb;
+    }
+#endif
 }
 
 static void lerp_vtx(ClipVtx* out, const ClipVtx* a, const ClipVtx* b, float t) {
@@ -577,6 +792,12 @@ void dc_gx_backend_frame_begin(void) {
     s_hdr_valid = 0;
     s_hdr_key = 0xFFFFFFFFu;
 
+#ifdef DC_PVR_BATCH_LOG
+    s_batch_log_now = ((s_frames % (unsigned int)(DC_PVR_BATCH_LOG)) == 0);
+    if (s_batch_log_now)
+        DC_LOG("BATCHLOG BEGIN frame=%u\n", s_frames);
+#endif
+
 #ifdef DC_PVR_DEBUG_BG
     /* Bring-up only. A black frame has two very different causes — "the PVR
      * never presented anything" and "it presented, but every polygon is black
@@ -606,6 +827,10 @@ void dc_gx_backend_frame_end(void) {
     s_list_open = 0;
     pvr_scene_finish();
     s_scene_open = 0;
+#ifdef DC_PVR_BATCH_LOG
+    if (s_batch_log_now)
+        DC_LOG("BATCHLOG END frame=%u\n", s_frames);
+#endif
     s_frames++;
 }
 
@@ -615,6 +840,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     const float (*pr)[4];
     const float (*nm)[3];
     const dc_pvr_tex_t* tex;
+#ifndef DC_PVR_NO_TEVCONST
+    float tevconst[3];
+    int   have_tevconst = 0;
+#endif
     int i, j, step, per_prim;
 
     if (!dc_pvr_ready || !s_scene_open || count <= 0) return;
@@ -640,6 +869,23 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 
     tex = dc_pvr_tex_get(g_gx.tex_handle[0]);
     ensure_header(tex);
+
+#ifndef DC_PVR_NO_TEVCONST
+    /* Per-batch, not per-vertex: the TEV stage and its registers cannot change
+     * inside a batch, only between them. */
+    have_tevconst = tev_const_color(tevconst);
+#endif
+
+#ifdef DC_PVR_BATCH_LOG
+    /* Zero the extents too, not just the count: a batch whose triangles are
+     * all dropped never reaches emit_projected, and printing an uninitialised
+     * bbox would invent geometry. verts=0 is the honest answer. */
+    s_bl_n = 0;
+    s_bl_x0 = s_bl_y0 = s_bl_x1 = s_bl_y1 = 0.0f;
+    s_bl_z0 = s_bl_z1 = 0.0f;
+    s_bl_u0 = s_bl_v0 = s_bl_u1 = s_bl_v1 = 0.0f;
+    s_bl_argb = 0;
+#endif
 
     /* Fold projection * posmtx once per batch. The modelview is GX's 3x4
      * row-major affine matrix, so its implicit fourth row is (0,0,0,1) and the
@@ -696,6 +942,25 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 cv[k].v *= tex->v_scale;
             }
             cv[k].argb = shade_vertex(v, eye, nrm);
+#ifndef DC_PVR_NO_TEVCONST
+            /* Replace the RGB only. Alpha keeps coming from the lit/vertex
+             * path so MODULATEALPHA still multiplies it by the texel alpha,
+             * which is the half of the combiner that was already correct. */
+            if (have_tevconst) {
+                int cr = (int)(tevconst[0] * 255.0f + 0.5f);
+                int cg = (int)(tevconst[1] * 255.0f + 0.5f);
+                int cb = (int)(tevconst[2] * 255.0f + 0.5f);
+                if (cr < 0) cr = 0;
+                if (cr > 255) cr = 255;
+                if (cg < 0) cg = 0;
+                if (cg > 255) cg = 255;
+                if (cb < 0) cb = 0;
+                if (cb > 255) cb = 255;
+                cv[k].argb = (cv[k].argb & 0xFF000000u) |
+                             ((unsigned int)cr << 16) |
+                             ((unsigned int)cg << 8) | (unsigned int)cb;
+            }
+#endif
         }
 
         if (per_prim == 3) {
@@ -708,6 +973,29 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             emit_triangle(&cv[0], &cv[2], &cv[3]);
         }
     }
+
+#ifdef DC_PVR_BATCH_LOG
+    if (s_batch_log_now) {
+        DC_LOG("BATCH b=%u %s n=%d verts=%d tex=%d %dx%d fmt=0x%X a=%d "
+               "us=%.3f wrap=%d,%d bm=%d,%d,%d cull=%d zt=%d zf=%d zw=%d "
+               "chans=%d argb=%08X bbox=%.1f,%.1f..%.1f,%.1f z=%.5f..%.5f "
+               "uv=%.2f,%.2f..%.2f,%.2f\n",
+               s_batches, (per_prim == 4) ? "QUAD" : "TRI", count, s_bl_n,
+               tex ? 1 : 0,
+               tex ? (int)tex->w : 0, tex ? (int)tex->h : 0,
+               tex ? (unsigned)tex->pvr_fmt : 0u,
+               tex ? (int)tex->has_alpha : 0,
+               tex ? (double)tex->u_scale : 0.0,
+               g_gx.tex_obj_wrap_s[0], g_gx.tex_obj_wrap_t[0],
+               g_gx.blend_mode, g_gx.blend_src, g_gx.blend_dst,
+               g_gx.cull_mode, g_gx.z_compare_enable, g_gx.z_compare_func,
+               g_gx.z_update_enable, g_gx.num_chans, s_bl_argb,
+               (double)s_bl_x0, (double)s_bl_y0, (double)s_bl_x1,
+               (double)s_bl_y1, (double)s_bl_z0, (double)s_bl_z1,
+               (double)s_bl_u0, (double)s_bl_v0, (double)s_bl_u1,
+               (double)s_bl_v1);
+    }
+#endif
 
     s_batches++;
 }
@@ -932,6 +1220,90 @@ static int dc_fb_write_test(const unsigned short* fb) {
     for (k = 0; k < 8; k++) p[k] = save[k];
     return ok;
 }
+
+/* --------------------------------------------------------------------------
+ * DC_FB_IMAGE=<1|2|4> — dump the WHOLE frame, not a 16x12 thumbnail.
+ *
+ * WHY THIS EXISTS. The 16x12 thumbnail can tell "black" from "not black" and
+ * nothing else. Every rendering question past that — is this model inside-out,
+ * is this texture the right one, is the sky where the ground should be — has
+ * been answered by a human watching Flycast and typing what they saw, which is
+ * slow, serialises on that human, and cannot be diffed between two builds.
+ * Host-side capture is blocked by macOS TCC (harness/dc/screenshot.sh
+ * documents both dead ends), so the guest has to send the picture out itself.
+ *
+ * Streamed ROW BY ROW on purpose: a 640x480 RGB565 buffer plus its base64 is
+ * ~1.4 MB, and holding either in .bss would put a debug knob on the critical
+ * RAM budget. One output row of accumulators is 640 * 3 * 4 B of stack and
+ * nothing is retained between rows.
+ *
+ * Protocol (tools/dcfb/fbimg_to_png.py turns it into a PNG):
+ *     FBIMG BEGIN <w> <h> rgb565 frame=<n>
+ *     FBROW <y> <base64 of w RGB565 pixels, big-endian>
+ *     FBIMG END
+ *
+ * The factor is a BOX filter, not point sampling — same reason the thumbnail
+ * box-filters (kb/traps.md). Off by default: at factor 1 this is ~820 KB of
+ * console per probe, so pair it with a large DC_FB_PROBE.
+ * -------------------------------------------------------------------------- */
+#if defined(DC_FB_PROBE) && defined(DC_FB_IMAGE)
+static void dc_pvr_fb_dump_image(const unsigned short* fb) {
+    static unsigned int image_no = 0;
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const int f = (DC_FB_IMAGE) < 1 ? 1 : (DC_FB_IMAGE);
+    const int w = DC_SCREEN_WIDTH / f;
+    const int h = DC_SCREEN_HEIGHT / f;
+    unsigned int acc_r[DC_SCREEN_WIDTH], acc_g[DC_SCREEN_WIDTH],
+                 acc_b[DC_SCREEN_WIDTH];
+    unsigned char row[DC_SCREEN_WIDTH * 2];
+    char out[((DC_SCREEN_WIDTH * 2 + 2) / 3) * 4 + 1];
+    int cy, cx, sy, sx, i, o;
+    unsigned int npx = (unsigned int)(f * f);
+
+    DC_LOGE("FBIMG BEGIN %d %d rgb565 frame=%u\n", w, h, image_no++);
+
+    for (cy = 0; cy < h; cy++) {
+        for (cx = 0; cx < w; cx++) { acc_r[cx] = acc_g[cx] = acc_b[cx] = 0; }
+
+        for (sy = cy * f; sy < (cy + 1) * f; sy++) {
+            const unsigned short* src = fb + (unsigned int)sy * DC_SCREEN_WIDTH;
+            for (cx = 0; cx < w; cx++) {
+                for (sx = cx * f; sx < (cx + 1) * f; sx++) {
+                    unsigned short px = src[sx];
+                    acc_r[cx] += (px >> 11) & 0x1F;
+                    acc_g[cx] += (px >> 5) & 0x3F;
+                    acc_b[cx] += px & 0x1F;
+                }
+            }
+        }
+
+        for (cx = 0; cx < w; cx++) {
+            unsigned int px = ((acc_r[cx] / npx) << 11) |
+                              ((acc_g[cx] / npx) << 5) |
+                               (acc_b[cx] / npx);
+            row[cx * 2]     = (unsigned char)(px >> 8);
+            row[cx * 2 + 1] = (unsigned char)(px & 0xFF);
+        }
+
+        for (i = 0, o = 0; i < w * 2; i += 3) {
+            unsigned int v = (unsigned int)row[i] << 16;
+            if (i + 1 < w * 2) v |= (unsigned int)row[i + 1] << 8;
+            if (i + 2 < w * 2) v |= (unsigned int)row[i + 2];
+            out[o++] = b64[(v >> 18) & 0x3F];
+            out[o++] = b64[(v >> 12) & 0x3F];
+            out[o++] = (i + 1 < w * 2) ? b64[(v >> 6) & 0x3F] : '=';
+            out[o++] = (i + 2 < w * 2) ? b64[v & 0x3F] : '=';
+        }
+        out[o] = '\0';
+        DC_LOGE("FBROW %d %s\n", cy, out);
+    }
+
+    DC_LOGE("FBIMG END\n");
+}
+#else
+#define dc_pvr_fb_dump_image(fb) ((void)(fb))
+#endif
 
 void dc_pvr_fb_probe(void) {
     static unsigned int probe_no = 0;
@@ -1205,6 +1577,8 @@ void dc_pvr_fb_probe(void) {
         out[o++] = (i + 2 < (int)sizeof(raw)) ? s_b64[v & 0x3F] : '=';
     }
     out[o] = '\0';
+
+    dc_pvr_fb_dump_image(fb);
 
     DC_LOGE("MARK:FRAME %u\n", probe_no++);
     DC_LOGE("FBSRC %s addr=%08x\n", cand_name[best],

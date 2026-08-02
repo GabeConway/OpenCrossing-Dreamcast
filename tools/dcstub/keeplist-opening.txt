@@ -1,0 +1,108 @@
+# DC_STUB_KEEP — the opening / player-select working set.
+#
+# GENERATED, not written. Reproduce with:
+#
+#   DC_ASSET_CENSUS=1 <the usual build line> bash dc/build-dc.sh
+#   bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 240
+#   python3 tools/dcstub/census_resolve.py <run>/console.log \
+#       --sizes-from dc/build/nonstub/AnimalCrossing.elf --top 0 > census.txt
+#   python3 tools/dcstub/census_keeplist.py census.txt --with-default --colon
+#
+# Checked in because that loop costs two full builds and a 240 s run, and the
+# result is stable for this scene. Use it directly:
+#
+# (the trailing `-` is required: BSD paste on macOS will not read stdin without it)
+#
+#   DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-opening.txt | paste -sd: -)"
+#
+# MEASURED 2026-08-02 against the previous 31-file list:
+#   asset loads      90 -> 779
+#   blank textures   77/117 -> 11/119   (the animals were 77 of the 77)
+#   image_span       10,239,776 -> 10,622,432 B   (margin 3,664,960 B, fit OK)
+#   frame rate       29.3 FPS, unchanged
+#
+# The last two entries, src/game/m_msg.c and src/game/m_choice.c, are NOT
+# stubbable and would have been dropped by the old census_keeplist.py filter.
+# They carry the dialogue balloon, whose arrays and loader live in an #included
+# .c_inc; naming them here is what makes make_stub_data.py rewrite that .c_inc
+# and call its loader. See kb/traps.md.
+#
+# The residual 11 are 64x64/128x64 acre and scenery textures that this indoor
+# scene loads but never draws; growing the list to cover them needs a census of
+# a run that actually reaches the town.
+src/actor/ac_field_draw.c
+src/actor/ac_train_window.c
+src/data/field/bg/acre/grd_player_select/grd_player_select.c
+src/data/field/bg/acre/grd_s_f_2/grd_s_f_2.c
+src/data/field/bg/acre/grd_s_f_3/grd_s_f_3.c
+src/data/field/bg/acre/grd_s_f_mh_1/grd_s_f_mh_1.c
+src/data/field/bg/acre/grd_s_t_5/grd_s_t_5.c
+src/data/field/bg/acre/grd_s_t_st1_1/grd_s_t_st1_1.c
+src/data/field/bg/acre/rom_train_in/rom_train_in.c
+src/data/font/FONT_nes_tex_choice.c
+src/data/font/FONT_nes_tex_cursor.c
+src/data/font/FONT_nes_tex_font1.c
+src/data/font/FONT_nes_tex_next.c
+src/data/model/bir_win.c
+src/data/model/dna_win.c
+src/data/model/ef_ha01_00.c
+src/data/model/ef_hanabira01_00.c
+src/data/model/ef_shadow_out.c
+src/data/model/ef_shock01_00.c
+src/data/model/ef_warau01_00.c
+src/data/model/f_tree3.c
+src/data/model/f_tree4.c
+src/data/model/f_tree5.c
+src/data/model/girl_model.c
+src/data/model/inv_original.c
+src/data/model/kai_sousa.c
+src/data/model/kai_sousa2.c
+src/data/model/lat_sp.c
+src/data/model/log_win_logo3_tex.c
+src/data/model/log_win_logo4_tex.c
+src/data/model/log_win_nintendo1_tex.c
+src/data/model/log_win_nintendo2_tex.c
+src/data/model/log_win_nintendo3_tex.c
+src/data/model/logo_us_animal.c
+src/data/model/logo_us_back.c
+src/data/model/logo_us_cros.c
+src/data/model/logo_us_sing.c
+src/data/model/logo_us_tm.c
+src/data/model/mra_win.c
+src/data/model/nam_win.c
+src/data/model/obj_e_mikanbox.c
+src/data/model/obj_fenceL_shadow.c
+src/data/model/obj_hole_pal.c
+src/data/model/obj_romtrain_door.c
+src/data/model/obj_s_fenceL.c
+src/data/model/obj_s_sightmap.c
+src/data/model/obj_s_station1.c
+src/data/model/obj_sightmap_shadow.c
+src/data/model/obj_station1_shadow.c
+src/data/model/obj_train_3.c
+src/data/model/obj_train1_1.c
+src/data/model/obj_tree_shadow.c
+src/data/model/rom_train_out.c
+src/data/model/rst_win.c
+src/data/model/structure/palette/structure_pal_data.c
+src/data/npc/model/mdl/end_1.c
+src/data/npc/model/mdl/kab_1.c
+src/data/npc/model/mdl/mnk_1.c
+src/data/npc/model/mdl/xct_1.c
+src/data/npc/model/tex/end_1.c
+src/data/npc/model/tex/flg_1.c
+src/data/npc/model/tex/flg_10.c
+src/data/npc/model/tex/flg_11.c
+src/data/npc/model/tex/kab_1.c
+src/data/npc/model/tex/kal_1.c
+src/data/npc/model/tex/kal_2.c
+src/data/npc/model/tex/mnk_1.c
+src/data/npc/model/tex/mob_1.c
+src/data/npc/model/tex/mol_1.c
+src/data/npc/model/tex/mos_1.c
+src/data/npc/model/tex/xct_1.c
+src/data/npc/model/tex/xsq_1.c
+src/data/submenu/map/kan_tizu.c
+src/game/m_bg_tex.c
+src/game/m_choice.c
+src/game/m_msg.c

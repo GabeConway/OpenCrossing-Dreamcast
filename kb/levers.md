@@ -4,7 +4,7 @@ Every way found so far to close the RAM gap, with status. **Read this before
 planning any size work.** Read `kb/closed.md` before *proposing* any — several
 obvious ideas are already dead.
 
-Current gap: **6,999,924 B** over; the `.bss` ceiling is **3,604,832 B** against
+Current gap: **6,999,924 [SUPERSEDED gap — now 4,705,628 post-ARAM-pager, see `kb/STATE.md`] B** over; the `.bss` ceiling is **3,604,832 B** against
 10,669,268 today (measured 2026-08-01 after S3, clean full rebuild). See
 `kb/STATE.md` for the inequality and the execution order — this file is the
 ledger, that file is the plan. `kb/research-creative-ram.md` holds unbanked

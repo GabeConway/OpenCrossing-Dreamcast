@@ -1,8 +1,234 @@
 # Session log — what was observed running, in order
 
+> ⚠️ **2026-08-02, read first:** the top entry below (framebuffer probe, "N2
+> NOT solved", FBNONZERO 0) is **SUPERSEDED** — N2 is done: `--fb-writeback` is
+> REQUIRED, golden `25789d43` works. See `kb/STATE.md` N2 and `kb/traps.md`.
+> Also stale below: vertex census "unmeasured" (done — 93,312 B, `accc232`),
+> "nothing is ever drawn / backend stub" (false since `fd4ee2c`), ARAM window
+> thrash (pager landed, `29ffca5`), VMU write unimplemented (backend landed,
+> `b4a177d`). Narrative for those four commits currently lives in `kb/STATE.md`.
+
 The dated narrative of this port's bring-up: what executed, when, and what it
 cost to get there. `kb/STATE.md` carries only what is true *now* and stays
 short; everything that is history but still evidence lives here. Newest first.
+
+## ⭐ 2026-08-02 (latest) — the first screenshots, and what they showed
+
+`DC_FB_IMAGE` had been written but never run end to end. Decoding the run it
+left behind took two fixes to `tools/dcfb/fbimg_to_png.py` — a run killed
+mid-row leaves a partial base64 payload that threw `binascii.Error: Incorrect
+padding` and lost **every** frame, and a trailing `FBIMG BEGIN` with no `END`
+dropped the last one. Both are now tolerated and reported.
+
+Eight frames, 320×240, spanning ~540 rendered frames of the opening /
+player-select scene (post-`aAL_setupAction: 3 -> 4`). What they measured:
+
+- **26.9 % of the frame was exactly `0xFFFF`, 43.2 % exactly `0x0000`,** and
+  the remaining 30 % was 879 distinct near-black colours — brightest common one
+  `0x28C2` = RGB(41,24,16). Blown-out core, dead-black surround, nothing
+  between.
+- The bright region was **one shape repeated at a fixed 117 px pitch**, hard
+  vertical seam on one edge and a real 12 px falloff (`0xF79E → 0x0020` across
+  x=113–124) on the other. That is texture repeat, not lighting.
+- **The GX wrap mode was stored and never consumed.** `dc_gx.c` has held
+  `TEXOBJ_WRAP_S/T` since M1; `dc_pvr.c` hardcoded `PVR_UVCLAMP_NONE`. Fixed by
+  mirroring wrap into `g_gx`, folding it into `header_key()` and the
+  `GXLoadTexObj` dedup key, and mapping GX → `uv_clamp`/`uv_flip`. Result: one
+  cone, a legible floor, a silhouette standing in it. Draw counts identical
+  across the A/B (96/49, same q/t), so nothing else moved. Distinct colours
+  879 → 536.
+- **The remaining ~28 % of pure white was the TEV, and the per-batch dump found
+  it.** `DC_PVR_BATCH_LOG` was written for this and it worked first try: the
+  offending batch was a 32×64 I-format texture, `wrap=2,0`, `bm=1,4,5`,
+  `argb=FFFFFFFF`, bbox covering the whole frame. Those numbers name the draw
+  exactly, and the source data says what it should be
+  (`grd_player_select.c:69`):
+
+  ```c
+  gsDPSetCombineLERP(0, 0, 0, PRIMITIVE,  0, 0, 0, TEXEL0, ...)
+  gsDPSetPrimColor(0, 255, 0, 0, 0, 255)      // PRIM = BLACK
+  gsDPLoadTextureBlock_4b_Dolphin(rom_open_shade_tex, G_IM_FMT_I, 32, 64, 15,
+                                  GX_MIRROR, GX_CLAMP, 0, 0)
+  ```
+
+  Colour is `(0-0)*0 + PRIMITIVE` = black; alpha is `TEXEL0`. GX expands an
+  I-format texel to `(I,I,I,I)`, so modulating by a **white** vertex turned a
+  black vignette white. `g_gx.tev_colors[]` had been stored by
+  `GXSetTevColor` and never read — the same "recorded but not consumed" shape
+  as the wrap mode, one layer up. Folding the constant into the vertex RGB
+  takes pure white to **0.0 %**. The frame is now a dark room with a lit
+  spotlight pool and a silhouette in it.
+
+  The same dump independently confirmed the wrap fix: it reported `wrap=2,0`
+  (MIRROR, CLAMP) for the spot quad and `wrap=0,0` for the floor, matching
+  `gsDPSetTile_Dolphin(..., GX_MIRROR, GX_CLAMP, ...)` and
+  `gsDPLoadTextureBlock_4b_Dolphin(rom_open_floor_tex, ..., GX_CLAMP, GX_CLAMP, ...)`
+  in the same display list.
+- **A latent trap in that fix, caught in review before it could bite.**
+  libforest's `TEV_*` constants alias `GXTevColorArg` deliberately, but
+  `TEV_COMBINED` is 0 and so is `GX_CC_CPREV` — and those mean different
+  things. Treating `CPREV` as a constant register would have blacked out the
+  ~245 `(0, 0, 0, COMBINED)` cycle-0 draws in `src/data/model/`. Removed;
+  see `kb/traps.md`. It changed nothing in this scene (identical histograms
+  either way), which is exactly why it needed catching by reading rather than
+  by measuring.
+- **The black silhouette was K.K. Slider, and he was never in the image.** The
+  user reported that animal textures used to work and had stopped. Every
+  renderer suspect was wrong: the wrap change provably cannot reach them (NPC
+  textures are power-of-two, so `u_scale == 1` and clamp pins at the true
+  edge), the TEV change provably cannot reach them (914 of ~940 NPC combiners
+  start with `TEXEL0`, so the constant-colour rule bails), and no path
+  populates a `GXTexObj` outside `GXInitTexObj*`.
+
+  `DC_TEX_LOG=1` answered it in one run: **77 of 117 texture uploads decoded to
+  a single value — zero.** The palette dump showed `raw=0000,0000,0000,0000`:
+  the TLUT bytes themselves were zero, so it was never a decode bug. The blank
+  uploads were 32×16, 32×32 and 16×8 CI4 — exactly `anime_1/3/4_txt`, the NPC
+  set. On a `DC_ASSET_STUB` image a stubbed array is `[1]` bytes, so texels and
+  palette both read as zeros, the decoder produces a transparent rectangle, and
+  the model draws as a black silhouette with every counter looking healthy.
+
+  Re-censusing on a keep-list build (the action `kb/STATE.md` N1 and
+  `kb/RESUME.md` §5.2 had been carrying) grew the list from 31 files / 90 asset
+  loads to 71 files / **779**, and blank uploads fell to 15/119. The scene now
+  draws K.K. Slider, his guitar, the stage floor and readable dialogue;
+  distinct colours in the frame went 387 → 1346. Cost: `image_span`
+  10,239,776 → 10,622,368 B, margin still 3,665,024 B, frame rate unchanged at
+  29.3 FPS. The list is checked in at `tools/dcstub/keeplist-opening.txt`
+  because regenerating it costs two full builds and a 240 s run.
+- **Then the balloon behind the dialogue, which was the same bug one level
+  down.** `make_stub_data.py:532` globs `*.c`, so `src/game/m_msg.c` — whose
+  asset arrays and `_pc_load_src_game_m_msg_data_c_inc()` both live in the
+  `#include`d `m_msg_data.c_inc` — never entered `stub.list`, and
+  `census_keeplist.py:183` dropped its symbols on the grounds that files
+  outside `stub.list` are "already full size, so naming them would be a no-op
+  at best". That rationale is false under `DC_ASSET_STUB`, where the keep list
+  is the *only* asset-loading path that runs: the arrays got a correctly-sized
+  `.bss` buffer and no loader.
+
+  First attempt emitted `dc_stub_keep_load_one()` rows for them directly and
+  **failed to link** — the arrays are `static`. They can only be filled from
+  inside the TU, so the fix is to `keep_file()` the `.c_inc` as well and shadow
+  it on the include path with `-I$(STUBDIR)/include`, which is exactly the
+  mechanism `DC_SRC_SHRINK` already used for its own two `.c_inc` files
+  (`dc/Makefile`, "Include-path shadow", verified there with `gcc -E -H`).
+
+  Result: balloon textures **0/8192 → 6475/8192** non-zero texels, blanks
+  15/119 → 11/119, `image_span` 10,622,432 B, margin 3,664,960 B, 29.3 FPS.
+  ⚠️ The `INCLUDES` change is invisible to `flags.stamp`, so the first build
+  after it silently kept the old `.c_inc`; the objects had to be deleted by
+  hand. In `kb/traps.md`.
+- **The "hang" was the instrumentation, not the game.** Reported as "hangs
+  forever when K.K. starts talking". It does not: `mMsg_sound_PAGE_OKURI()` is
+  `sAdo_SysTrgStart(0xB)` and is reachable only from two button-driven sites in
+  `mMsg_request_main_index_fromNormal`, so every `SE 0x000B` in the log is a
+  page advance — and there are 6 in that run, with screenshots showing two
+  different dialogue pages. `DC_FB_PROBE=200 DC_FB_IMAGE=2` streams 8 × ~205 KB
+  of base64 over a 57600-baud SCIF: `console.log` is 1,631,116 B versus 118,743
+  B without it, i.e. roughly 150 s of the 200 s timeout went to screenshot
+  traffic. The same build without `DC_FB_IMAGE` reached **5069 frames vs 1379**
+  in 1.2× the wall time, logged 12 page advances, and got past the dialogue
+  into a field with player footsteps. **Screenshot runs are not speed runs —
+  do not read progression off one.**
+- **Two anomalies worth carrying forward.** `tris in == out`, `clipped=0`,
+  `dropped=0` cumulatively over 623,614 triangles — the near-plane clipper has
+  never fired once, which for a camera inside geometry is implausible. And
+  quads alternate 50 → 3 → 49 → 3 between frames whose exact pixel diff is
+  922/76800 (1.2 %) of scattered edge noise with no coherent silhouette: **47
+  quad draws per frame are producing nothing visible.**
+
+Also landed: `DC_XDEFS`, a raw `-D` passthrough, because the renderer kill
+switches previously required hand-editing the Makefile — which is why the three
+A/B CDIs in `~/.cache` are not reproducible from a command line.
+
+## 2026-08-02 — the button got pressed, and the port left the title screen
+
+`kb/boot-blockers.md`'s three cheap wins (its items 4, 2 and 9) landed together,
+and the first of them turned out to be worth far more than "an unattended
+START": **the game reaches the train intro** — the player-select scene, with
+Rover, real dialogue windows and real textures. A human watching Flycast
+confirmed it independently.
+
+### What was built
+
+- **`DC_AUTOSTART=<N>` (`dc/src/dc_pad.c`).** From `PADRead` call N onward,
+  synthesise a pulse of 6 calls every `DC_AUTOSTART_PERIOD` (default 90),
+  alternating START and A. The title takes either; the menus after it take A.
+  Absent by default, so a normal image is unchanged. Works on hardware too,
+  which a Flycast input script would not.
+- **Console flood limiter (`dc/src/dc_misc.c`).** A `printf` OVERRIDE in
+  DC-owned code plus the same table consulted from `OSReport`. Keyed on the
+  format-string POINTER — one call site is one pointer, so nothing has to be
+  formatted to decide. Emission backs off to powers of two per site and
+  surviving repeats are prefixed `[xN]`, so a flood becomes a heartbeat
+  carrying its own count rather than silence. `DC_CONSOLE_LIMIT=0` reverts.
+  - **MEASURED: `SendStart::Mesg Full Queue` 741 lines → 15** in the very next
+    run, up to `[x8192]`.
+  - ⚠️ **The first version did nothing at all** and looked correct doing it. It
+    was an open-addressed table that gave up ("print it") when full — and boot
+    alone produces more than 32 distinct call sites, so it was full before the
+    flood even started. The property that matters is REPLACEMENT, not
+    associativity: direct-mapped, evict on miss. A flooding site re-claims its
+    slot forever; an evicted one-shot line simply prints again.
+  - A second flood only becomes visible once the title is passed:
+    `game64.c_inc`'s `[TRG_VOL]`/`[WALK]` call `printf` DIRECTLY, so an
+    `OSReport`-only limiter cannot catch them. That is why the sink is `printf`.
+    Our own diagnostics are unaffected: `DC_LOG`/`DC_LOGE` go through
+    `dc_log_impl`, which calls `vprintf`.
+- **`OSGetSoundMode()` → stereo (`dc/src/dc_stubs.c`).** It returned 0 =
+  `OS_SOUND_MODE_MONO`, so `sAdo_SetOutMode` (`src/audio.c:147`) forced
+  `Na_SetOutMode(1)` and the port hard-locked itself to mono against
+  `kb/audio-plan-of-record.md` §9.1. Now a stored value defaulting to stereo,
+  and `OSSetSoundMode` keeps the player's choice for the session.
+
+### The reach, traced
+
+`[LOGO] aAL_setupAction: 0 → 2 → 3 → 4 → 5`, then `[SCENE_MODE] 0 → 3`, then a
+scene whose census is unambiguous: `rom_train_in`/`rom_train_out` geometry,
+`rom_train_{seat,wall,roof,floor,bgcloud,bgtree}_tex`, `con_kaiwa2_w*` dialogue
+frames, `FONT_nes_tex_font1`, and eye/mouth TA textures for a dozen species.
+`FBNONZERO` went from 13,711 (title logo) to **22,305–52,675 of 307,200**.
+
+`[PC] toNextLand: keepSave not set, aborting` fires on the way through and is
+**not** a blocker — it is the town-to-town transfer path with no save present.
+
+### What the next scene actually waits on — a correction to `kb/boot-blockers.md`
+
+An agent trace concluded `SCENE_PLAYERSELECT` can never advance because
+`aNPS_setup_game_start` (`ac_npc_p_sel_schedule.c_inc:1-16`) gates on
+`mCD_InitGameStart_bg() == mCD_TRANS_ERR_NONE`, i.e. on the memory card. **That
+is true of `src/game/m_card.c:5096` and false of the build:**
+`pc/src/pc_m_card.c:1188` overrides that symbol (the link carries
+`--allow-multiple-definition`) and **returns `mCD_TRANS_ERR_NONE`
+unconditionally**. The card is not the gate. The gate is the dialogue FSM and
+the 440-frame `strum_timer` in the same file — i.e. input, which now exists.
+
+### The keep list stopped being hand-written
+
+`tools/dcstub/census_keeplist.py` joins a `census_resolve.py` table to the
+linked map (`.bss.<sym>` → object → source file), intersects with
+`stub.list`, and prints a `DC_STUB_KEEP` list. Measurement → keep list, with no
+step where a human guesses which acre the title demo uses.
+
+- **66 files, `dc_stub_keep.inc` 546 rows / 390,848 B**, from a census taken
+  with `DC_AUTOSTART` on so it covers the train scene as well as the title.
+- Image cost: `.bss` 2,417,568 → 2,739,680 (+322,112), `.text` +37,280. The
+  stub image is ~10.5 MB; there is room.
+- ⚠️ **The map has TWO section-line shapes** — name alone on its line, or name
+  and address/size/object on one line when the name is short. Parsing only the
+  first shape silently lost exactly the 12 NPC vertex arrays (`grl_1_v` and
+  friends), which are the symbols the keep list most needs.
+
+### Frame rate, measured on the way
+
+| scene | FPS | gx ms | cmds |
+|---|---:|---:|---:|
+| title, stub assets only | 29.3 | 0.0 | 12 |
+| title logo drawing | 8.8–11.5 | 29–30 | ~3,300 |
+| train intro, keep list on | 17.7–22.4 | 17–19 | 1,650–2,000 |
+
+`gx` is the DC GX layer alone; `kb/STATE.md` already measured that roughly
+another 31 ms/frame is emu64 in `src/` at `-O0`, which is not a legal target.
 
 ## ⭐ 2026-08-02 (later) — the framebuffer probe is attributed, the arena is 5.5× oversized at title
 

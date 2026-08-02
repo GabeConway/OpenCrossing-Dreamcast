@@ -70,10 +70,17 @@ ENVARGS=(
     -e DC_ARENA_BYTES="${DC_ARENA_BYTES:-}"
     -e DC_ARAM_WINDOW="${DC_ARAM_WINDOW:-}"
     -e DC_FB_PROBE="${DC_FB_PROBE:-}"
+    -e DC_FB_IMAGE="${DC_FB_IMAGE:-}"
     -e DC_ARENA_PROBE="${DC_ARENA_PROBE:-}"
     -e DC_ASSET_CENSUS="${DC_ASSET_CENSUS:-}"
     -e DC_ARAM_LRU="${DC_ARAM_LRU:-}"
     -e DC_ARAM_TRACE="${DC_ARAM_TRACE:-}"
+    -e DC_AUTOSTART="${DC_AUTOSTART:-}"
+    -e DC_AUTOSTART_PERIOD="${DC_AUTOSTART_PERIOD:-}"
+    -e DC_CONSOLE_LIMIT="${DC_CONSOLE_LIMIT:-}"
+    -e DC_TEX_LOG="${DC_TEX_LOG:-}"
+    -e DC_PVR_BATCH_LOG="${DC_PVR_BATCH_LOG:-}"
+    -e DC_XDEFS="${DC_XDEFS:-}"
 )
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default

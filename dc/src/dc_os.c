@@ -602,17 +602,35 @@ void OSPanic(const char* file, int line, const char* msg, ...) {
 
 /* Every OSReport in the game funnels here. On hardware this goes out over
  * dbgio at 57600 baud — leaving it on destroys frame time, so it stays gated
- * on g_pc_verbose exactly as on PC. */
+ * on g_pc_verbose exactly as on PC.
+ *
+ * FLOOD LIMITER (kb/boot-blockers.md item 2). MEASURED: 3,374 of 3,956 console
+ * lines in one run — 85.3 % — are jaudio's "SendStart::Mesg Full Queue", from
+ * one call site, because the audio command queue is never drained.
+ *
+ * OSReport does NOT reach the printf override in dc_misc.c — it formats with
+ * vprintf — so it consults the same table directly. dc_misc.c owns the table
+ * and the rationale; this is the second entry point into it.
+ */
+extern int dc_console_admit(const char* fmt, u32* out_count);
+#define DC_OSREPORT_VERBATIM 4u
+
 void OSReport(const char* fmt, ...) {
     va_list args;
+    u32 count = 0;
     if (!g_pc_verbose) return;
+    if (!dc_console_admit(fmt, &count)) return;
+    if (count > DC_OSREPORT_VERBATIM) fprintf(stdout, "[x%u] ", (unsigned)count);
     va_start(args, fmt);
     vprintf(fmt, args);
     va_end(args);
 }
 
 void OSVReport(const char* fmt, va_list list) {
+    u32 count = 0;
     if (!g_pc_verbose) return;
+    if (!dc_console_admit(fmt, &count)) return;
+    if (count > DC_OSREPORT_VERBATIM) fprintf(stdout, "[x%u] ", (unsigned)count);
     vprintf(fmt, list);
 }
 

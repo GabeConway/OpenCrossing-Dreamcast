@@ -80,8 +80,98 @@ for those see `kb/closed.md`.
   this change remove" — P7 measured −246,064 by `dec` and −238,048 by span,
   and both are correct answers to different questions. Say which one you mean.
 
+## Renderer
+
+- **KOS's `PVR_CULLING_CW`/`CCW` are DETERMINANT SIGNS, not winding names you
+  can reason about in NDC.** `pvr_header.h:77-82`: `CCW = 2` = cull if the
+  screen-space determinant is negative, `CW = 3` = cull if positive. Both GL
+  and PVR name their modes in terms of the DISPLAYED image, so the fact that
+  `emit_projected` negates Y on the way to screen coordinates **does not** need
+  compensating for in the cull mapping — do that and you have flipped it twice.
+  **What it looked like when it bit (2026-08-02):** every character in the train
+  intro rendered inside-out — a human watching Flycast reported "everyone is
+  standing backwards". The title screen looked perfect the whole time, which is
+  what hid it for two sessions: the logo overlay draws with `GX_CULL_NONE`.
+  The mapping is `GX_CULL_FRONT -> PVR_CULLING_CCW`, `GX_CULL_BACK ->
+  PVR_CULLING_CW`; `-DDC_PVR_CULL_INVERT` restores the old one and
+  `-DDC_PVR_NO_CULL` separates "culling is the axis" from "culling is
+  irrelevant" in one build.
+- **State that is recorded and never consumed reads exactly like state that is
+  handled.** `dc_gx.c` has stored `TEXOBJ_WRAP_S/T` since M1 and exposes
+  `GXGetTexObjWrapS/T`, so a grep for "wrap" finds a plumbed-looking wrap mode.
+  Nothing read it: `dc_pvr.c` hardcoded `cxt.txr.uv_clamp = PVR_UVCLAMP_NONE`,
+  so **every texture in the port repeated, `GX_CLAMP` included**, until
+  2026-08-02. Grep for the *consumer*, not the field.
+  **What it looked like when it bit:** the opening's spotlight cone drawn 2.7
+  times across the frame — one shape at a fixed 117 px pitch, hard vertical
+  seam on one edge (the tile boundary, no gradient) and the real 12 px texture
+  falloff on the other. A periodic seam is the signature; a clamped texture
+  cannot produce one. `-DDC_PVR_NO_UVCLAMP` restores the old behaviour.
+- **`.c_inc` files are invisible to the stub tooling, and the failure is
+  silent.** `make_stub_data.py` globs `*.c`, so a TU whose asset arrays and
+  `_pc_load_src_*()` loader live in an `#include`d `.c_inc` never enters
+  `stub.list`; `census_keeplist.py` then dropped its symbols for "not being
+  stubbable". Under `DC_ASSET_STUB` that is the worst outcome available: the
+  arrays are correctly sized in `.bss`, nothing fills them, and the map looks
+  right. `src/game/m_msg.c` → `m_msg_data.c_inc` is the case that exposed it —
+  the balloon behind every line of NPC dialogue was missing.
+  **The arrays are `static`**, so `dc_stub_keep.inc` cannot load them directly
+  (tried: eight undefined references at link). They have to be filled from
+  inside the TU, which means the `.c_inc` itself gets `keep_file()`'d and
+  shadowed on the include path — `-I$(STUBDIR)/include` in `dc/Makefile`,
+  the same mechanism `DC_SRC_SHRINK` already uses.
+- **An `INCLUDES` change does not invalidate `dc/build/flags.stamp`.** Adding
+  `$(STUB_INCLUDES)` changed which `.c_inc` every kept TU sees and make
+  rebuilt nothing — the link succeeded and the image was silently still using
+  the vendored copy. The `.d` files name the OLD path, so they cannot help.
+  After changing an include path, delete the affected objects by hand.
+- **On a `DC_ASSET_STUB` image, a missing asset looks exactly like a renderer
+  bug.** A stubbed texture array is `[1]` bytes, so its texels AND its palette
+  read as zeros; the decoder faithfully produces a fully transparent rectangle
+  and the geometry draws as a black silhouette. Nothing errors, nothing is
+  rejected, and `[DC/TEX] uploads/hits/evictions` all look healthy — the upload
+  succeeded, it was just an upload of nothing. **Before debugging a black
+  model, run `DC_TEX_LOG=1` and check `nonzero=`.** 2026-08-02: 77 of 117
+  uploads were blank, which read for a whole session as "the animal textures
+  regressed"; the animals had simply never been in the keep list. See
+  `tools/dcstub/keeplist-opening.txt`.
+- **libforest's `TEV_*` constants alias `GXTevColorArg` ON PURPOSE, and one of
+  the aliases is a trap.** `emu64.c:1423` casts the N64 combiner argument
+  straight to `GXTevColorArg` because the tables were built to line up:
+  `TEV_PRIMITIVE` 4 == `GX_CC_C1`, `TEV_ENVIRONMENT` 6 == `GX_CC_C2`,
+  `TEV_TEXEL0` 8 == `GX_CC_TEXC`, `TEV_SHADE` 10 == `GX_CC_RASC`
+  (`include/libforest/gbi_extensions.h:156-167`), and emu64 writes the matching
+  registers at `emu64.c:3171,3180`. **But `TEV_COMBINED` is 0 and so is
+  `GX_CC_CPREV`**, and those two do NOT mean the same thing — `COMBINED` is the
+  previous cycle's result, not a constant. Any code that treats `GX_CC_CPREV`
+  as a constant register silently blacks out the ~245 `(0, 0, 0, COMBINED)`
+  cycle-0 draws in `src/data/model/`. `tev_creg_of` in `dc_pvr.c` excludes it
+  for exactly this reason.
+- **Wrap belongs to the BIND, not the upload.** `dc_pvr_texture.c` keys its
+  cache on texel content, so one VRAM image is legitimately shared by GXTexObjs
+  that wrap differently. Both `header_key()` in `dc_pvr.c` and the
+  `dc_gx_state_dedup` early-return in `GXLoadTexObj` therefore have to include
+  the wrap mode, or the second binding silently keeps the first one's header.
+- **A comment that contradicts the code five lines below it will be believed.**
+  `dc_pvr.c`'s viewport comment said "Y-down, same as GX, so there is no flip"
+  while `emit_projected` right below it computed `cy - hh * y`. The cull bug
+  above was derived from the comment, not from the code.
+
 ## Instrumentation
 
+- **A repeat-suppressor keyed on a table must REPLACE on miss, never give up
+  when full.** The first `OSReport`/`printf` flood limiter was open-addressed
+  and returned "print it" once every slot was taken. Boot alone produces more
+  than 32 distinct call sites, so the table was full before the flood started
+  and the limiter did nothing — 741 unsuppressed lines in the next run, with no
+  symptom other than the flood it was written to stop. Direct-mapped with
+  eviction is correct: a flooding site re-claims its slot forever, an evicted
+  one-shot line simply prints again. (`dc/src/dc_misc.c`.)
+- **`OSReport` is not the only console sink.** `game64.c_inc`'s `[TRG_VOL]` and
+  `[WALK]` lines call `printf` DIRECTLY, and they only become visible once the
+  title screen is passed — so a limiter written against the title-screen log
+  looks complete and is not. The sink is a `printf` override in DC-owned code.
+  Our own logs are unaffected because `DC_LOG`/`DC_LOGE` call `vprintf`.
 - **Never gate a periodic probe on `pc_frame_counter`.** `dc_vi.c`'s retrace
   handler returns early on every frameskipped tick — *after* incrementing
   `pc_frame_counter` — so a `pc_frame_counter % N == 0` test is evaluated only

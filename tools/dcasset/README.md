@@ -309,7 +309,7 @@ comparison layouts.
 Then:
 
 ```bash
-mkdcdisc -d /tmp/opencrossing-dc/discroot -e 1ST_READ.BIN -o OpenCrossing.cdi
+mkdcdisc -D /tmp/opencrossing-dc/discroot -e 1ST_READ.BIN -o OpenCrossing.cdi
 ```
 
 **The resulting CDI contains Nintendo assets and is never distributed.** The

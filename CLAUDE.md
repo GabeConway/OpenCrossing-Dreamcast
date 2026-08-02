@@ -52,6 +52,7 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 
 | order | file | why |
 |---|---|---|
+| 0 | **`kb/RESUME.md`** | **if you are a fresh context: start here.** Where the port is, the build line to use verbatim, and the ranked open list |
 | 1 | **`kb/STATE.md`** | current numbers, the fit inequality, next actions. ~200 lines, short by design. |
 | 2 | `kb/closed.md` | **read before proposing any RAM/size/architecture idea** — what is already dead, and why |
 | 3 | `kb/traps.md` | read before touching the build, harness, prelude, or instrumentation |
@@ -86,6 +87,7 @@ already produced two wrong numbers.
 
 | file | contents |
 |---|---|
+| `kb/RESUME.md` | the handoff: current state, the exact build line, what was just fixed, and what is still open |
 | `kb/STATE.md` | headline numbers, the fit inequality, the ranked next actions. **Short by design — start here** |
 | `kb/state-log.md` | the evidence behind those numbers: what was observed running, when, and what it cost. Newest first |
 | `kb/heap-two-pools.md` | the arena-vs-sbrk rule. **Read before touching `DC_ARENA_BYTES` / `DC_ARAM_WINDOW`** |
@@ -112,6 +114,7 @@ already produced two wrong numbers.
 | `kb/design-harness.md` | **split index** — harness design rationale, tagged [V]/[U]. Parts: `-flycast-setup`, `-capture` (console/SCIF, framebuffer hash, crash triage), `-runner`, `-alternatives` (lxdream/RetroArch, NO-GO), `-corrections` (⚠️ what the real KOS 2.3 image changed — read alongside any other part) |
 | `kb/design-shelf-hazards.md` | **split index** — sh-elf compile hazards for `src/`. ⚠️ measured on GCC 9.3/KOS `525cbda`, **not** our GCC 15.2/KOS 2.3; it missed both collisions that actually bit us, and parts of it tell you to edit `src/`, which §1 forbids. Parts: `-exclusions`, `-flags`, `-alignment`, `-abi-libc` |
 | `BUILDING.md`, `kb/build-test.md` | **armhf-era.** Base-repo build, not this target |
+| `harness/README.md`, `portmaster/**/README.md` | **armhf-era.** Old 3-tier harness and PortMaster packaging — not this target |
 
 ### Memory — the blocking problem
 
@@ -152,12 +155,17 @@ already produced two wrong numbers.
 | `tools/dcstub/make_stub_data.py` | the `DC_ASSET_STUB` rewriter (S1). Header comment is the doc |
 | `tools/dcstub/measure_dedup.py` | the L6 dedup measurement (S2). Header comment is the doc |
 | `tools/dcstub/census_resolve.py` | resolves a `DC_ASSET_CENSUS=1` console log into the scene's real working set (symbol, size, kind). The only way to learn what a scene touches — acres and NPCs are named by index, not by symbol |
+| `tools/dcstub/census_keeplist.py` | joins a resolved census to the linked map and emits `DC_STUB_KEEP`. Replaces the hand-written keep list |
+| `tools/dcstub/keeplist-opening.txt` | **the checked-in keep list for the opening scene.** Regenerating it costs two builds and a 240 s run — use it as-is unless the scene changes |
+| `tools/dcfb/fbimg_to_png.py` | decodes a `DC_FB_IMAGE` console log into PNG screenshots. No third-party modules |
+| `tools/dcstub/make_src_shrink.py` | the `DC_SRC_SHRINK` scratch-tree data rewriter (S3, on by default). Header comment is the doc |
 | `dc/stage-disc.sh` | flatten a `dcasset extract` tree into a disc root for `DC_DISC_ROOT` |
 | `kb/save-budget.md` | **verdict + index** — 295,910 B of save into a 100 KB VMU. Harness: `tools/savebench/`. ⚠️ all compression numbers are SYNTHETIC |
 | `kb/save-layout.md` | what the save actually is: verified struct sizes, `.gci` layout, bytes by field group |
 | `kb/save-compression.md` | codec comparison and the VMU fit verdict (synthetic), plus the measured PLAN §6 options |
 | `kb/save-plan.md` | the recommended VMU plan, compression + flash write cost, open items |
 | `tools/savebench/README.md` | save-size measurement harness |
+| `tools/savebench/dcvmu/README.md` | on-console VMU flash-cost harness — source of the 84.6 ms/block number |
 
 ### Graphics & audio
 

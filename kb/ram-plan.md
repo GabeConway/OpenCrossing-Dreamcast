@@ -1,4 +1,4 @@
-# RAM plan — the solution stack that closes the 6,999,924 B gap
+# RAM plan — the solution stack that closes the 6,999,924 [SUPERSEDED gap — now 4,705,628 post-ARAM-pager, see `kb/STATE.md`] B gap
 
 Written 2026-08-01. **Documentation only — nothing in this file is implemented.**
 This is the execution-ready answer to "how does the port fit in stock 16 MB",

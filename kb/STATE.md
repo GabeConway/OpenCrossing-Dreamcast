@@ -54,16 +54,17 @@ State the fit as **one inequality, never two pools**. Splitting it into an
 ```
 (image span) + (genuinely additive heap) ≤ 16,646,144
 
-  image span        18,988,416   measured 2026-08-02 after P7, clean rebuild
-                                 text 5,804,776 / data 2,337,976 / bss 10,837,376
-                                 _end 0x8d22bd80
-  additive heap      3,079,648   KOS 262,144 + arena 1,900,000
-                                 + ARAM window 851,968 + threads 65,536
-  ⇒ over by          5,421,920
+  image span        18,993,020   post-P7 + ARAM-pager (+4,604), 2026-08-02
+                                 pre-pager 18,988,416: text 5,804,776 /
+                                 data 2,337,976 / bss 10,837,376, _end 0x8d22bd80
+  additive heap      2,358,752   KOS 262,144 + arena 1,900,000
+                                 + ARAM LRU 131,072 + threads 65,536
+  ⇒ over by          4,705,628
 ```
 
-At the *policy* knobs (arena 2,705,504 + ARAM 1,048,576) it is over by
-6,424,032. Both supersede the 6,999,924 that older docs quote.
+At the *policy* arena (2,705,504; ARAM is now fixed at 131,072) it is over by
+5,511,132. These supersede the 6,999,924 / 6,424,032 / 5,421,920 that older
+docs and earlier versions of this block quote.
 
 ⚠️ **Correction, 2026-08-02:** an earlier version of this block said the
 pre-P7 span was 18,997,600 and the gap 5,431,104. That was an arithmetic slip
@@ -73,7 +74,7 @@ alignment and it counts `.ocram`, which lives at `0x7c001000` and is not in the
 image at all. **Take the span from `_end` minus `0x8c010000`, never from
 `dec`.**
 
-`.text` + `.data` = 8,388,816 B and neither can shrink — `-O0` is mandatory, so
+`.text` + `.data` = 8,142,752 B and neither can shrink — `-O0` is mandatory, so
 `.text` can only be *relocated*. The lever big enough is demand-loading the
 8,771,358 B of asset destination arrays (`kb/levers.md` L1), **but the pool it
 loads into is additive heap**, which is what makes S4's pool size the binding
@@ -121,21 +122,102 @@ of ≤32,768 B over one *contiguous* 851,744 B extent, not as one transfer.
   never been the displayed surface. `FBNONZERO` is the assertion to trust; a
   hash cannot tell black from wrong-address.
 
-## ⭐ PARKED 2026-08-02 — read this first if you are a fresh context
+## ⭐ 2026-08-02 (latest) — the button got pressed. The port is in the train intro.
 
-**The frontier is not a crash and not a stub: it is an unpressed button.**
-`kb/boot-blockers.md` (read it — it is the ranked list of what the game reaches
-next) traced the title demo to `aAL_game_start_wait`
-(`src/actor/ac_animal_logo.c:245`), looping forever waiting for START or A.
-Every other gate on `ac_animal_logo.c:268-273` is already open. Nothing in the
-harness can press a button, so nothing past the title has ever been reached in
-CI. That is item 4 on its list and roughly 30 lines of work.
+`kb/boot-blockers.md`'s three cheap wins all landed, and the first was worth
+much more than "an unattended START": **the game leaves the title screen and
+reaches the player-select scene — the train intro, with Rover, dialogue frames
+and real textures.** Confirmed both in the console census and by a human
+watching Flycast. Narrative and numbers: `kb/state-log.md`, top entry.
 
-Its other cheap wins, both measured: **85 % of every console log** is jaudio's
-`SendStart::Mesg Full Queue` via `OSReport` (`dc/src/dc_os.c:606`, ~20 lines to
-rate-limit), and **`OSGetSoundMode()` returns 0 = mono** (`dc_stubs.c:118`),
-which silently locks the game to mono and contradicts the audio plan of record
-— a one-line fix.
+```bash
+python3 tools/dcstub/census_resolve.py <run>/console.log \
+    --sizes-from dc/build/nonstub/AnimalCrossing.elf --top 0 > /tmp/census.txt
+DC_STUB_KEEP="$(python3 tools/dcstub/census_keeplist.py /tmp/census.txt \
+                 --with-default --colon)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 \
+  bash dc/build-dc.sh
+```
+
+- **`DC_AUTOSTART=<N>`** (`dc/src/dc_pad.c`) synthesises START/A pulses from
+  `PADRead` call N. ⚠️ **`DC_AUTOSTART_PERIOD=24` is WORSE than the default 90**
+  — measured: pressing every 0.8 s stalled the run at 38 draws instead of
+  reaching the train. Dialogue needs press/release edges, not a held button.
+- **Console flood limiter** (`dc/src/dc_misc.c`, a `printf` override + the same
+  table from `OSReport`): `SendStart::Mesg Full Queue` 741 → 15 lines.
+  `DC_CONSOLE_LIMIT=0` reverts. Two ways to get this wrong are in `kb/traps.md`.
+- **`OSGetSoundMode()` → stereo** (`dc_stubs.c`). It returned mono and
+  `src/audio.c:147` hard-locked the game to mono off that.
+- **The cull mapping was inverted** (`dc_pvr.c`) — `GX_CULL_BACK` mapped to
+  `PVR_CULLING_CCW`, which KOS defines as "cull if the screen-space determinant
+  is negative", and `emit_projected` already negates Y. So the port culled
+  exactly the faces it should keep and every character rendered inside-out. The
+  title screen was unaffected the whole time because the logo draws with
+  `GX_CULL_NONE`. See `kb/traps.md` → Renderer.
+- **The keep list is now generated, not written.** `tools/dcstub/census_keeplist.py`
+  joins a census to the linked map and emits `DC_STUB_KEEP` (66 files,
+  `dc_stub_keep.inc` 546 rows / 390,848 B; `.bss` +322,112, `.text` +37,280).
+- **`DC_FB_IMAGE=<1|2|4>`** dumps the whole framebuffer as base64 rows;
+  `tools/dcfb/fbimg_to_png.py` decodes a run into PNGs. Built because every
+  rendering question past "is it black" was being answered by a human watching
+  the emulator. **Now run end to end** — the port has screenshots.
+- **The GX wrap mode is honoured** (`dc_pvr.c`, `dc_gx.c`). It was stored and
+  never read, so every texture repeated. The opening's spotlight was drawn 2.7
+  times across the frame; it is now one cone over a legible floor with a
+  silhouette in it. Same keep list, same draw counts (96/49, q/t unchanged) —
+  a clean A/B. Kill switch `DC_XDEFS='-DDC_PVR_NO_UVCLAMP'`.
+- **TEV constant colours reach the vertex** (`dc_pvr.c`, N3's first slice).
+  `g_gx.tev_colors[]`/`tev_k_colors[]` were stored and never read, so a
+  combiner whose colour is `PRIMITIVE` or `ENVIRONMENT` got the texture's own
+  RGB instead. The opening's shade quad is
+  `gsDPSetCombineLERP(0,0,0,PRIMITIVE, 0,0,0,TEXEL0)` with `PRIM = BLACK`
+  (`grd_player_select.c:69`), so a black vignette rendered as a **white** one:
+  27.9 % of the frame at pure `0xFFFF`, now **0.0 %**. Only the
+  `a=b=c=ZERO, d=<const>` shape is recognised; everything else keeps the raster
+  path. Kill switch `DC_XDEFS='-DDC_PVR_NO_TEVCONST'`.
+- **`DC_XDEFS`** passes raw `-D` flags through `dc/build-dc.sh` into the
+  Makefile, so the renderer kill switches are reachable from a command line
+  instead of by hand-editing. Verified reaching 3920 compile lines.
+- **The dialogue balloon renders.** Its arrays live in `m_msg_data.c_inc`, and
+  `make_stub_data.py` globbed `*.c` only, so that TU never entered `stub.list`
+  and `census_keeplist.py` dropped it. Both tools now handle `.c_inc`:
+  `cinc_includes()` rewrites and shadows them (`-I$(STUBDIR)/include`, the
+  mechanism `DC_SRC_SHRINK` already used) and the keep list no longer drops
+  non-stubbable sources. The balloon textures went from **0/8192 non-zero
+  texels to 6475/8192**.
+- **The keep list was re-censused and the animals have textures.** The old
+  31-file list covered 90 asset loads; the regenerated 76-file list covers
+  **779**, and blank texture uploads fell from **77/117 to 11/119**. The
+  "animal textures used to work and now don't" report was not a renderer
+  regression at all — those textures were never in the image, and a stubbed
+  asset decodes to a transparent rectangle that draws as a black silhouette.
+  The scene now renders K.K. Slider, his guitar, the stage floor and readable
+  dialogue. `image_span` 10,239,776 → 10,622,368 B, margin 3,665,024 B, fit
+  still OK, 29.3 FPS unchanged. List checked in at
+  `tools/dcstub/keeplist-opening.txt` with the command to reproduce it.
+  The residual 15 are outdoor acre/scenery textures this indoor scene loads but
+  never draws.
+- **`DC_TEX_LOG=1`** logs what each texture upload actually decoded to
+  (non-zero texel count, value range, distinct values, palette head). This is
+  what separated "missing asset" from "renderer bug" — see `kb/traps.md`.
+- **`DC_PVR_BATCH_LOG=<N>`** dumps every batch's state — tex/wrap/blend/cull/z
+  plus the screen bbox and z range of what was actually emitted — on every Nth
+  frame. Pair it with `DC_FB_PROBE` at the same N and a region of a decoded PNG
+  can be attributed to the state that drew it. This is what found both bugs
+  above; the `[PERF]` draw counters cannot distinguish "submitted" from "on
+  screen".
+
+### A correction to `kb/boot-blockers.md` item 5
+
+`SCENE_PLAYERSELECT` does **not** gate on the memory card.
+`aNPS_setup_game_start` waits on `mCD_InitGameStart_bg()`, and while
+`src/game/m_card.c:5096` is a 10-step card state machine,
+**`pc/src/pc_m_card.c:1188` overrides that symbol** (the link carries
+`--allow-multiple-definition`) and returns `mCD_TRANS_ERR_NONE`
+unconditionally. The gate is the dialogue FSM and a 440-frame timer — i.e.
+input. `[PC] toNextLand: keepSave not set, aborting` is likewise not a blocker;
+it is the town-to-town transfer path with no save.
 
 ### The number the plan was waiting on — answered
 

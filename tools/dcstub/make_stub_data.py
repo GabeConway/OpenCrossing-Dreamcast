@@ -256,7 +256,71 @@ PER_FILE_INIT_RE = re.compile(
     r"^[ \t]*void[ \t]+(_pc_load_src_[A-Za-z0-9_]*)[ \t]*\([ \t]*void[ \t]*\)"
 )
 
-# One row of pc/src/pc_assets.c's s_assets[]:
+# A .c_inc that a kept TU #includes. The path is written relative in a way that
+# only resolves through the -I search list, so only the basename is trusted
+# here and it is looked up next to the including .c.
+INCLUDE_CINC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]*\.c_inc)"')
+
+# One generated load, e.g.
+#   pc_load_asset("assets/msg/con_kaiwa2_w2_tex.bin", con_kaiwa2_w2_tex,
+#                 0x1000, 0x2E79A0, 0, 0);
+PC_LOAD_CALL_RE = re.compile(
+    r'pc_load_asset\([ \t]*"(?P<path>[^"]*)"[ \t]*,'
+    r"[ \t]*(?P<dest>[A-Za-z_][A-Za-z0-9_]*)[ \t]*,"
+    r"[ \t]*(?P<size>0[xX][0-9A-Fa-f]+|\d+)[ \t]*,"
+    r"[ \t]*(?P<off>0[xX][0-9A-Fa-f]+|\d+)[ \t]*,"
+    r"[ \t]*(?P<src>-?\d+)[ \t]*,"
+    r"[ \t]*(?P<swap>-?\d+)[ \t]*\)"
+)
+
+
+def cinc_includes(text, c_path):
+    """The .c_inc files a TU #includes that contain pc_load_asset() calls.
+
+    WHY THIS EXISTS. The generator puts some assets' destination arrays AND
+    their _pc_load_src_*() loader inside a .c_inc rather than the .c that
+    includes it — src/game/m_msg.c is the case that exposed it, with the whole
+    dialogue balloon (con_kaiwa2_w1/w2/w3_tex, con_namefuti_TXT, con_kaiwa2_v,
+    con_kaiwaname_v) living in m_msg_data.c_inc.
+
+    Such a file is invisible to every other part of this tool: main() globs
+    "*.c" only, so the TU never enters stub.list, census_keeplist.py used to
+    drop its symbols for not being stubbable, and scan_declarations() on the .c
+    finds neither the arrays nor the loader. The arrays end up correctly sized
+    in .bss with NOTHING that fills them — which under DC_ASSET_STUB is worse
+    than being stubbed, because it looks right in the map and decodes to a
+    transparent rectangle at runtime. MEASURED 2026-08-02: the balloon behind
+    every line of NPC dialogue was missing for exactly this reason.
+
+    ⚠️ The arrays are `static`, so dc_stub_keep.inc CANNOT reference them
+    directly — that was tried and the link failed with eight undefined
+    references. They have to be filled from inside the TU, by calling the
+    .c_inc's own _pc_load_src_*(), which means the .c_inc itself must get
+    keep_file()'d so its pc_load_asset() calls are redirected. main() writes
+    the rewritten copy into the stub tree and dc/Makefile shadows it on the
+    include path, exactly as DC_SRC_SHRINK already does for its two .c_inc
+    files (see dc/Makefile's "Include-path shadow" note).
+
+    Returns [(repo_relative_path, Path)], in include order, deduplicated.
+    """
+    out = []
+    seen = set()
+    for line in text.split("\n"):
+        m = INCLUDE_CINC_RE.match(line)
+        if not m:
+            continue
+        inc = (c_path.parent / Path(m.group(1)).name).resolve()
+        if inc in seen or not inc.is_file():
+            continue
+        seen.add(inc)
+        if not PC_LOAD_IDENT_RE.search(
+            inc.read_text(encoding="utf-8", errors="surrogateescape")
+        ):
+            continue
+        out.append((str(inc.relative_to(REPO)), inc))
+    return out
+
+
 #   {"assets/logo_us_a_tex_txt.bin", logo_us_a_tex_txt, 0x800, 0x8C4380, 0, 0},
 ASSET_ROW_RE = re.compile(
     r'^\s*\{\s*"(?P<path>[^"]*)"\s*,\s*'
@@ -434,6 +498,8 @@ def emit_keep_inc(keep_paths, table):
     n_inits = 0
     n_bytes = 0
     n_unmapped = 0
+    n_cinc = 0
+    emitted = set()
 
     for rel in keep_paths:
         f = REPO / rel
@@ -462,10 +528,30 @@ def emit_keep_inc(keep_paths, table):
                     KEEP_LOADER, bin_path, name, tsize, off, src, swap
                 )
             )
+            emitted.add(name)
             n_rows += 1
             n_bytes += tsize
 
+        # Loaders that live in a .c_inc this TU includes rather than in the .c
+        # itself. Their destination arrays are `static`, so they can only be
+        # filled from inside the TU — see cinc_includes().
+        for cinc_rel, cinc_path in cinc_includes(text, f):
+            cinc_text = cinc_path.read_text(
+                encoding="utf-8", errors="surrogateescape")
+            _, cinc_stats, cinc_inits = scan_declarations(cinc_text)
+            for fn in cinc_inits:
+                if fn in emitted:
+                    continue
+                L.append("extern void {}(void);   /* {} */".format(fn, cinc_rel))
+                calls.append("    {}();".format(fn))
+                emitted.add(fn)
+                n_cinc += 1
+                n_bytes += sum(s for _, s in cinc_stats)
+
         for fn in inits:
+            if fn in emitted:
+                continue
+            emitted.add(fn)
             L.append("extern void {}(void);".format(fn))
             calls.append("    {}();".format(fn))
             n_inits += 1
@@ -484,7 +570,7 @@ def emit_keep_inc(keep_paths, table):
     L.append("#endif /* DC_STUB_KEEP_INC_ */")
     L.append("")
 
-    stats_line = (n_rows, n_inits, n_unmapped, n_bytes)
+    stats_line = (n_rows, n_inits, n_unmapped, n_bytes, n_cinc)
     return "\n".join(L), stats_line
 
 
@@ -566,6 +652,26 @@ def main():
             globs, stats, _ = scan_declarations(text)
             kept_arrays += len(globs) + len(stats)
             kept_bytes += sum(s for _, s in globs) + sum(s for _, s in stats)
+
+            # A kept TU's loads can live in an #included .c_inc instead of in
+            # the .c. Redirect those too and write them into the stub tree;
+            # dc/Makefile puts $(STUBDIR)/include at the front of INCLUDES so
+            # the rewritten copy shadows the vendored one, the same mechanism
+            # DC_SRC_SHRINK already uses for its two .c_inc files.
+            for cinc_rel, cinc_path in cinc_includes(text, f):
+                cinc_text = cinc_path.read_text(
+                    encoding="utf-8", errors="surrogateescape")
+                _, cinc_stats, _ = scan_declarations(cinc_text)
+                kept_arrays += len(cinc_stats)
+                kept_bytes += sum(s for _, s in cinc_stats)
+                cinc_new, cinc_n = keep_file(cinc_text)
+                if cinc_n == 0 or args.dry_run:
+                    continue
+                if write_if_changed(out_root / cinc_rel, cinc_new):
+                    written += 1
+                else:
+                    unchanged += 1
+
             new_text, n_redirect = keep_file(text)
             if n_redirect == 0:
                 continue
@@ -591,7 +697,7 @@ def main():
         else:
             unchanged += 1
 
-    inc_text, (n_rows, n_inits, n_unmapped, n_load_bytes) = emit_keep_inc(
+    inc_text, (n_rows, n_inits, n_unmapped, n_load_bytes, n_cinc) = emit_keep_inc(
         keep_paths, table
     )
 
@@ -629,8 +735,9 @@ def main():
         print("  files kept    : {}".format(len(keep_paths)))
         print("  arrays kept   : {}".format(kept_arrays))
         print("  bytes kept    : {:,}".format(kept_bytes))
-        print("  {:<14}: {} table rows + {} per-file init fns"
-              " ({:,} B)".format(KEEP_INC_NAME, n_rows, n_inits, n_load_bytes))
+        print("  {:<14}: {} table rows + {} .c_inc rows + {} per-file init"
+              " fns ({:,} B)".format(KEEP_INC_NAME, n_rows, n_cinc, n_inits,
+                                     n_load_bytes))
         if n_unmapped:
             print("  WARNING       : {} kept global(s) have no s_assets[] row"
                   " and will stay zeroed".format(n_unmapped))

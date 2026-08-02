@@ -24,6 +24,91 @@ static const char* s_unimpl_file[DC_UNIMPL_MAX];
 static int         s_unimpl_line[DC_UNIMPL_MAX];
 static int         s_unimpl_n = 0;
 
+/* --------------------------------------------------------------------------
+ * Console flood limiter (kb/boot-blockers.md item 2)
+ *
+ * MEASURED: 85.3 % of one 3,956-line console log was jaudio's
+ * "SendStart::Mesg Full Queue" (OSReport, sub_sys.c:274), and after the title
+ * screen was reached a second flood appeared — game64.c_inc's [TRG_VOL] and
+ * [WALK] lines, which call printf DIRECTLY and so cannot be caught inside
+ * OSReport. Every future log is unreadable, and on hardware dbgio runs at
+ * 57600 baud, so each line is real frame time.
+ *
+ * The sink is therefore a `printf` OVERRIDE in DC-owned code, not an edit to
+ * src/ (CLAUDE.md §1). Our own diagnostics are unaffected because DC_LOG /
+ * DC_LOGE go through dc_log_impl below, which calls vprintf directly.
+ *
+ * The key is the FORMAT STRING POINTER: one call site is one pointer, so no
+ * formatting is needed to consult the table. Emission backs off to powers of
+ * two per call site, so a rare line stays fully visible, the first few of a
+ * flood survive, and the rest become a periodic heartbeat carrying the running
+ * count — never silence. DC_CONSOLE_LIMIT=0 is the kill switch.
+ * -------------------------------------------------------------------------- */
+#ifndef DC_CONSOLE_LIMIT
+#define DC_CONSOLE_LIMIT 1
+#endif
+
+#if DC_CONSOLE_LIMIT
+#define DC_FLOOD_SLOTS    128u   /* power of two; 1,024 B of .bss */
+#define DC_FLOOD_VERBATIM 4u     /* first N per call site print as-is */
+
+static const char* s_flood_fmt[DC_FLOOD_SLOTS];
+static u32         s_flood_count[DC_FLOOD_SLOTS];
+
+/* Direct-mapped, REPLACE on miss — deliberately not open-addressed.
+ * ⚠️ The first version probed for a free slot and gave up ("print it") once
+ * the table filled. Boot alone produces more than 32 distinct call sites, so
+ * the table was full before the flood even started and the limiter did nothing
+ * at all — 741 unsuppressed lines in the very next run. Replacement is the
+ * property that matters: a flooding call site re-claims its slot every time
+ * and its count keeps climbing, while an evicted one-shot line simply prints
+ * again. */
+int dc_console_admit(const char* fmt, u32* out_count) {
+    u32 slot;
+    u32 n;
+
+    *out_count = 0;
+    if (fmt == NULL) return 1;
+
+    {   /* pointer hash; format strings are .rodata, SH-4 pointers are 32-bit */
+        u32 p = (u32)(unsigned long)fmt;
+        slot = ((p >> 2) ^ (p >> 9)) & (DC_FLOOD_SLOTS - 1u);
+    }
+    if (s_flood_fmt[slot] != fmt) {
+        s_flood_fmt[slot] = fmt;
+        s_flood_count[slot] = 0;
+    }
+
+    n = ++s_flood_count[slot];
+    *out_count = n;
+    if (n <= DC_FLOOD_VERBATIM) return 1;
+    return (n & (n - 1u)) == 0u;   /* 8, 16, 32, 64, ... */
+}
+
+/* Overrides newlib's printf for the whole image. Our objects precede libc on
+ * the link line, so this definition wins; the link already carries
+ * --allow-multiple-definition for the decomp's 1,367 duplicate data symbols,
+ * so a pulled-in libc member cannot turn this into a link error either. */
+int printf(const char* fmt, ...) {
+    va_list ap;
+    int r;
+    u32 count = 0;
+
+    if (!dc_console_admit(fmt, &count)) return 0;
+    /* fprintf, not printf: this function IS printf. */
+    if (count > DC_FLOOD_VERBATIM) fprintf(stdout, "[x%u] ", (unsigned)count);
+
+    va_start(ap, fmt);
+    r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+#else
+int dc_console_admit(const char* fmt, u32* out_count) {
+    (void)fmt; *out_count = 0; return 1;
+}
+#endif /* DC_CONSOLE_LIMIT */
+
 void dc_log_impl(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

@@ -217,7 +217,7 @@ rewritten in two stages:
   baked into vertex colors; (3) genuinely multi-textured/multi-stage →
   second pass into the TR list (GLdc's multitexture does this already);
   (4) indirect-texture effects (if present in the 101) → precomputed
-  animated textures or dropped, per-case. Deliverable: a `tev_map.md` table
+  animated textures or dropped, per-case. Deliverable: a `tev-map.md` table
   of all 101 configs → PVR strategy, written during M2.
 - **Lighting:** GC per-vertex lighting (8 lights, angular+distance
   attenuation) currently runs in the vertex shader. On DC it runs on SH-4 —
@@ -374,7 +374,7 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
   links and produces a 27 MB unpadded CDI.
 - **M2 — pixels. ← current milestone; RAM is the blocker.** Boots to title
   screen in Flycast on GLdc stage-A renderer; arena shrunk with boot-time
-  memory ledger; assets load from `/cd`. `tev_map.md` written (all 101 configs
+  memory ledger; assets load from `/cd`. `tev-map.md` written (all 101 configs
   classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
   **The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
   boot until ~14.45 MB comes out (§3.1 — the image budget is 8,035,072 B, not

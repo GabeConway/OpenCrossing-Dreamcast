@@ -193,6 +193,13 @@ typedef struct {
     int tex_obj_w[8];
     int tex_obj_h[8];
     int tex_obj_fmt[8];
+    /* GX_CLAMP / GX_REPEAT / GX_MIRROR, mirrored out of the bound GXTexObj.
+     * These belong to the BIND, not to the upload: the texture cache is keyed
+     * on texel content, so one VRAM image is legitimately shared by objects
+     * that wrap differently. dc_pvr.c turns them into cxt.txr.uv_clamp/uv_flip
+     * and folds them into header_key(). */
+    int tex_obj_wrap_s[8];
+    int tex_obj_wrap_t[8];
 
     /* Lighting (runs on SH-4; PLAN §3.3) */
     int num_chans;

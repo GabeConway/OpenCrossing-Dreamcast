@@ -41,7 +41,7 @@ GameCube-era 32-bit pointer, and `GXPosition1x16`/`GXNormal1x16`/
 
 TEV: max **3** stages (`PC_GX_MAX_TEV_STAGES`), **101** unique configurations
 harvested from a full playthrough. That is a complete, finite spec — it is
-what `tev_map.md` (M2) must classify.
+what `tev-map.md` (M2) must classify.
 
 TLUT: per-slot `is_be` flag. ROM-sourced palettes are big-endian; emu64/EFB
 ones are native little-endian. `pc_gx_tlut_set_native_le(idx)` is the setter.
@@ -142,7 +142,7 @@ This distinction carries to DC unchanged.
 | symbol | signature | pc/ file | DC disposition | notes |
 |---|---|---|---|---|
 | `GXSetNumTevStages` | `void GXSetNumTevStages(u8 nStages)` | pc_gx.c | rewrite-for-KOS |  |
-| `GXSetTevOp` | `void GXSetTevOp(u32 stage, u32 mode)` | pc_gx.c | rewrite-for-KOS | One of 101 harvested TEV configurations (kb/renderer.md). Max 3 stages (PC_GX_MAX_TEV_STAGES). This is the surface tev_map.md must classify. |
+| `GXSetTevOp` | `void GXSetTevOp(u32 stage, u32 mode)` | pc_gx.c | rewrite-for-KOS | One of 101 harvested TEV configurations (kb/renderer.md). Max 3 stages (PC_GX_MAX_TEV_STAGES). This is the surface tev-map.md must classify. |
 | `GXSetTevColorIn` | `void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d)` | pc_gx.c | rewrite-for-KOS |  |
 | `GXSetTevAlphaIn` | `void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d)` | pc_gx.c | rewrite-for-KOS |  |
 | `GXSetTevColorOp` | `void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg)` | pc_gx.c | rewrite-for-KOS |  |

@@ -2000,10 +2000,16 @@ void GXLoadTexObj(void* obj, u32 id) {
     if (o[TEXOBJ_BACKEND_TEX] && !dc_pvr_tex_get(o[TEXOBJ_BACKEND_TEX]))
         o[TEXOBJ_BACKEND_TEX] = 0;
 
+    /* The wrap mode is part of the dedup key. GXInitTexObjWrapMode() can
+     * change it on an object that is already bound, and the backend header is
+     * compiled from it; without these two terms that change would be dropped
+     * and the texture would keep the previous object's wrapping. */
     if (dc_gx_state_dedup &&
         g_gx.tex_handle[id] == o[TEXOBJ_BACKEND_TEX] &&
         g_gx.tex_obj_w[id] == (int)o[TEXOBJ_WIDTH] &&
         g_gx.tex_obj_h[id] == (int)o[TEXOBJ_HEIGHT] &&
+        g_gx.tex_obj_wrap_s[id] == (int)o[TEXOBJ_WRAP_S] &&
+        g_gx.tex_obj_wrap_t[id] == (int)o[TEXOBJ_WRAP_T] &&
         o[TEXOBJ_BACKEND_TEX] != 0)
         return;
 
@@ -2029,6 +2035,8 @@ void GXLoadTexObj(void* obj, u32 id) {
     g_gx.tex_obj_w[id] = (int)o[TEXOBJ_WIDTH];
     g_gx.tex_obj_h[id] = (int)o[TEXOBJ_HEIGHT];
     g_gx.tex_obj_fmt[id] = (int)o[TEXOBJ_FORMAT];
+    g_gx.tex_obj_wrap_s[id] = (int)o[TEXOBJ_WRAP_S];
+    g_gx.tex_obj_wrap_t[id] = (int)o[TEXOBJ_WRAP_T];
 }
 
 /* ==========================================================================

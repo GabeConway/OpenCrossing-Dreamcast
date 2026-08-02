@@ -24,6 +24,52 @@
 static int s_pad_present = 0;
 static int s_pad_logged  = 0;
 
+/* --------------------------------------------------------------------------
+ * DC_AUTOSTART=<N> — synthesise button presses so an unattended run can get
+ * past a menu (kb/boot-blockers.md item 4).
+ *
+ * The title demo loops forever in aAL_game_start_wait (ac_animal_logo.c:245)
+ * waiting for START or A, and nothing in the harness can press a button, so
+ * every blocker after the title has only ever been evaluated by reading code.
+ * This is the cheapest way to make them observable, and unlike a Flycast input
+ * script it also works on hardware.
+ *
+ * Semantics: from PADRead call N onward, emit a pulse of DC_AUTOSTART_HOLD
+ * calls every DC_AUTOSTART_PERIOD calls, alternating START and A — the title
+ * takes either, the menus that follow take A. The knob is absent by default,
+ * so a normal build is byte-identical to before (kill switch by construction).
+ * -------------------------------------------------------------------------- */
+#ifdef DC_AUTOSTART
+#ifndef DC_AUTOSTART_PERIOD
+#define DC_AUTOSTART_PERIOD 90u
+#endif
+#ifndef DC_AUTOSTART_HOLD
+#define DC_AUTOSTART_HOLD 6u
+#endif
+
+static u32 s_autostart_calls = 0;
+
+static u16 dc_autostart_buttons(void) {
+    u32 n = s_autostart_calls++;
+    u32 since, phase, pulse;
+    u16 button;
+
+    if (n < (u32)(DC_AUTOSTART)) return 0;
+
+    since = n - (u32)(DC_AUTOSTART);
+    phase = since % DC_AUTOSTART_PERIOD;
+    if (phase >= DC_AUTOSTART_HOLD) return 0;
+
+    pulse  = since / DC_AUTOSTART_PERIOD;
+    button = (pulse & 1u) ? PAD_BUTTON_A : PAD_BUTTON_START;
+    if (phase == 0) {
+        DC_LOGE("[DC/PAD] autostart pulse %u: %s (call %u)\n",
+                (unsigned)pulse, (pulse & 1u) ? "A" : "START", (unsigned)n);
+    }
+    return button;
+}
+#endif /* DC_AUTOSTART */
+
 BOOL PADInit(void) {
 #ifndef DC_HOST_STUB
     maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -41,6 +87,12 @@ u32 PADRead(PADStatus* status) {
 
     memset(status, 0, sizeof(PADStatus) * 4);
 
+#ifdef DC_AUTOSTART
+    /* Counted once per PADRead, on every path — including the no-controller
+     * early return below, which is what a bare Flycast run takes. */
+    buttons |= dc_autostart_buttons();
+#endif
+
 #ifndef DC_HOST_STUB
     {
         maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -52,6 +104,7 @@ u32 PADRead(PADStatus* status) {
              * error path is not worth exercising on a handheld, and the same
              * is true when a DC controller is hot-unplugged mid-scene. */
             s_pad_present = 0;
+            status[0].button = buttons;   /* DC_AUTOSTART, or 0 */
             status[0].err = PAD_ERR_NONE;
             return PAD_CHAN0_BIT;
         }

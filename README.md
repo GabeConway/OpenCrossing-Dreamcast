@@ -5,7 +5,7 @@ A native Sega Dreamcast port of Animal Crossing (GameCube), built on the
 [OpenCrossing-Anbernic](https://github.com/GabeConway/OpenCrossing-Anbernic)
 low-end-hardware port.
 
-**Status: planning.** No buildable code yet — see [PLAN.md](PLAN.md) for the
+**Status: M2 in progress.** All 3917 TUs build and link for sh-elf; a stub image boots in Flycast and renders the title screen — see `kb/STATE.md` — see [PLAN.md](PLAN.md) for the
 full technical plan and `kb/` for the research it is based on.
 
 Supported game version (planned): `GAFE01` — Animal Crossing (USA), Rev 0.

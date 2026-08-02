@@ -76,8 +76,16 @@ ifeq ($(DC_ASSET_STUB),1)
   # is one stat per TU; $(filter) against the 2535-entry list would be 10M
   # string compares on every make invocation.
   stubify = $(foreach f,$(1),$(if $(wildcard $(STUBDIR)/$(f)),$(STUBREL)/$(f),$(f)))
+  # Include-path shadow for KEPT .c_inc files, same mechanism and same reason
+  # as SHRINK_INCLUDES below. A kept TU whose pc_load_asset() calls live in an
+  # #included .c_inc (src/game/m_msg.c -> m_msg_data.c_inc, the dialogue
+  # balloon) needs the REWRITTEN .c_inc, and stubify only swaps whole TUs.
+  # Those .c_inc are included as "../src/...", which cannot resolve against the
+  # includer's own directory and therefore falls through to -I.
+  STUB_INCLUDES := -I$(STUBDIR)/include -I$(STUBDIR)/src
 else
   stubify = $(1)
+  STUB_INCLUDES :=
 endif
 
 # =============================================================================
@@ -263,6 +271,7 @@ UB_GUARDS := \
 # so DC_SRC_SHRINK=0 leaves this list byte-identical to what it was.
 INCLUDES := \
 	$(SHRINK_INCLUDES) \
+	$(STUB_INCLUDES) \
 	-I$(DC_DIR)/include \
 	-I$(ROOT)/pc/include \
 	-I$(ROOT)/include \
@@ -341,6 +350,16 @@ ifneq ($(DC_FB_PROBE),)
 DEFINES += -DDC_FB_PROBE=$(DC_FB_PROBE)
 endif
 
+# DC_FB_IMAGE=<1|2|4> — with DC_FB_PROBE set, dump the WHOLE frame as base64
+# rows (FBIMG/FBROW) instead of only the 16x12 thumbnail, box-filtered by the
+# given factor. tools/dcfb/fbimg_to_png.py turns the log into PNGs. This is the
+# only way to SEE what the port renders without a human watching Flycast, and
+# every rendering question past "is it black" needs that. ~820 KB of console
+# per probe at factor 1, so pair it with a large DC_FB_PROBE.
+ifneq ($(DC_FB_IMAGE),)
+DEFINES += -DDC_FB_IMAGE=$(DC_FB_IMAGE)
+endif
+
 # DC_ARENA_PROBE=<N> — print the arena's touched high-water and the current
 # libc break every N frames (kb/STATE.md N4). OSInit() zeroes the arena, so a
 # nonzero 1 KB granule is a granule something wrote; the running maximum is the
@@ -385,6 +404,61 @@ endif
 
 ifneq ($(DC_ASSET_CENSUS),)
 DEFINES += -DDC_ASSET_CENSUS=$(DC_ASSET_CENSUS)
+endif
+
+# DC_AUTOSTART=<N> — synthesise controller input from PADRead call N onward
+# (dc/src/dc_pad.c). kb/boot-blockers.md item 4: the title demo loops forever
+# in aAL_game_start_wait waiting for START or A, the harness cannot press a
+# button, and therefore NOTHING past the title has ever been observed running.
+# Pulses alternate START and A every DC_AUTOSTART_PERIOD calls. Absent by
+# default, so a normal image is unchanged.
+ifneq ($(DC_AUTOSTART),)
+DEFINES += -DDC_AUTOSTART=$(DC_AUTOSTART)
+endif
+ifneq ($(DC_AUTOSTART_PERIOD),)
+DEFINES += -DDC_AUTOSTART_PERIOD=$(DC_AUTOSTART_PERIOD)u
+endif
+
+# DC_CONSOLE_LIMIT=0 — kill switch for the console flood limiter
+# (dc/src/dc_misc.c: a printf override + the table OSReport also consults).
+# Default 1. MEASURED: 85.3 % of one console log was a single jaudio OSReport
+# line, and after the title screen game64.c_inc's [TRG_VOL]/[WALK] printf lines
+# took over. The limiter keys on the format-string pointer and backs off to
+# powers of two, prefixing surviving repeats with [xN].
+ifneq ($(DC_CONSOLE_LIMIT),)
+DEFINES += -DDC_CONSOLE_LIMIT=$(DC_CONSOLE_LIMIT)
+endif
+
+# DC_TEX_LOG=1 — one line per texture UPLOAD describing what the decoder
+# produced (non-zero texel count, value range, distinct-value count). Separates
+# "never uploaded" from "uploaded as a black rectangle", which the
+# uploads/hits/evictions counters cannot.
+ifneq ($(DC_TEX_LOG),)
+DEFINES += -DDC_TEX_LOG=$(DC_TEX_LOG)
+endif
+
+# DC_PVR_BATCH_LOG=<N> — dump every renderer batch's state on every Nth frame.
+# Set it to the SAME N as DC_FB_PROBE so the lines describe the frame the
+# screenshot captured; that pairing is what lets a region of a decoded PNG be
+# attributed to the state that drew it. ~77 lines per logged frame.
+ifneq ($(DC_PVR_BATCH_LOG),)
+DEFINES += -DDC_PVR_BATCH_LOG=$(DC_PVR_BATCH_LOG)
+endif
+
+# DC_XDEFS — raw extra -D flags, appended last so they win.
+#
+# The renderer's kill switches (DC_PVR_NO_CULL, DC_PVR_CULL_INVERT,
+# DC_PVR_NO_UVCLAMP, DC_PVR_NO_LIGHTING, DC_PVR_NO_NEARCLIP,
+# DC_PVR_NO_TEXTURES) are compile-time A/B knobs, not settings, so each one
+# does not deserve its own named variable. Before this existed they could only
+# be reached by hand-editing the Makefile, which is how the three A/B CDIs in
+# ~/.cache were built and why none of them is reproducible from a command line.
+#
+#   DC_XDEFS='-DDC_PVR_NO_UVCLAMP' bash dc/build-dc.sh
+#
+# It is part of flags.stamp, so changing it forces the rebuild it should.
+ifneq ($(DC_XDEFS),)
+DEFINES += $(DC_XDEFS)
 endif
 
 # jaudio_NES C files use `nullptr`. C only — C++ has it natively.

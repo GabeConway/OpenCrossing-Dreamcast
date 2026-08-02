@@ -1,5 +1,15 @@
 # Boot blockers — what the running game hits next
 
+> ⚠️ **UPDATED 2026-08-02 (later).** Items **2, 4 and 9 are DONE** —
+> `DC_AUTOSTART` presses the button, the console flood is rate-limited, and
+> `OSGetSoundMode()` returns stereo. The game now reaches the **train intro**
+> (player-select scene). Item **7 (TEV) moved up**: with real geometry on
+> screen, a cull-mapping bug that made every character render inside-out was
+> found and fixed (`kb/traps.md` → Renderer), and TEV is the next thing between
+> the port and a correct-looking frame. **Item 5's premise is WRONG** — see the
+> correction at the end of §3.4 and in `kb/STATE.md`. Everything else below
+> still stands.
+
 Written 2026-08-02. A **read-only audit**: no code was changed to produce it.
 It answers one question — *as the port gets further, which stub does the game
 reach first?* — and ranks by **reach**, not difficulty. Counterweight to
@@ -131,6 +141,20 @@ run can observe items 5–14. Two options: a Flycast-side input script, or — m
 cheaper and testable on hardware too — a `DC_AUTOSTART=<frames>` knob that makes
 `PADRead` (`dc_pad.c:36`) synthesise `PAD_BUTTON_START` for a few frames at a
 chosen count. ~30 lines, kill-switch by construction (absent knob = today).
+
+**DONE 2026-08-02.** `DC_AUTOSTART=<N>` in `dc_pad.c`, exactly as sketched:
+pulses of 6 `PADRead` calls every `DC_AUTOSTART_PERIOD` (90), alternating START
+and A, absent by default. It took the game from the title screen to the train
+intro on its first run. ⚠️ A *faster* period (24) is worse, measured — the
+dialogue needs press/release edges.
+
+**Correction to item 5, found the same day:** the next scene does **not** gate
+on the memory card. `aNPS_setup_game_start` waits on `mCD_InitGameStart_bg()`,
+which in this build is `pc/src/pc_m_card.c:1188` — an override that returns
+`mCD_TRANS_ERR_NONE` unconditionally, not `src/game/m_card.c:5096`'s card state
+machine. Reading `src/` alone gives the wrong answer here because the link
+carries `--allow-multiple-definition`; **check `pc/src` for an override before
+tracing any `src/` symbol as a blocker.**
 
 Traced negative worth banking: the game's menus do **not** use the digital
 D-pad. `PAD_BUTTON_UP/DOWN/LEFT/RIGHT` over `src/` outside

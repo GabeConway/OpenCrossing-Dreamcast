@@ -1054,6 +1054,46 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     for (i = 0; i < texels; i++) s_scratch[i] = 0;
     decode_gc_texture(data, w, h, fmt, (const u8 (*)[4])palette);
 
+#ifdef DC_TEX_LOG
+    /* One line per UPLOAD (not per bind — uploads are content-cached, so this
+     * fires once per distinct image). It reports what came OUT of the decoder,
+     * which is the only way to separate "the game never gave us this texture"
+     * from "we decoded it to a black rectangle". A paletted texture whose TLUT
+     * was not resident at upload time decodes to a flat value and then stays
+     * cached for the whole run, because evictions only happen under VRAM
+     * pressure — so a black CI texture is permanent and silent. */
+    {
+        unsigned int nz = 0, distinct = 0, seen[8];
+        unsigned short lo = 0xFFFF, hi = 0;
+        int j, k;
+        for (j = 0; j < texels; j++) {
+            unsigned short v = s_scratch[j];
+            if (v) nz++;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+            if (distinct < 8) {
+                for (k = 0; k < (int)distinct; k++)
+                    if (seen[k] == v) break;
+                if (k == (int)distinct) seen[distinct++] = v;
+            }
+        }
+        DC_LOG("[DC/TEXLOG] %dx%d gxfmt=%d ci=%d tlut=%p n=%d tfmt=%d be=%d "
+               "class=%d data=%p nonzero=%u/%d lo=%04X hi=%04X distinct%s=%u"
+               " raw=%04X,%04X,%04X,%04X"
+               " pal=%02X%02X%02X%02X,%02X%02X%02X%02X,%02X%02X%02X%02X\n",
+               w, h, fmt, ci_fmt, tlut, tlut_count, tlut_fmt, is_be,
+               s_class, data,
+               nz, texels, lo, hi, (distinct >= 8) ? ">=" : "", distinct,
+               tlut ? ((const u16*)tlut)[0] : 0,
+               tlut ? ((const u16*)tlut)[1] : 0,
+               tlut ? ((const u16*)tlut)[2] : 0,
+               tlut ? ((const u16*)tlut)[3] : 0,
+               palette[0][0], palette[0][1], palette[0][2], palette[0][3],
+               palette[1][0], palette[1][1], palette[1][2], palette[1][3],
+               palette[2][0], palette[2][1], palette[2][2], palette[2][3]);
+    }
+#endif
+
     /* pvr_txr_load_ex twiddles while it copies; it requires power-of-two w/h,
      * which is exactly why the source was padded above. */
     pvr_txr_load_ex(s_scratch, base, (unsigned int)pot_w, (unsigned int)pot_h,

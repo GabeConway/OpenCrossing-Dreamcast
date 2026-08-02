@@ -104,7 +104,35 @@ colima (4 cores), `-j4`:
 | `DC_FB_PROBE` | unset | `<N>` → guest-side screenshot every N presented frames. Needs `smoke.sh --fb-writeback` to see anything |
 | `DC_ARENA_PROBE` | unset | `<N>` → arena touched/used + libc break every N presented frames |
 | `DC_ASSET_CENSUS` | unset | `1` → record the asset addresses the GX layer is handed; resolve with `tools/dcstub/census_resolve.py` |
+| `DC_STUB_KEEP` | logo list | `:`-separated sources the stubber leaves FULL SIZE. Generate it from a census with `tools/dcstub/census_keeplist.py` |
+| `DC_AUTOSTART` | unset | `<N>` → synthesise START/A from `PADRead` call N onward. **The only way an unattended run gets past the title screen** |
+| `DC_AUTOSTART_PERIOD` | `90` | calls between synthesised pulses (each pulse is 6 calls) |
+| `DC_CONSOLE_LIMIT` | `1` | `0` → kill switch for the `printf`/`OSReport` flood limiter |
+| `DC_FB_IMAGE` | unset | `<1\|2\|4>` → with `DC_FB_PROBE`, stream the whole frame out as base64 `FBROW` lines, box-filtered by that factor. Decode with `tools/dcfb/fbimg_to_png.py` |
+| `DC_TEX_LOG` | unset | `1` → one line per texture **upload** describing what the decoder produced. Separates "never uploaded" from "uploaded as a blank rectangle", which the uploads/hits/evictions counters cannot |
+| `DC_PVR_BATCH_LOG` | unset | `<N>` → dump every renderer batch's state on every Nth frame. Set it to the **same** N as `DC_FB_PROBE` so the lines describe the captured frame |
+| `DC_XDEFS` | unset | raw extra `-D` flags, appended last. How the renderer kill switches are reached — see below |
 | `V` | unset | `V=1` echoes full compiler command lines |
+
+### Renderer kill switches (`DC_XDEFS`)
+
+Compile-time A/B knobs in `dc/src/dc_pvr.c`. Each isolates one convention that
+has already been got wrong at least once, so a single build settles the
+question instead of an argument from source.
+
+| define | effect |
+|---|---|
+| `DC_PVR_NO_UVCLAMP` | ignore the GX wrap mode; every texture repeats (the pre-2026-08-02 behaviour) |
+| `DC_PVR_NO_TEVCONST` | ignore TEV constant colours; stage 0's colour is always the rasterised colour |
+| `DC_PVR_NO_CULL` | `PVR_CULLING_NONE` everywhere |
+| `DC_PVR_CULL_INVERT` | swap CW/CCW — restores the old, wrong cull mapping |
+| `DC_PVR_NO_LIGHTING` | skip GX channel evaluation, pass the vertex colour through |
+| `DC_PVR_NO_NEARCLIP` | drop straddling triangles instead of clipping them |
+| `DC_PVR_NO_TEXTURES` | untextured backend |
+
+```bash
+DC_XDEFS='-DDC_PVR_NO_UVCLAMP' bash dc/build-dc.sh
+```
 
 ```bash
 DC_TARGET=objs bash dc/build-dc.sh     # compile-only
@@ -112,6 +140,19 @@ DC_CDI_PAD=1   bash dc/build-dc.sh     # CD-R burn image
 JOBS=8         bash dc/build-dc.sh
 DECOMP_OPT=-O2 bash dc/build-dc.sh     # see the warning below
 DC_ASSET_STUB=1 bash dc/build-dc.sh    # bring-up image that actually boots
+```
+
+The image that currently gets furthest — past the title, into the train intro,
+with real textures — is a stub image with a censused keep list and autostart:
+
+```bash
+python3 tools/dcstub/census_resolve.py <run>/console.log \
+    --sizes-from dc/build/nonstub/AnimalCrossing.elf --top 0 > /tmp/census.txt
+DC_STUB_KEEP="$(python3 tools/dcstub/census_keeplist.py /tmp/census.txt \
+                 --with-default --colon)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 \
+  bash dc/build-dc.sh
 ```
 
 ### `DC_ASSET_STUB=1` — the bring-up image
@@ -154,7 +195,7 @@ DC_DISC_ROOT=/tmp/discflat DC_ASSET_STUB=1 bash dc/build-dc.sh
 ```
 
 The directory is bind-mounted read-only at `/discroot` and passed to
-`mkdcdisc -d`. **Keep the staging directory out of the repo** — it is ROM
+`mkdcdisc -D`. **Keep the staging directory out of the repo** — it is ROM
 material, and neither it nor the CDI may ever be committed (CLAUDE.md §1).
 
 ⚠️ `pc_disc_extract_rel()` (`dc/src/dc_dvd.c:290`) reads the whole 15,640,056 B

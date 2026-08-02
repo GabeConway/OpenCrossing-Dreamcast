@@ -1,4 +1,8 @@
 # tools/savebench/dcvmu — proving the VMU save backend on a real (emulated) VMU
+> ⚠️ STALE framing below: the "21.4 MB / zero bytes / does not execute" claim
+> predates S1–P7 — a stub image now boots and renders (`kb/STATE.md`). The
+> harness and the 84.6 ms/block flash measurement remain valid.
+
 
 `savebench.py` in the parent directory models the save on the host. This
 directory does the other half: it boots `dc/src/dc_card.c`'s VMU backend on a

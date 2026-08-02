@@ -115,8 +115,16 @@ void OSFillFPUContext(void* context) { (void)context; }
 u16  OSGetFontEncode(void) { return 0; }
 u32  OSGetProgressiveMode(void) { return 0; }
 void OSSetProgressiveMode(u32 on) { (void)on; }
-u32  OSGetSoundMode(void) { return 0; }
-void OSSetSoundMode(u32 mode) { (void)mode; }
+/* On GameCube this is SRAM-backed. Returning 0 = OS_SOUND_MODE_MONO made
+ * sAdo_SetOutMode (src/audio.c:147) force Na_SetOutMode(1) unconditionally, so
+ * the port hard-locked itself to mono against kb/audio-plan-of-record.md §9.1
+ * ("22.05 kHz, STEREO locked"), and ac_npc_p_sel.c:102 showed the wrong
+ * setting in the options menu. The Dreamcast is a stereo machine; default to
+ * stereo and honour the player's choice for the rest of the session.
+ * (Persisting it across boots is dc_misc.c:403's settings stub, item 11.) */
+static u32 s_sound_mode = 1;   /* OS_SOUND_MODE_STEREO */
+u32  OSGetSoundMode(void) { return s_sound_mode; }
+void OSSetSoundMode(u32 mode) { s_sound_mode = (mode != 0) ? 1u : 0u; }
 void OSProtectRange(u32 chan, void* addr, u32 nBytes, u32 control) {
     (void)chan; (void)addr; (void)nBytes; (void)control;
 }
