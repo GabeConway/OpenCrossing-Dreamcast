@@ -102,7 +102,12 @@ already produced two wrong numbers.
 |---|---|
 | `BUILDING-DC.md` | **the DC build**: entry points, make targets, env knobs, flag assembly, include-path order, prelude, troubleshooting |
 | `harness/dc/README.md` | Flycast harness: setup, the scripts, guest-side protocol, env overrides, known limits |
-| `kb/design-toolchain.md` | how the SDK image was built and measured (M0). Tagged [VERIFIED]/[UNVERIFIED] |
+| `kb/design-toolchain.md` | **index** to the M0 toolchain docs below. Everything is tagged [VERIFIED]/[UNVERIFIED] |
+| `kb/toolchain-decision.md` | why build from source with `kos-chain`; rejected options; fallbacks F1–F5 |
+| `kb/toolchain-host-env.md` | colima/Docker facts, the `$HOME`-only bind-mount trap, the qemu 17–23×/ICE measurement |
+| `kb/toolchain-components.md` | kos-chain / KOS / GLdc / mkdcdisc recipes, float ABI, the signed-`char` correction |
+| `kb/toolchain-dockerfile.md` | the two-stage Dockerfile with pinned SHAs; the mkdcdisc `-N` padding measurement |
+| `kb/toolchain-build-invocation.md` | measured image build times; bind-mount / container invocation design |
 | `kb/design-harness.md` | harness design rationale, tagged [V]/[U] |
 | `kb/design-shelf-hazards.md` | sh-elf compile hazards for `src/`. ⚠️ measured on GCC 9.3/KOS `525cbda`, **not** our GCC 15.2/KOS 2.3 — it missed both collisions that actually bit us |
 | `BUILDING.md`, `kb/build-test.md` | **armhf-era.** Base-repo build, not this target |
@@ -115,7 +120,13 @@ already produced two wrong numbers.
 | `kb/ram-plan.md` | **the solution stack that closes the gap** — eight ranked moves P1–P8 with closing arithmetic, second-rank levers, experiment queue. Documentation only, nothing implemented |
 | `kb/research-budget-premises.md` | audit of the budget's premises; §2.4 is the bucket-6 measurement recipe, §6 lists what is unfinished |
 | `kb/research-size-reduction.md` | fitting in 16 MB without changing codegen — source of `kb/levers.md` L3 |
-| `kb/mem-budget.md` | the original 16 MB ledger. ⚠️ superseded in parts — its own header lists two corrections, and its `-O2`/`-Os` remedies are void |
+| `kb/mem-budget.md` | **index** to the split ledger below. ⚠️ the §4 ledger itself is void |
+| `kb/mem-budget-m1-sh4.md` | **the part that is still true** — the real sh-elf link: section sizes, the `.bss` split, levers applied, dead ends, the boot-size gate |
+| `kb/mem-budget-armhf-working-set.md` | armhf-era: the 65 MB start, the 15.6 MB REL boot transient, boot residency, disc contents |
+| `kb/mem-budget-armhf-binary-size.md` | armhf-era: section totals, per-tree attribution, top `.bss`/`.text` symbols. ⚠️ its "the only real lever is codegen" conclusion violates §1 and is void |
+| `kb/mem-ledger-runtime-design.md` | `dc/src/dc_mem_ledger.c` design — the budget as a runtime object that fails loudly |
+| `kb/mem-probe-plan.md` | `PC_MEMPROBE=1` probes for the real arena / ARAM / asset high-water marks. Partly overtaken by `DC_ARENA_PROBE` |
+| `kb/mem-budget-void-ledger.md` | ⚠️ **VOID** — the 12-bucket ledger and C1–C11. Kept only for its bucket numbering |
 | `kb/research-mmu-paging.md` | why MMU paging is DEAD. Read before ever reconsidering |
 | `kb/research-n64-origin.md` | why the 22.5 MB image is *not* an emulation artefact |
 | `kb/research-creative-ram.md` | **unbanked CONCEPTS**, ranked, each with a failure mode and a cheapest experiment. T1 (textures never pooled) is the highest-value open idea in the project |
@@ -141,7 +152,19 @@ already produced two wrong numbers.
 | `kb/tev-map.md` | all 101 TEV configs the game uses → fixed-function PVR strategies |
 | `kb/audio-plan.md` | jaudio_NES on DC. **Verdict: a real risk, not solved** |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |
-| `kb/design-platform-api.md` | every symbol `dc/` must provide, derived from `pc/src`. 124 KB — grep it, don't read it |
+| `kb/design-platform-api.md` | **index** to the platform-API split below — every symbol `dc/` must provide, derived from `pc/src` |
+| `kb/platform-api-overview.md` | symbol counts and dispositions, ranked landmines, unverified gaps. **Read first — carries the table legend** |
+| `kb/platform-api-boot-order.md` | the verified init order and the six hard ordering rules |
+| `kb/platform-api-os-core.md` | arena / the `+0x28` word, cache maintenance, time & ticks, threads; the `OS*` tables |
+| `kb/platform-api-os-stubs.md` | REL, libc64 malloc, N64 trig, PPC, EXI/SI/DB, libc, libultra, GBA, Famicom, JSystem vtables |
+| `kb/platform-api-math.md` | `PSMTX*`/`C_MTX*`/`gu*`, with the SH-4 FTRV/FIPR candidates |
+| `kb/platform-api-gx.md` | the GX state machine and every `GX*` symbol, incl. textures and TLUTs |
+| `kb/platform-api-vi-pad.md` | `VI*` frame pacing and `PAD*` input |
+| `kb/platform-api-dvd-aram.md` | `DVDReadAsyncPrio`, `ARStartDMA`, the runtime asset table, the disc reader |
+| `kb/platform-api-audio.md` | `AI*`/`DSP*` — the `AIInitDMA` handoff point |
+| `kb/platform-api-save-card.md` | save layout, `CARD*`, `pc_m_card.c`, GCI byte-swap |
+| `kb/platform-api-pc-only.md` | settings, profiler, overlay, texture packs — the `drop` pile |
+| `kb/platform-api-globals.md` | global *variables* the platform layer must define |
 
 ### Background & reference
 

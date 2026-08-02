@@ -88,8 +88,11 @@ lives at `0x8C000000` — re-derive (PLAN §11.6).
 - **Upstream flyngmt moved to -O2 everywhere** (commit `4f428276`,
   2026-07-10) with `-fno-strict-aliasing -fwrapv` — x86 only; the ARM/SH-4
   alignment class is untested there. See PLAN §3.2.
-- `-fsigned-char` required (PPC chars signed; ARM and SH-4 GCC default
-  unsigned).
+- `-fsigned-char` required (PPC chars signed; ARM GCC defaults unsigned).
+  ⚠️ **CORRECTED 2026-08-02:** this used to say SH-4 GCC also defaults to
+  unsigned `char`. It does not — confirmed on the GCC 15.2.0 in our SDK image
+  (`kb/toolchain-components.md` §3.1 and §5.1). Passing `-fsigned-char` on
+  sh-elf is harmless and stays; the claim about the default was wrong.
 - Endianness: GC data BE → LE handled at asset load (per-asset class), GCI
   bswap, and ~scattered per-site swaps documented in `pc/DOCUMENTATION.md`
   ("cannot centralize" — ARAM holds mixed-width layouts). All transfers to
