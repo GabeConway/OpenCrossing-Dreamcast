@@ -86,9 +86,9 @@
  *                           (leaves the speaker name and replies invisible)
  *   -DDC_PVR_NO_TEVCONST_ALPHA_MIRROR  match only the (ZERO,const,TEXA,ZERO)
  *                           spelling, not the 17x more common mirrored one
- *   -DDC_PVR_TEVCONST_ALPHA_LODONLY  narrow the mirror to PRIM_LOD_FRAC (A0):
- *                           134 sites instead of 688, enough for the train
- *                           window's day/night shine on its own
+ *   -DDC_PVR_TEVCONST_ALPHA_WIDE  widen the mirror from PRIM_LOD_FRAC (A0,
+ *                           134 sites, the default) to A0/A1/A2 (688). The
+ *                           wide form broke the title-screen station.
  *   -DDC_PVR_NO_TEVCONST_COLOR_A  do not accept a flat constant colour written
  *                           in the `a` slot rather than `d` (5 sites)
  *   -DDC_PVR_NO_FOG         no hardware fog; byte-identical to pre-fog output
@@ -881,7 +881,21 @@ static int tev_const_alpha(float* out) {
 #ifndef DC_PVR_NO_TEVCONST_ALPHA_MIRROR
     else if (ts->alpha_b == GX_CA_TEXA) {
         konst = ts->alpha_c;
-#ifdef DC_PVR_TEVCONST_ALPHA_LODONLY
+#ifndef DC_PVR_TEVCONST_ALPHA_WIDE
+        /* ⚠️ NARROWED 2026-08-02, from a human report. Accepting all three
+         * constant registers here is 688 sites, and turning that on broke the
+         * title-screen train station with missing textures — an A1 (PRIM.a) or
+         * A2 (ENV.a) constant that the game leaves low will make a whole
+         * textured batch nearly transparent, which reads as a missing texture.
+         *
+         * A0 alone is PRIM_LOD_FRAC, 134 sites, and it is the register the
+         * train window's day/night shine actually uses — so this keeps the fix
+         * that motivated the mirror and drops the 554 sites of risk that came
+         * with it. -DDC_PVR_TEVCONST_ALPHA_WIDE restores all three.
+         *
+         * Widening this again needs the per-register evidence that is missing
+         * today: which A1/A2 sites have a constant alpha the game expects to
+         * be honoured, versus one it expects the RDP to have ignored. */
         if (konst != GX_CA_A0) return 0;
 #endif
     }
