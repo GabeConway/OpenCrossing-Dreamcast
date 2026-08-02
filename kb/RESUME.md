@@ -108,7 +108,48 @@ Kill switches: `DC_PVR_NO_UVCLAMP`, `DC_PVR_NO_TEVCONST`, `DC_PVR_NO_CULL`,
 
 ## 5. Open, in priority order — REWRITTEN 2026-08-02 (second session)
 
-### 1. ⭐ THE PUNCH-THROUGH LIST. This is the next job, and it is blocking two visible bugs.
+### 1. ✅ DONE 2026-08-02 (session 3) — the punch-through list is IN, and it exposed a bigger bug.
+
+`opb_sizes[4] = PVR_BINSIZE_32`, cutouts route to `PVR_LIST_PT_POLY`, threshold
+pinned to 144, geometry buffered until the base list closes and replayed.
+Measured over a 600 s run: `pt batches=159046 verts=6011391 pthi=1078/2048
+ptdrop=0` — no overflow, buffer half used, 65,536 B of static `.bss`.
+
+**⚠️ The thing that made it work is NOT in the original write-up below.**
+`cxt.txr.env` is `PVR_TXRENV_MODULATEALPHA`, so the alpha the PT comparator
+tests is `vertex_alpha × texel_alpha`. **On the N64 those two were never
+multiplied.** Every alpha-tested display list in this game runs
+`G_RM_FOG_SHADE_A`, where the vertex alpha byte is the per-vertex **fog
+coefficient**, and the alpha half of the combiner is `(0,0,0,TEXEL0)` — texel
+alpha alone. Before a real alpha test the wrong product only made things faint.
+With one, it deletes them:
+
+| model | vertex alpha | result |
+|---|---|---|
+| `obj_romtrain_door_v[0..7]` (the door leaf) | **0** | whole door discarded |
+| `rom_train_out_v[8..15]` (the window's tunnel mask) | **50** | mask discarded, raw sky/cloud/tree scenery exposed as "a big weird light texture" |
+| `obj_romtrain_glass_model` | 255, and XLU | never routed to PT — which is why "the glass is still there" |
+
+Decoded from the retail `foresta.rel` and confirmed in a batch log: every frame
+carries `pt=1 … argb=32323232` on a 64×32 with a window-sized bbox and
+`pt=1 … argb=005A5096` on a 32×64 door-shaped one. Fixed by forcing vertex
+alpha opaque on **textured** PT batches (an untextured PT poly has no texel
+alpha, so there the vertex alpha genuinely is what GX would have tested).
+Kill switch `-DDC_PVR_PT_KEEP_VTXALPHA`.
+
+⚠️ **`MODULATEALPHA` is wrong for this game's alpha combiner everywhere, not
+only on PT** — no display list read so far puts `SHADE` in the alpha combiner.
+The non-PT cutout path has the same defect. Wider blast radius, wants its own
+measured pass.
+
+**A/B settled: PT stays ON.** With `-DDC_PVR_NO_PUNCHTHRU` the door is *still*
+missing **and** the trees draw in front of the train window again — the
+original bug PT exists to fix. PT was never the cause; it made a pre-existing
+alpha error fatal instead of subtle.
+
+<details><summary>the original item 1, for the reasoning that led here</summary>
+
+#### THE PUNCH-THROUGH LIST. This is the next job, and it is blocking two visible bugs.
 
 **The train door is broken** (human-confirmed, current build). The cause is
 understood and it is structural, not a guess:
@@ -143,6 +184,8 @@ What is known about doing it:
   poly. Pin it to 144 to match `tex_edge_alpha`.
 - Kill switch `-DDC_PVR_NO_PUNCHTHRU` must restore today's behaviour verbatim.
 - Design notes: `kb/tev-map-alpha.md`.
+
+</details>
 
 ### 2. ❌ CLOSED 2026-08-02 (session 3) — the window scroll is NOT a UV bug. It is item 1.
 
@@ -231,14 +274,84 @@ convention on DC (`dc_mtx.c:474`). Dump the tree batch's `uv=` from
   geometry misplaced) and the single batch-log + screenshot run that separates
   them are written down — run that before touching any code.
 
-### 3. Fog is entirely unimplemented.
+### 3. ✅ DONE 2026-08-02 (session 3) — hardware fog, and the mapping is exact.
+
+`PVR_FOG_TABLE` with a custom 129-entry table. **Exact, not fitted:** table
+entry *j* stands for a known scaled 1/w, so setting `FOG_DENSITY = endz` puts
+entry *j* at eye depth `endz/t(j)` in closed form; `emit_projected` already
+writes `1/w` as vertex depth, and `w` is the fourth row of the GC projection,
+which `GXSetProjection` forces to `(0,0,-1,0)` for `GX_PERSPECTIVE`
+(`dc_gx.c:835-839`) — the same quantity and units as emu64's `startz`/`endz`.
+GX's `nearz`/`farz` exist only to invert a depth-buffer value back to eye z, and
+this backend never leaves eye z, so ignoring them is correct.
+
+Vertex fog was not an option: KOS's `pvr_fog_vertex_color()` is an
+`assert_msg(0, "not implemented")` stub. Table fog costs nothing per vertex.
+The registers are global and must not be written between `pvr_scene_begin` and
+`pvr_scene_finish`, so batches latch and `frame_begin` programs after
+`pvr_wait_ready` — a parameter change lands one frame late; on/off is a header
+bit and has no latency. `pvr_fog_table_color`'s alpha argument is pinned to 1.0
+deliberately: KOS cannot set alpha in `FOG_TABLE_COLOR` and fakes it by scaling
+every table entry, which makes that argument a fog *strength*.
+
+Measured live: `ask=1 hw=1 start=585→625 end=1786→1800`, colour dusk-blue then
+night-blue, `progs=2`. ⚠️ **`batches=0` for the entire train sequence** (frames
+0-9900); only the town fogs, and there it is all 89 draws. So emu64's
+`G_BL_CLR_FOG && G_FOG && fog_zmult != 0 && aflags[4] == 0` guard is much more
+selective than "every train model carries `G_FOG`" suggested. ~1 KB of image,
+0 VRAM, 0 heap. Kill switch `-DDC_PVR_NO_FOG`, diagnostic `-DDC_PVR_FOG_LOG=<N>`.
+
+<details><summary>the original item 3</summary>
+
+#### Fog is entirely unimplemented.
 `emu64.c:3219` really does ask for `GX_FOG_PERSP_LIN` with live near/far/colour;
 `grep fog dc/src/dc_pvr.c` returns nothing, and `fog_type/start/end/near/far/
 color` are all in the never-consumed list. Every train model carries `G_FOG`.
 The PVR does fog in hardware. Cosmetic — it cannot make geometry disappear, so
 it ranks below the two above.
 
-### 4. The speaker NAME and the REPLY/choice text never render.
+</details>
+
+### 4. ✅ FIXED 2026-08-02 (session 3) — and it was never the loader.
+
+**Human-confirmed working:** K.K.'s name renders and the "next" arrow appears.
+
+The pairing was the diagnosis. The speaker name (`m_msg_draw_window.c_inc:48`)
+and the replies (`m_choice_draw.c_inc:146`) are the **only** text in the balloon
+that goes through `mFont_SetLineStrings_AndSpace`, which sets
+`mFont_SENTENCE_FLAG_USE_POLY` unconditionally (`m_font_main.c_inc:518`) and so
+draws real geometry (`mFont_gppDrawCharPoly`) instead of a texture rectangle.
+The body text takes the rect path and always worked.
+
+`mFont_SetVertex_dol` (`m_font_main.c_inc:348-362`) writes `cn[0..3] = 0` into
+every glyph vertex, and the font display list clears `G_LIGHTING`, so emu64
+programs `GXSetChanCtrl(..., GX_SRC_VTX, …)` (`emu64.c:3327`) — material source
+VTX. `shade_vertex()` returned `0x00000000` and `MODULATEALPHA` multiplied the
+glyph away. On GX that zero is harmless: `mFont_CC_FONT` (`m_font.c:17`) is
+colour `= PRIMITIVE`, alpha `= PRIMITIVE.a × TEXEL0.a`, and never reads `RASC`
+or `RASA`. `dc_pvr.c` had restored the RGB half of that constant and not the
+alpha half — so this is the **fifth** member of the recorded-but-never-consumed
+family. The rect path escaped because `emu64::draw_rectangle` re-programs
+`GX_SRC_REG` and never declares `GX_VA_CLR0`, shading to a material register
+emu64 sets white once and never touches again.
+
+Confirmed before the patch was written: 47 balloon batches at `verts=6 zt=0
+st=1 tm=0,255` reading `argb=00001E00`, alpha byte zero, with body-text batches
+on the same frame at `argb=FFxxxxxx` as the control.
+
+⚠️ The matched shape (`a=ZERO, c=TEXA, d=ZERO, b=const`) occurs **446 times** in
+`src/`. Everywhere it fires the constant is the correct answer, but it reaches
+far more than the font. `-DDC_PVR_TEVCONST_ALPHA_RESCUE_ONLY` narrows it to
+vertices that are already fully invisible. Kill switch
+`-DDC_PVR_NO_TEVCONST_ALPHA`.
+
+**`DC_ARAM_TBL_PROBE` was not needed and its premise was wrong** — but the probe
+was rewritten this session and is now genuinely able to answer a loader
+question, so keep it for the next one. See the commit for the decision table.
+
+<details><summary>the original item 4 — the loader theory, now closed</summary>
+
+#### The speaker NAME and the REPLY/choice text never render.
 Body dialogue text renders fine. Body = `RESOURCE_MESSAGE` in **forest_2nd**;
 name = `RESOURCE_STRING` and choices = `RESOURCE_SELECT`, both in **forest_1st**
 (split at `jsyswrap.cpp:450-460`). Ruled out already:
@@ -254,6 +367,8 @@ a `-D` to enable). It logs every 64-byte ARAM read — uniquely
 address, the extent index and the first three words. Since MESSAGE (works) and
 STRING/SELECT (broken) both go through it, one run gives the working control and
 the broken case side by side. Decision table is in the comment at the probe.
+
+</details>
 
 ### 5. Cutout edges carry a halo.
 Consequence of item 1: texels with alpha between 1 and `alpha_ref` were
