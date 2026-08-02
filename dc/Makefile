@@ -84,9 +84,10 @@ endif
 # DC_SRC_SHRINK — the source-shrink pass (kb/levers.md L3). DEFAULT ON.
 # =============================================================================
 # Recovers 1,159,392 B of .bss by rewriting seven numeric literals in the
-# vendored decomp, plus 598,648 B of .rodata by deleting a dead string pool.
-# Not a codegen change of any kind: the compiler flags are untouched, only the
-# constants that size seven buffers and one struct field nothing on DC reads.
+# vendored decomp, plus 598,648 B of .rodata by deleting a dead string pool and
+# 246,064 B of image by re-encoding one table. Not a codegen change of any kind:
+# the compiler flags are untouched, only the constants that size seven buffers,
+# one struct field nothing on DC reads, and one table's storage layout.
 #
 #   aSTR_overlay 294,912->512 · aINS_overlay 21,528->72 ·
 #   aNPC_{n,s,k,e}_overlay 75,840->192 · aGYO_overlay 30,720->32   (dead arenas)
@@ -94,6 +95,7 @@ endif
 #   audiomemory 0x90000->0x76000        (measured allocation ceiling is 481,152)
 #   graph/padmgr/irqmgr stacks 16,384->48      (no thread ever starts on this port)
 #   s_assets[].path deleted             (.rodata; the .bin fallback is dead on DC)
+#   data_bgd[].collision run-length coded    (.data; one sequential reader, S7)
 #
 # Each rewrite's justification, and the fifth candidate that was checked and
 # REFUTED, are in the header of tools/dcstub/make_src_shrink.py. src/ and
@@ -103,11 +105,13 @@ endif
 #
 # TWO SWAP MECHANISMS, because one does not cover both cases:
 #
-#   1. Per-TU source swap, exactly like DC_ASSET_STUB above. Used for the five
+#   1. Per-TU source swap, exactly like DC_ASSET_STUB above. Used for the seven
 #      .c files that are compiled directly, where -I can never reach them —
-#      four under src/ plus pc/src/pc_assets.c, which is why $(PC_REUSE_C) is
+#      six under src/ plus pc/src/pc_assets.c, which is why $(PC_REUSE_C) is
 #      run through $(shrinkify) alongside $(GAME_C) below.
-#      $(SHRINKDIR)/shrink.list names them.
+#      $(SHRINKDIR)/shrink.list names them. S7's two files
+#      (src/data/field/bg/acre/bg_data.c, src/game/m_field_make.c) need nothing
+#      new here: both are already in $(GAME_C).
 #
 #   2. Include-path shadow, for the two .c_inc files and include/sys_stacks.h.
 #      $(SHRINKDIR)/include and $(SHRINKDIR)/src go at the FRONT of INCLUDES

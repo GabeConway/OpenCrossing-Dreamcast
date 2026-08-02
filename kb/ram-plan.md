@@ -30,8 +30,9 @@ never two pools — see `kb/STATE.md`.
 
 ## 1. The core stack — eight moves, ranked, with the closing arithmetic
 
-Execute in this order. P6/P7 are the S3 remainder; P1–P5 and P8 are S4's
-content. Each row states which side of the inequality it moves.
+Execute in this order. P6/P7 were the S3 remainder and are both **done**
+(2026-08-02); P1–P5 and P8 are S4's content. Each row states which side of the
+inequality it moves.
 
 ### P1. S4 loader with branch trampolines — `.bss` −8,460,128 [measured, stub experiment]
 
@@ -139,10 +140,34 @@ rebuilds differing only in the rule: `.rodata` 1,057,364 → 458,716, `.text`
 +224, `.data`/`.bss` unchanged, span `0x12e81c0` → `0x1255f60`. Derivation and
 the full liveness argument: `kb/levers.md` L3 "Correction 0".
 
-### P7. `data_bgd` collision split — `.data` −236,544 [measured; S3 remainder]
+### P7. `data_bgd` collision split — ✅ **DONE 2026-08-02, image −246,064** (`.data` −300,896, `.rodata`/`.text` +54,832, `.bss` 0)
 
-The S3-eligible slice of the `.data src/data → disc` row (`kb/levers.md` L3).
-The rest of that row is P8 and belongs inside S4.
+Landed as `make_src_shrink.py` rule **S7**, two per-TU swaps
+(`src/data/field/bg/acre/bg_data.c`, `src/game/m_field_make.c`). No `dc/Makefile`
+change was needed — both files are already in `GAME_C`, which runs through
+`$(shrinkify)`. **This closes S3.**
+
+**The −236,544 estimate was 9,520 B too LOW** — the first row in this plan to
+beat its number rather than miss it. It was also an orphan: no derivation for it
+exists anywhere in `kb/`. Two things it got wrong in kind, not just magnitude:
+
+- **"collision" means the collision *map*, not a symbol collision.** `data_bgd`
+  is singly defined and is not part of the 1,367-symbol
+  `--allow-multiple-definition` family. Confirmed after the fact: with S7's
+  definition removed the symbol vanishes from the ELF entirely, with no dangling
+  `U` reference.
+- **It is `.data`, not `.bss`.** `.bss` is byte-for-byte unchanged.
+
+`data_bgd[295]` is 317,420 B of `.data` (`sizeof(mFM_bg_data_c)` == 1076,
+measured off the map, not the header) and 302,080 B of that is
+`mCoBG_Collision_u collision[16][16]`. Its only reader is `m_field_make.c:271`,
+which replays it forward once per block load. S7 run-length-codes the maps
+against a 380-entry palette, deduplicates them (295 → 257 distinct), and expands
+at that one call site: table 317,420 → 16,520, plus a 53,150 B stream and a
+1,520 B palette in `.rodata` and 162 B of decoder.
+
+Derivation, the full liveness argument, the end-to-end ELF round-trip check, and
+why no header is shadowed: `kb/levers.md` L3 "Correction 1".
 
 ### P8. `.data` display-list bodies into the pool — `.data` −901,300 [measured; inside S4]
 
@@ -158,7 +183,7 @@ saving worth ~0 (mutually exclusive — L3 correction 2).
 |---|---|---:|---:|
 | start | | | **6,999,924** |
 | P6 `s_assets` strings ✅ | image (`.rodata`) | −598,112 span (was billed −821,569) | 6,401,812 |
-| P7 `data_bgd` split | image (`.data`) | −236,544 | 6,165,268 |
+| P7 `data_bgd` split ✅ | image (`.data`) | −246,240 span (was billed −236,544) | 6,155,572 |
 | P1 loader | image (`.bss`) | −8,460,128 | **−2,294,860** (margin 2,294,860) |
 | P4 ARAM window → VRAM | additive heap | −1,048,576 | margin 3,343,436 |
 | P8 DL bodies → pool | image (`.data`) | −901,300 | margin ≈ 4.24 MB |

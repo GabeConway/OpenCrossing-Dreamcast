@@ -173,7 +173,8 @@ Two rules from the pack author:
 
 ## L3. The ranked remainder — RE-COSTED 2026-08-01. 2,928,267 B, not 4.3 MB.
 <!-- and re-costed again 2026-08-02: the s_assets row came in 223,145 B under
-     its estimate, so the true remainder is 2,705,122 B. See Correction 0. -->
+     its estimate and the data_bgd row 9,520 B over, so the true remainder is
+     2,714,642 B. See Corrections 0 and 1. -->
 
 
 Six agents re-derived every row against the real ELF. **Every estimate in
@@ -187,13 +188,13 @@ column so nobody re-proposes them.
 | actor overlay arenas | −422,192 | −0.46 MB | ✅ **BANKED** (A3). Dead, not "mutually exclusive" |
 | `pc_m_card` | −308,234 | −0.28 MB | ✅ **BANKED** (A3) |
 | `dc_gx` | −262,400 | −0.24 MB | ✅ **BANKED** (A3), over estimate |
-| `.data src/data` → disc, **S3-eligible part only** | **−236,544** | −1.94 MB | LIVE. The rest is S4 work — see below |
+| `data_bgd` collision split (the `.data src/data` row's S3-eligible part) | ~~−236,544~~ → **−246,064** | −1.94 MB | ✅ **BANKED 2026-08-02** as `make_src_shrink.py` rule **S7**. Came in **9,520 B OVER** its estimate — the only row so far that did. See "Correction 1" below. The rest of the `.data` row is S4 work |
 | `audiomemory` | −106,496 | −0.65 MB | ✅ **BANKED** (A3). **AICA is impossible here**; the lever is "shrink" |
 | census: `prbuf` | −614,368 | — | ✅ **BANKED** (A3) |
 | census: `sys_stacks` + KOS `buffer.4` | −32,720 | — | ✅ **BANKED** (A3) |
 | census: jaudio `CALLSTACK`/`pc_task_buf` | ~~−58,368~~ | — | ❌ **REFUTED** — both are live. See A3 |
-| **banked so far** | **−2,344,952** | | measured, clean rebuild (1,746,528 + S6's 598,424) |
-| **still live in S3** | **−236,544** | | only the `data_bgd` split is left |
+| **banked so far** | **−2,591,016** | | measured, clean rebuilds (1,746,528 + S6's 598,424 + S7's 246,064) |
+| **still live in S3** | **0 — S3 IS DONE** | | |
 | `.data` display lists → S4 pool | −901,300 | | **belongs inside S4, not S3** |
 
 ### Correction 0 — the `s_assets[]` figure was 37% too big [MEASURED 2026-08-02]
@@ -225,13 +226,65 @@ rows. Two follow-ons this exposes:
   candidate in S4 (`kb/asset-pack.md` already carries the same five fields per
   chunk), but only after the loader exists — not an S3 item.
 
+### Correction 1 — the `data_bgd` split beat its estimate [MEASURED 2026-08-02]
+
+`−236,544` had no derivation anywhere in `kb/`; it was an orphan number, and
+"collision" in its name means the **collision map**, not a symbol collision.
+`data_bgd` is singly defined — it is not part of the 1,367-symbol
+`--allow-multiple-definition` family. It is also **`.data`, not `.bss`**.
+
+The table is 295 acres × `sizeof(mFM_bg_data_c)` = 1076 B = **317,420 B**, and
+302,080 B of that (95.2 %) is `mCoBG_Collision_u collision[16][16]`. That member
+has exactly **one** reader in the whole tree — `m_field_make.c:271` hands
+`bg_data->collision[0]` to `mFM_BgUtDataSet`, which walks 256 units strictly
+forward into the heap-resident `mFM_bg_info_c::collision` once per block load.
+Nothing indexes it randomly, memcpy()s it, or byte-swaps it. So it does not have
+to be an array; it only has to be replayable in order. S7 run-length-codes it and
+expands it at that call site.
+
+Measured across two clean full rebuilds of all 3917 TUs differing only in whether
+the rule ran:
+
+| | before | after | Δ |
+|---|---:|---:|---:|
+| `.data` | 2,638,872 | 2,337,976 | **−300,896** (`data_bgd` 317,420 → 16,520) |
+| `.text` col (carries `.rodata`) | 5,749,148 | 5,803,980 | **+54,832** (palette 1,520 + stream 53,150 + decoder 162) |
+| `.bss` | 11,145,696 | 11,145,696 | **0** |
+| image (`sh-elf-size` dec) | 19,533,716 | 19,287,652 | **−246,064** |
+| image span | `0x12a12e0` | `0x1265100` | **−246,240** |
+
+**Verified end to end, not asserted:** the palette and stream were read back out
+of the *linked* ELF, decoded with the same algorithm the C decoder runs, and
+compared against the 295 × 1,024 B of `data_bgd[].collision` from the previous
+build — **bit for bit identical, all 295 maps**. `_graph_proc` resolves once;
+`data_bgd` is absent from the ELF with no dangling `U` reference, which also
+proves it had exactly one definition; each new symbol has exactly one defining
+input section in the map.
+
+Two things worth keeping:
+
+- **The palette is emitted as C initialiser *text*, not as packed `u32`.** The
+  compiler does the bitfield packing, so the generator never has to know the bit
+  layout of `mCoBG_CollisionData_c` and cannot get it wrong. Cross-checked
+  first: the 380 distinct unit texts map one-to-one onto 380 distinct `u32`
+  values in the old ELF.
+- **No header is shadowed.** `include/m_field_make.h` reaches 61 TUs *and ten
+  other headers inside `include/`*, so a shadow could never reach all of them —
+  the S1a half-apply hazard. Both TUs that name the type get a local twin plus
+  `#define mFM_bg_data_c …` / `#define data_bgd …` placed **after** the includes.
+
+Also measured, and rejected as too weak: plain dedup of identical collision maps
+is worth only **38,912 B** (295 arrays, 257 distinct). The saving is in the
+run-length structure, not in duplicate acres.
+
 ### Three structural corrections — these change the plan, not just the numbers
 
 1. **"Six measured, mutually independent moves" is FALSE.** The largest tranche
    of the `.data` row — 1,014,088 B of `Gfx` display-list bodies — is strictly
    **downstream of S4**: its relocation targets are pool addresses that do not
-   exist until S4 assigns them. Bank the `data_bgd` collision split (−236,544)
-   in S3; schedule the rest inside S4.
+   exist until S4 assigns them. The `data_bgd` collision split is the part that
+   could be banked in S3 and it has been (−246,064, rule S7, Correction 1);
+   the rest is scheduled inside S4.
 2. **L6 and L3 are mutually exclusive, not additive.** L6's 95,774 B of
    aliasable `.data` is entirely `cKF_*` keyframe tables inside `src/data/**`
    — exactly what L3's `.data` row moves to disc. If L3 lands, L6 is worth 0.

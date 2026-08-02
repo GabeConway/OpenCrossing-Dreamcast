@@ -66,6 +66,20 @@ for those see `kb/closed.md`.
   `grep ' graph_proc$'` matches nothing even in a healthy ELF and reads as the
   same failure.
 
+## Measuring the image
+
+- **The image span is `_end - 0x8c010000`. It is NOT `sh-elf-size`'s `dec`
+  column.** `dec` sums the section sizes: it omits every inter-section
+  alignment gap and it counts `.ocram`, which is on-chip RAM at `0x7c001000`
+  and is not part of the image at all. The two differ by hundreds of KB and
+  they move in opposite directions when section sizes shift. **What it looked
+  like when it bit (2026-08-02):** a span was quoted as 18,997,600 from the
+  `dec` column when `_end` said 19,226,464, and the resulting "gap" was wrong
+  by 228,864 B in a document that other work was being planned against.
+- Related: `dec` is still the right number for "how many bytes of section did
+  this change remove" — P7 measured −246,064 by `dec` and −238,048 by span,
+  and both are correct answers to different questions. Say which one you mean.
+
 ## Instrumentation
 
 - **Never gate a periodic probe on `pc_frame_counter`.** `dc_vi.c`'s retrace

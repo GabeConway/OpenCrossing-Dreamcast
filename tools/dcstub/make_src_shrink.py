@@ -84,6 +84,17 @@ S5  sys_stacks 16,384->48                                        -16,336
     `memset(padmgrStack, 0xEB, PADMGR_STACK_SIZE)` and the three
     `stack + SIZE` expressions consistent with the new sizes.
 
+S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
+    `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
+    of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
+    1 KB acre collision map per row.  It is read in exactly ONE place in the
+    whole tree (`m_field_make.c:271`, `mFM_BgUtDataSet`), sequentially, once
+    per block load, straight into the heap-resident `mFM_bg_info_c::collision`.
+    So it never needs to be addressable as an array: run-length coding it and
+    expanding at that one call site costs nothing but the decode.
+    The member becomes a `const u8*` into a shared RLE stream.  See the rule
+    for the encoding, the round-trip check, and why no header is shadowed.
+
 NOT DONE — the fifth candidate was checked and REFUTED
 ------------------------------------------------------
 `CALLSTACK[0x8000]` and `pc_task_buf[2][1600]` are NOT dead scaffolding.
@@ -402,6 +413,373 @@ RULES = [
     ]),
 ]
 
+# ---------------------------------------------------------------------------
+# S7 — the data_bgd collision split (kb/ram-plan.md P7).
+# ---------------------------------------------------------------------------
+# Unlike S1-S6 this rule cannot be spelled as a literal, because the
+# replacement text IS the re-encoded data.  It is generated from the vendored
+# source at run time, so the two rules below are built by _s7_rules() and
+# appended to RULES.
+#
+# WHAT IS BEING MOVED, AND WHY IT IS SAFE
+# ---------------------------------------
+# `mFM_bg_data_c` (include/m_field_make.h:269) carries
+# `mCoBG_Collision_u collision[UT_Z_NUM][UT_X_NUM]` — 16 x 16 x 4 = 1,024 B per
+# acre.  `data_bgd[295]` is therefore 317,420 B of .data of which 302,080 B is
+# collision.  MEASURED against the linked ELF, not asserted: the .data.data_bgd
+# input section is 0x4d7ec = 317,420 B and data_bgd_number reads 295, so
+# sizeof(mFM_bg_data_c) == 1076 exactly.
+#
+# The member has exactly ONE reader in the entire tree:
+#
+#     m_field_make.c:271
+#       mFM_BgUtDataSet(bg_info->collision[0], bg_info->keep_h[0],
+#                       bg_data->collision[0]);
+#
+# and mFM_BgUtDataSet (m_field_make.c:121) walks it strictly forward, 256 units,
+# copying each into the heap-resident mFM_bg_info_c::collision and its low 5
+# bits into keep_h.  Nothing indexes it randomly, takes its address, memcpy()s
+# it, or byte-swaps it — the TARGET_PC bswap path in that file touches only FG
+# data loaded from ARAM (mFM_ByteSwapFGData), never this compile-time table.
+# So the storage does not have to be an array at all; it only has to be
+# replayable in order, once, at that call site.
+#
+# THE ENCODING
+# ------------
+#   * palette: the distinct unit initialisers, ordered by descending frequency.
+#     380 of them across all 75,520 units.  Emitted as C initialiser TEXT, so
+#     the COMPILER packs the bitfields — this generator never needs to know the
+#     bit layout of mCoBG_CollisionData_c, and cannot get it wrong.
+#   * stream: per-array RLE.  Each run is  u8 len (1..255)  then a palette index
+#     as a varint: one byte when < 0x80, otherwise 0x80|(idx>>8) then idx&0xFF.
+#     97.6 % of runs take the one-byte form.
+#   * arrays are deduplicated first (295 -> 257 distinct), so acres that share a
+#     collision map share a stream.
+#
+# WHY TEXT IDENTITY IS A SOUND KEY: cross-checked against the linked ELF —
+# the 380 distinct unit TEXTS map onto exactly 380 distinct u32 VALUES, one to
+# one, in parse order across all 75,520 units.  (Had two texts collided onto one
+# value the only cost would be a slightly larger palette; the reverse cannot
+# happen, since the same text compiles to the same bytes.)
+#
+# WHY NO HEADER SHADOW.  m_field_make.h is #included by 61 TUs *and by ten other
+# headers inside include/*, so a shadow could never reach all of them — the same
+# half-applied split that forced S1a to be a per-TU swap.  Instead both TUs that
+# name the type get a local twin and a pair of #defines placed AFTER the
+# includes, so the vendored header keeps its own type and its own (now
+# unreferenced) `extern mFM_bg_data_c data_bgd[];` declaration.  The twin is
+# emitted from ONE string constant into both files, so they cannot disagree, and
+# each file asserts sizeof() on both the twin and the vendored original.
+#
+# ROUND TRIP: the generator decodes its own stream with the same algorithm the C
+# decoder uses and hard-errors unless it reproduces all 75,520 unit texts.  A
+# corrupt collision map would show up as invisible walls in the field, which is
+# exactly the sort of failure that would be blamed on something else for a week.
+#
+# MEASURED ON THE LINKED IMAGE, two clean full rebuilds of all 3917 TUs differing
+# only in whether this rule ran (2026-08-02, non-stub, DC_ARAM_WINDOW=851968
+# DC_ARENA_BYTES=1900000):
+#   .data       2,638,872 -> 2,337,976   -300,896   (data_bgd 317,420 -> 16,520)
+#   .text col   5,749,148 -> 5,803,980    +54,832   (the column carries .rodata:
+#                                                    palette 1,520 + stream
+#                                                    53,150 + decoder 162)
+#   .bss       11,145,696 -> 11,145,696         0
+#   image dec  19,533,716 -> 19,287,652   -246,064
+#   span      0x12a12e0 -> 0x1265100      -246,240
+#
+# CHECKED, not assumed, on the linked ELF:
+#   * the palette and stream were read back out of the ELF, decoded with this
+#     same algorithm, and compared against the previous build's 295 x 1,024 B of
+#     data_bgd[].collision — bit for bit identical, all 295 maps;
+#   * `data_bgd` is ABSENT from the ELF with no dangling U reference, which also
+#     proves it had exactly one definition (it is NOT one of the 1,367
+#     multiply-defined symbols, despite "collision" in the kb's name for it);
+#   * each of data_bgd_dcshrink / mFM_bgcol_pal_dcshrink / mFM_bgcol_enc_dcshrink
+#     / data_bgd_number has exactly ONE defining input section in the map, and
+#     _graph_proc still resolves exactly once;
+#   * DC_SRC_SHRINK=0 puts .data back to 2,638,872 exactly.
+#
+# kb/levers.md L3 and kb/ram-plan.md P7 both claimed -236,544 and called it
+# ".bss". It is .data, and the real figure is 9,520 B BETTER — the first row in
+# that plan to beat its estimate rather than miss it. Plain dedup of identical
+# collision maps, which is what "-236,544" most plausibly meant, was measured at
+# only 38,912 B (295 arrays, 257 distinct): the saving is in the run-length
+# structure, not in duplicate acres.
+
+S7_BGD = "src/data/field/bg/acre/bg_data.c"
+S7_FM = "src/game/m_field_make.c"
+S7_UNITS = 256              # UT_Z_NUM * UT_X_NUM
+S7_ENTRIES = 295            # data_bgd_number; asserted below
+
+# The twin type, emitted verbatim into BOTH TUs so they cannot drift apart.
+# Field order and types are copied from include/m_field_make.h:269-279 with the
+# collision array replaced by a pointer; everything else is byte-identical, so
+# every positional initialiser in bg_data.c keeps its slot.
+S7_TWIN = """\
+/* --------------------------------------------------------------------
+ * DC_SRC_SHRINK S7 (kb/ram-plan.md P7): mFM_bg_data_c::collision[16][16]
+ * — 1,024 B x 295 acres = 302,080 B of .data — is replaced by a pointer
+ * into a shared run-length stream.  Its one reader, mFM_BgUtDataSet(),
+ * expands it at the single call site in m_field_make.c.  The vendored
+ * type in include/m_field_make.h is left alone; this twin and the two
+ * #defines below are confined to this TU, so no other TU can disagree
+ * about a layout it never sees.
+ * -------------------------------------------------------------------- */
+typedef struct {
+    mActor_name_t bg_id;
+    Gfx* opaque_gfx;
+    Gfx* translucent_gfx;
+    EVW_ANIME_DATA* animation;
+    s8 animation_count;
+    u32 rom_start_addr;
+    u32 rom_end_addr;
+    const u8* collision_enc;
+    mFM_bg_sound_source_data_c sound_source[mFM_SOUND_SOURCE_NUM];
+} mFM_bg_data_dcshrink_c;
+""" + ASSERT("bgd_vendored", "sizeof(mFM_bg_data_c) == 1076") + "\n" \
+    + ASSERT("bgd_twin", "sizeof(mFM_bg_data_dcshrink_c) == 56") + "\n" \
+    + ASSERT("bgd_unit", "sizeof(mCoBG_Collision_u) == 4") + """
+#define mFM_bg_data_c mFM_bg_data_dcshrink_c
+#define data_bgd      data_bgd_dcshrink
+"""
+
+# One collision block as it is generated into bg_data.c: the comment, the
+# opening brace, exactly 16 row lines, the closing brace-comma.  Anchored to
+# the column so it cannot match the sound-source block or anything nested.
+S7_BLOCK_RX = (r"^        // collision data\n"
+               r"        \{\n"
+               r"(?:            \{.*\},\n){16}"
+               r"        \},$")
+
+S7_UNIT_RX = re.compile(r"\{[^{}]*\}")
+
+S7_STATS = {}
+
+
+def _s7_parse(text):
+    """Pull the 295 collision blocks out of bg_data.c as (block_text, units)."""
+    out = []
+    for m in re.finditer(S7_BLOCK_RX, text, re.MULTILINE):
+        rows = m.group(0).split("\n")[2:-1]
+        units = []
+        for r in rows:
+            u = S7_UNIT_RX.findall(r)
+            if len(u) != 16:
+                raise SystemExit("make_src_shrink S7: a collision row has %d "
+                                 "units, expected 16:\n  %s" % (len(u), r[:120]))
+            units += u
+        if len(units) != S7_UNITS:
+            raise SystemExit("make_src_shrink S7: block has %d units, expected %d"
+                             % (len(units), S7_UNITS))
+        out.append((m.group(0), tuple(units)))
+    return out
+
+
+def _s7_encode(arrays, index_of):
+    """RLE one array into (u8 len, varint palette index) runs."""
+    buf = bytearray()
+    for a in arrays:
+        i = 0
+        while i < S7_UNITS:
+            j = i
+            while j < S7_UNITS and a[j] == a[i] and j - i < 255:
+                j += 1
+            k = index_of[a[i]]
+            buf.append(j - i)
+            if k < 0x80:
+                buf.append(k)
+            else:
+                buf.append(0x80 | (k >> 8))
+                buf.append(k & 0xFF)
+            i = j
+    return bytes(buf)
+
+
+def _s7_decode(stream, off, palette):
+    """The C decoder, in Python. Must stay in lockstep with mFM_BgUtDataSet."""
+    out = []
+    n = S7_UNITS
+    p = off
+    while n > 0:
+        ln = stream[p]; p += 1
+        k = stream[p]; p += 1
+        if k & 0x80:
+            k = ((k & 0x7F) << 8) | stream[p]; p += 1
+        if ln == 0 or ln > n:
+            raise SystemExit("make_src_shrink S7: malformed run len=%d n=%d" % (ln, n))
+        out += [palette[k]] * ln
+        n -= ln
+    return tuple(out)
+
+
+def _s7_rules():
+    import collections
+
+    text = (REPO / S7_BGD).read_text(encoding="utf-8", errors="surrogateescape")
+    blocks = _s7_parse(text)
+    if len(blocks) != S7_ENTRIES:
+        raise SystemExit(
+            "make_src_shrink S7: found %d collision blocks in %s, expected %d.\n"
+            "  The vendored table has changed size — re-derive the rule (and the\n"
+            "  sizeof asserts in S7_TWIN) rather than relaxing this check."
+            % (len(blocks), S7_BGD, S7_ENTRIES))
+
+    freq = collections.Counter(u for _, units in blocks for u in units)
+    palette = [u for u, _ in freq.most_common()]
+    index_of = {u: i for i, u in enumerate(palette)}
+    if len(palette) > 0x8000:
+        raise SystemExit("make_src_shrink S7: palette of %d exceeds the varint's "
+                         "15-bit index" % len(palette))
+
+    # Deduplicate whole arrays, first-seen order, and lay their streams out
+    # back to back.
+    offsets = {}
+    order = []
+    for _, units in blocks:
+        if units not in offsets:
+            offsets[units] = None
+            order.append(units)
+    stream = bytearray()
+    for units in order:
+        offsets[units] = len(stream)
+        stream += _s7_encode([units], index_of)
+    stream = bytes(stream)
+
+    # ROUND TRIP — every one of the 295 arrays, through the same algorithm the
+    # generated C runs. A silent encoder bug here is invisible walls in-game.
+    for _, units in blocks:
+        if _s7_decode(stream, offsets[units], palette) != units:
+            raise SystemExit("make_src_shrink S7: round trip FAILED — refusing "
+                             "to emit a collision stream that does not decode "
+                             "back to the vendored table.")
+
+    # ---- the emitted C ----------------------------------------------------
+    pal_c = ["/* DC_SRC_SHRINK S7: the %d distinct collision units, most common"
+             " first.\n * Emitted as initialiser TEXT so the compiler packs the"
+             " bitfields — this\n * generator never has to know the bit layout of"
+             " mCoBG_CollisionData_c. */" % len(palette),
+             "const mCoBG_Collision_u mFM_bgcol_pal_dcshrink[%d] = {" % len(palette)]
+    pal_c += ["    %s," % u for u in palette]
+    pal_c.append("};")
+
+    hexed = ["0x%02X," % b for b in stream]
+    rows = ["    " + "".join(hexed[i:i + 16]) for i in range(0, len(hexed), 16)]
+    enc_c = ["/* DC_SRC_SHRINK S7: %d acre collision maps (%d distinct) as"
+             " run-length pairs:\n * u8 run length 1..255, then a palette index"
+             " — one byte if < 0x80,\n * else 0x80|(idx>>8) followed by idx&0xFF."
+             "  %d B, down from %d. */"
+             % (S7_ENTRIES, len(order), len(stream), S7_ENTRIES * 1024),
+             "static const u8 mFM_bgcol_enc_dcshrink[%d] = {" % len(stream)]
+    enc_c += rows
+    enc_c.append("};")
+
+    preamble = "\n".join(pal_c) + "\n\n" + "\n".join(enc_c) + "\n\n"
+
+    def block_repl(m):
+        return "        &mFM_bgcol_enc_dcshrink[%d]," % offsets[
+            _s7_parse(m.group(0))[0][1]]
+
+    S7_STATS.update(
+        entries=S7_ENTRIES, distinct=len(order), palette=len(palette),
+        stream=len(stream),
+        before=S7_ENTRIES * 1076,
+        after=S7_ENTRIES * 56 + len(stream) + len(palette) * 4,
+    )
+
+    bgd_rules = [
+        # 1. The twin type + the two #defines, after the file's one include.
+        (1, r'^#include "m_field_info.h"$',
+         '#include "m_field_info.h"\n\n' + S7_TWIN),
+        # 2. The palette and the stream, immediately before the table that
+        #    points into them.
+        (1, r"^extern mFM_bg_data_c data_bgd\[\] = \{$",
+         preamble + "extern mFM_bg_data_c data_bgd[] = {"),
+        # 3. The 295 collision blocks -> a pointer into the stream. The count
+        #    is the file's own checksum: this pattern matches the generated
+        #    shape and nothing else.
+        (S7_ENTRIES, S7_BLOCK_RX, block_repl),
+    ]
+
+    fm_rules = [
+        # 1. Same twin, after the last include and before the first use. It has
+        #    to sit after them: the vendored header must keep its own type.
+        (1, r'^#include "m_bgm.h"$',
+         '#include "m_bgm.h"\n\n' + S7_TWIN
+         + "extern mFM_bg_data_dcshrink_c data_bgd_dcshrink[];\n"
+           "extern const mCoBG_Collision_u mFM_bgcol_pal_dcshrink[];\n"),
+        # 2. The one reader, replaced by the stream decoder. Same signature
+        #    shape, same two outputs, same order.
+        (1,
+         r"^static void mFM_BgUtDataSet\(mCoBG_Collision_u\* collision, u8\* keep, "
+         r"mCoBG_Collision_u\* data\) \{\n"
+         r"    int ut_x;\n"
+         r"    int ut_z;\n"
+         r"\n"
+         r"    for \(ut_z = 0; ut_z < UT_Z_NUM; ut_z\+\+\) \{\n"
+         r"        for \(ut_x = 0; ut_x < UT_X_NUM; ut_x\+\+\) \{\n"
+         r"            collision\[0\] = data\[0\];\n"
+         r"            keep\[0\] = data\[0\]\.data\.center;\n"
+         r"\n"
+         r"            collision\+\+;\n"
+         r"            data\+\+;\n"
+         r"            keep\+\+;\n"
+         r"        \}\n"
+         r"    \}\n"
+         r"\}$",
+         "/* DC_SRC_SHRINK S7: `data` is now a run-length stream, not a\n"
+         " * mCoBG_Collision_u[16][16].  Same two outputs in the same order —\n"
+         " * the unit into collision[], its `center` field into keep[].\n"
+         " * Encoding: u8 run length, then a palette index, one byte if < 0x80\n"
+         " * else 0x80|(idx>>8) followed by idx&0xFF.  Generated and round-trip\n"
+         " * checked by tools/dcstub/make_src_shrink.py.  The two defensive\n"
+         " * bounds below cannot fire on a stream this generator emitted; they\n"
+         " * are here so a future encoder bug overruns nothing. */\n"
+         "static void mFM_BgUtDataSet(mCoBG_Collision_u* collision, u8* keep, "
+         "const u8* data) {\n"
+         "    int n = UT_Z_NUM * UT_X_NUM;\n"
+         "\n"
+         "    while (n > 0) {\n"
+         "        int len = data[0];\n"
+         "        int idx = data[1];\n"
+         "        mCoBG_Collision_u unit;\n"
+         "\n"
+         "        data += 2;\n"
+         "        if (idx & 0x80) {\n"
+         "            idx = ((idx & 0x7F) << 8) | data[0];\n"
+         "            data++;\n"
+         "        }\n"
+         "        if (len == 0) {\n"
+         "            break;\n"
+         "        }\n"
+         "        if (len > n) {\n"
+         "            len = n;\n"
+         "        }\n"
+         "        unit = mFM_bgcol_pal_dcshrink[idx];\n"
+         "        n -= len;\n"
+         "\n"
+         "        while (len > 0) {\n"
+         "            collision[0] = unit;\n"
+         "            keep[0] = unit.data.center;\n"
+         "\n"
+         "            collision++;\n"
+         "            keep++;\n"
+         "            len--;\n"
+         "        }\n"
+         "    }\n"
+         "}"),
+        # 3. The one call site.
+        (1,
+         r"^    mFM_BgUtDataSet\(bg_info->collision\[0\], bg_info->keep_h\[0\], "
+         r"bg_data->collision\[0\]\);$",
+         "    mFM_BgUtDataSet(bg_info->collision[0], bg_info->keep_h[0],\n"
+         "                    bg_data->collision_enc); " + MARK),
+    ]
+
+    return [(S7_BGD, "swap", bgd_rules), (S7_FM, "swap", fm_rules)]
+
+
+RULES += _s7_rules()
+
 # Expected .bss delta, from `sh-elf-nm -S` on the clean non-stub ELF. Printed so
 # a build that saves the wrong amount is obvious at a glance.
 EXPECTED = [
@@ -534,6 +912,12 @@ def main():
             rb, ra, ra - rb))
         print("  expected .text : {:+,} B   [S6's indexed loader]".format(
             EXPECTED_TEXT_S6))
+        s = S7_STATS
+        print("  expected .data : {:,} -> {:,}  ({:+,} B)   [S7, data_bgd]".format(
+            s["before"], s["after"], s["after"] - s["before"]))
+        print("                   {:,} acres, {:,} distinct maps, palette {:,},"
+              " stream {:,} B".format(
+                  s["entries"], s["distinct"], s["palette"], s["stream"]))
         print("  (dc/Makefile adds -16,384 more by dropping KOS's dcache")
         print("   walk buffer out of dc/src/dc_os.c — see DC_OS_TU_OPT there.)")
 

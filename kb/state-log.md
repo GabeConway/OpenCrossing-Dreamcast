@@ -111,18 +111,19 @@ half that decides whether the town draws.
 
 **The span was re-measured on a clean full-size rebuild** (no probes, no stub,
 `DC_SRC_SHRINK=1`): text 5,749,944 / data 2,638,872 / bss 10,837,376, `_end` at
-`0x8d265f60` ⇒ **span 18,997,600**, replacing the 19,564,308 older docs quote.
-Against the knobs the running image actually uses:
+`0x8d265f60` ⇒ **span 19,226,464** (⚠️ this was first written up as 18,997,600,
+which was an arithmetic slip — see `kb/traps.md`, "Measuring the image").
+Against the knobs the running image actually used at that point:
 
 ```
-span 18,997,600 + additive 3,079,648 (KOS 262,144 + arena 1,900,000
-                 + ARAM 851,968 + threads 65,536) = 22,077,248
+span 19,226,464 + additive 3,079,648 (KOS 262,144 + arena 1,900,000
+                 + ARAM 851,968 + threads 65,536) = 22,306,112
                                         usable    = 16,646,144
-                                        ⇒ over by    5,431,104
+                                        ⇒ over by    5,659,968
 ```
 
-At the policy knobs (arena 2,705,504 + ARAM 1,048,576) it is over by
-6,433,216. Either way the old 6,999,924 is no longer the number.
+P7 has since taken 238,048 B off that span. `kb/STATE.md` carries the current
+figure; the old 6,999,924 is no longer the number under any knob setting.
 
 ## ⭐ 2026-08-02 — THE TITLE SCREEN RENDERS
 

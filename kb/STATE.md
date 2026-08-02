@@ -54,16 +54,24 @@ State the fit as **one inequality, never two pools**. Splitting it into an
 ```
 (image span) + (genuinely additive heap) ≤ 16,646,144
 
-  image span        18,997,600   measured 2026-08-02, clean full-size rebuild
-                                 text 5,749,944 / data 2,638,872 / bss 10,837,376
-                                 _end 0x8d265f60
+  image span        18,988,416   measured 2026-08-02 after P7, clean rebuild
+                                 text 5,804,776 / data 2,337,976 / bss 10,837,376
+                                 _end 0x8d22bd80
   additive heap      3,079,648   KOS 262,144 + arena 1,900,000
                                  + ARAM window 851,968 + threads 65,536
-  ⇒ over by          5,431,104
+  ⇒ over by          5,421,920
 ```
 
 At the *policy* knobs (arena 2,705,504 + ARAM 1,048,576) it is over by
-6,433,216. Both supersede the 6,999,924 that older docs quote.
+6,424,032. Both supersede the 6,999,924 that older docs quote.
+
+⚠️ **Correction, 2026-08-02:** an earlier version of this block said the
+pre-P7 span was 18,997,600 and the gap 5,431,104. That was an arithmetic slip
+— `0x8d265f60 - 0x8c010000` is **19,226,464**, which is what the older docs
+said all along. The `size` "dec" column is not the span: it omits inter-section
+alignment and it counts `.ocram`, which lives at `0x7c001000` and is not in the
+image at all. **Take the span from `_end` minus `0x8c010000`, never from
+`dec`.**
 
 `.text` + `.data` = 8,388,816 B and neither can shrink — `-O0` is mandatory, so
 `.text` can only be *relocated*. The lever big enough is demand-loading the

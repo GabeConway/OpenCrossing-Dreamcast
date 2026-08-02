@@ -101,7 +101,7 @@ Cost: small — a host-side hash pass over the generated tables gives the number
 without changing the build. Worth doing purely because the answer is cheap and
 currently unknown.
 
-### S3. Bank the independent savings. ✅ PARTLY DONE — 2,409,240 B banked (2026-08-01 + 08-02).
+### S3. Bank the independent savings. ✅ **DONE — 2,591,016 B banked** (2026-08-01 + 08-02).
 
 Was billed as "six measured, mutually independent moves, ~4.3 MB". **All three
 parts of that description were wrong** — the total is 2,928,267 B, the moves are
@@ -114,6 +114,7 @@ carries the re-costed table. Banked so far (commit `b0e009d`):
 | `dc_gx` + `dc_os` | −278,796 | vertex 8192×40 → 2040×32; hand-rolled `ocbp` loop |
 | `pc_m_card` | −308,234 | delete a double buffer, retype, move to the arena |
 | `make_src_shrink.py` S6 (2026-08-02) | −598,424 **image, not `.bss`** | `s_assets[].path` + its 14,495 string literals deleted |
+| `make_src_shrink.py` S7 (2026-08-02) | −246,064 **image, not `.bss`** | `data_bgd[].collision` run-length coded; `.data` −300,896, `.rodata` +54,832 |
 
 **`s_assets[]` name strings: ✅ BANKED 2026-08-02, −598,424 B of image**
 (`.rodata` −598,648, `.text` +224, span −598,112). `make_src_shrink.py` rule
@@ -125,8 +126,25 @@ consumer is a `.bin` `fopen` fallback that cannot be reached on DC.
 `s_assets[]` table, which is live, as string pool. See `kb/levers.md` L3
 "Correction 0". `DC_SRC_SHRINK=0` still reverts everything.
 
-Still unbanked from L3: the **`data_bgd` collision split, −236,544 B**
-(`kb/ram-plan.md` P7). That is all of S3 that is left.
+**`data_bgd` collision split: ✅ BANKED 2026-08-02, −246,064 B of image** —
+`.data` −300,896, `.rodata`/`.text` +54,832, `.bss` unchanged. Rule **S7**
+run-length codes the 295 acre collision maps (317,420 B of `.data`, 95.2 % of it
+the `collision[16][16]` member) against a 380-entry palette and expands them at
+the single call site that reads them, `m_field_make.c:271`, which walks them
+sequentially into a heap-resident copy once per block load. Verified by decoding
+the palette and stream back out of the *linked* ELF and comparing all 295 maps
+against the previous build bit for bit.
+
+Two corrections it produced: **"collision" in the name means the collision
+*map*, not a symbol collision** — `data_bgd` is singly defined and is not part
+of the 1,367-symbol `--allow-multiple-definition` family; and the saving is in
+`.data`, not `.bss`. The −236,544 estimate had no derivation anywhere in the
+repo and came in **9,520 B under** the measured result, the only row so far to
+be beaten rather than missed. Plain dedup of identical maps was measured too and
+is worth only 38,912 B — the saving is in the run-length structure, not
+duplicate acres.
+
+**S3 is complete.**
 
 ### S4. Build the loader — `kb/levers.md` L1 + L2. ⭐ NOW THE CRITICAL PATH.
 
