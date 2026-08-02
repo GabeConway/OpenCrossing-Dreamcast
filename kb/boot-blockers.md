@@ -1,28 +1,24 @@
 # Boot blockers — what the running game hits next
 
 Written 2026-08-02. A **read-only audit**: no code was changed to produce it.
+It answers one question — *as the port gets further, which stub does the game
+reach first?* — and ranks by **reach**, not difficulty. Counterweight to
+`kb/levers.md`, which ranks by bytes.
 
-This file answers one question — *as the port gets further, which stub does the
-game reach first?* — and ranks by **reach**, not by difficulty. It is the
-counterweight to `kb/levers.md`, which ranks by bytes.
-
-**Evidence base.** One console log,
+**Evidence.** One console log,
 `~/.cache/oc-dc-harness/runs/smoke-OpenCrossing-20260802-091704-87290/console.log`
-(3,956 lines), plus `dc/build/AnimalCrossing.map` (read 2026-08-02 10:17 — the
-build tree is live, other agents are rebuilding it) and a read of every file in
-`dc/src/`. Claims are tagged **[traced]** (I followed it to a line or a log
-line) or **[inferred]** (reasoned, not observed). `CLAUDE.md` §5 exists because
-this distinction has been lost before.
-
-**Out of scope, deliberately:** the 5,431,104 B RAM gap (`kb/levers.md`,
-`kb/ram-plan.md`) and the S4 asset loader. Everything below assumes they land.
+(3,956 lines), plus `dc/build/AnimalCrossing.map` (read 10:17; the build tree is
+live) and a read of every file in `dc/src/`. Claims are tagged **[traced]** or
+**[inferred]** — `CLAUDE.md` §5 exists because that distinction has been lost
+here before. **Out of scope:** the 5,431,104 B RAM gap and the S4 loader;
+everything below assumes they land.
 
 ---
 
 ## 1. Where execution actually is
 
 `kb/state-log.md`'s boot list is accurate but stops one step early. The game
-does **not** stop at the save scan. From the log:
+does **not** halt at the save scan:
 
 ```
 180  [PC] No save file found
@@ -31,13 +27,13 @@ does **not** stop at the save scan. From the log:
 ...  [LOGO] draw: action=3 ... press_start_opacity=255 / 0 / 143 / 255 ...
 ```
 
-It passes the save scan, enters the title demo, and then **loops forever in
+It passes the scan, enters the title demo, and **loops forever in
 `aAL_game_start_wait` (`src/actor/ac_animal_logo.c:245`) waiting for START or
 A**. `padmgr_isConnectedController(PAD0)` is true, `mLd_StartFlagOn` has run,
-`famicom_mount_archive_end_check()` returns 1 — every gate on
+`famicom_mount_archive_end_check()` returns 1 — every gate at
 `ac_animal_logo.c:268-273` is open except the button. [traced]
 
-So the frontier is not a crash and not a stub. It is an **unpressed button**.
+The frontier is not a crash and not a stub. It is an **unpressed button**.
 
 ---
 
@@ -219,58 +215,53 @@ AC needs; its note costs a false to-do entry every run.
 
 ## 5. What I could not determine
 
-- **Whether the audio pump can be restored cheaply.** I traced that it is
-  disconnected. I did not measure what re-linking `Jac_VframeWork`,
-  `Jac_UpdateDAC` and their callees costs in `.text`, and the RAM ledger has
-  never budgeted for it. That number matters before anyone commits.
-- **Whether `GXCopyTex` alone is sufficient** (see §3.8). The record-vs-replay
-  reasoning is inference; nobody has run a build with the submenu open.
-- **What the player-select scene actually calls.** I traced the title demo to
-  `aAL_ACTION_OUT` and `aAL_title_game_data_init_start_select`
-  (`ac_animal_logo.c:143`), and confirmed the next scene is
-  `SCENE_PLAYERSELECT` / `SCENE_START_DEMO` (`include/m_scene_table.h:46,50`).
-  I did **not** trace the platform calls the train intro and town creation make,
-  because they are dominated by asset loads that the stub build cannot perform.
-  That trace becomes cheap the moment items 4 and the S4 loader exist — and
-  pointless before.
-- **DVD stall magnitude on real hardware.** The ~8 s figure is arithmetic on
-  `4,132,608 B ÷ 500 KB/s`, not a measurement. No burn has been timed.
+- **What restoring the audio pump costs in `.text`.** I traced that it is
+  disconnected; I did not measure what re-linking `Jac_VframeWork`,
+  `Jac_UpdateDAC` and their callees adds. The RAM ledger has never budgeted it,
+  and that number matters before anyone commits.
+- **Whether `GXCopyTex` alone is sufficient** (§3.8). The record-vs-replay
+  reasoning is inference; nobody has run a build with a submenu open.
+- **What the player-select and town-creation scenes actually call.** I traced
+  the title demo to `aAL_title_game_data_init_start_select`
+  (`ac_animal_logo.c:143`) and confirmed the next scene is `SCENE_PLAYERSELECT`
+  / `SCENE_START_DEMO` (`include/m_scene_table.h:46,50`). I did **not** trace
+  their platform calls: they are dominated by asset loads the stub build cannot
+  perform, so the trace is cheap the moment item 4 and the S4 loader exist and
+  near-worthless before.
+- **DVD stall magnitude on hardware.** `4,132,608 B ÷ 500 KB/s` is arithmetic.
+  No burn has been timed.
 - **Whether `Nas_smzAudioFrame`/`CreateAudioTask` being linked implies a second
-  live audio path.** Both are at real addresses in the map; the only chain I
-  found to them runs through deleted code. I could not close this by static
-  reading alone, and it does not change the conclusion (the queue is provably
-  never drained).
-- **The `dc_unimpl_dump()` roll-up never runs.** It is called from
-  `dc_misc.c:345`'s `__OSUnhandledException` and from `main()`'s exit — the game
-  never returns and has not faulted, so the designed "to-do list at exit" has
-  never printed. Individual `[DC/TODO]` lines are the only signal today. Across
-  **every** run in `~/.cache/oc-dc-harness/runs/`, exactly three distinct stubs
-  have ever been hit: `PADControlMotor`, `AIInit`, `ARStartDMA`. [traced]
+  live audio path.** Both are at real addresses in the map; every chain I found
+  to them runs through deleted code. Static reading could not close it. It does
+  not change the conclusion — the queue is provably never drained.
+- **The `dc_unimpl_dump()` roll-up has never printed.** It runs only from
+  `dc_misc.c:345`'s `__OSUnhandledException` and from `main()`'s exit; the game
+  never returns and has not faulted. Individual `[DC/TODO]` lines are the only
+  signal today, and across **every** run in `~/.cache/oc-dc-harness/runs/`
+  exactly three distinct stubs have ever been hit: `PADControlMotor`, `AIInit`,
+  `ARStartDMA`. [traced]
 
 ---
 
 ## 6. What I would hand an agent tomorrow
 
 **A. `DC_AUTOSTART=<frames>` in `dc_pad.c` (item 4).** ~30 lines, one env knob,
-zero risk, and it is a *multiplier*: items 5–14 are all unobservable until it
-exists, and every one of them will otherwise be evaluated by reading code
-instead of by running it. This project's history is a list of things that
-looked right statically and were not.
+zero risk, and a *multiplier*: items 5–14 are unobservable until it exists, so
+without it every one of them gets evaluated by reading code. This project's
+history is a list of things that looked right statically and were not.
 
-**B. Rate-limit `OSReport` in `dc_os.c:606` (item 2).** ~20 lines. 85 % of the
-console is one line; the next agent to debug anything pays that tax. It is also
-the only part of the audio problem that can be fixed without first answering a
-CPU-budget question.
+**B. Rate-limit `OSReport` at `dc_os.c:606` (item 2).** ~20 lines. 85 % of the
+console is one line and the next agent to debug anything pays that tax. It is
+also the only part of the audio problem that can be fixed without first
+answering a CPU-budget question.
 
 **C. `OSGetSoundMode()` → stereo (item 9).** One line, and it retires a stub
-that is currently *lying* to the game in a way that contradicts a written plan
-of record. Cheapest correctness win in the file.
+that is actively lying to the game against a written plan of record.
 
-Not B-side-of-the-coin items: **not** the audio pump (blocked on the §7 item-1
-voice-count measurement, which belongs on the PC build), **not** EFB capture
-(unreachable until A lands and the town draws), **not** DVD read-ahead
-(invisible in the emulator, so it cannot be validated yet and it re-opens the
-single-threading assumption).
+Explicitly **not**: the audio pump (blocked on the voice-count measurement,
+which belongs on the PC build); EFB capture (unreachable until A lands and the
+town draws); DVD read-ahead (invisible in the emulator, so unvalidatable today,
+and it re-opens the single-threading assumption).
 
 ---
 
