@@ -68,6 +68,31 @@ for those see `kb/closed.md`.
 - **When in doubt, `rm dc/build/AnimalCrossing.elf`** and re-link. A missing
   ELF cannot be stale.
 
+## Disc content and the scratch-tree mechanism
+
+- **`mkdcdisc -d DIR` puts DIR ITSELF on the disc**, so files land at
+  `/cd/DIR/name` and every `DVDFastOpen` misses with no diagnostic. The flag
+  you want is **`-D`** (contents, excluding the root). `dc_dvd.c:113` builds
+  every path as `"/cd" + "/" + name`, flat, with no subdirectory.
+- **Colima does not share `/private/tmp` with the VM.** A `-v` bind mount of a
+  path under it is silently EMPTY inside the container — the build printed
+  "0 files" and carried on. Stage disc content somewhere under `$HOME`.
+- **`"${ARR[@]}"` on an empty array is an unbound-variable error under `set -u`
+  in bash 3.2**, the macOS system bash. Every `dc/build-dc.sh` run without
+  `DC_DISC_ROOT` died on it. Use `${ARR[@]+"${ARR[@]}"}`.
+- **A quoted `#include` resolves against the INCLUDING FILE'S directory first**,
+  so an `-I` shadow of a header in `include/` can never reach a consumer that
+  pulls it in via a *sibling header* in `include/`. MEASURED: a shadow of
+  `include/ac_structure.h` reaches `src/actor/ac_structure.c` but **not**
+  `src/actor/npc/ac_npc.c` — a half-applied shadow, i.e. a silent ODR split that
+  `--allow-multiple-definition` will not complain about. Header shadows are only
+  safe for headers included directly by the TUs you care about; otherwise use a
+  per-TU source swap confined to one TU, plus a compile-time assert pinning the
+  unshrunk `sizeof`. `tools/dcstub/make_src_shrink.py` is built around this.
+- **Every rewrite rule must hard-error on no-match.** A regex that silently
+  matches nothing produces a build that looks fine and saves nothing, or worse,
+  shrinks one of two consumers.
+
 ## Agent hygiene
 
 - **Agents must not run git.** The main thread commits.

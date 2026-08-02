@@ -57,17 +57,17 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | 3 | `kb/traps.md` | read before touching the build, harness, or prelude |
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
 
-**The port boots.** `DC_ASSET_STUB=1 bash dc/build-dc.sh` builds a throwaway
-image whose asset arrays are one element each; it fits (`MEMLEDGER FIT …
-margin=725740 OK`) and runs all the way to `JW_Init2` in Flycast. Read
-`kb/STATE.md` §"S1 IS DONE" before assuming anything is untested.
+**The port runs.** A `DC_ASSET_STUB=1` + `DC_DISC_ROOT=…` image boots in
+Flycast, mounts both RARC archives off a real disc, and reaches **`graph_proc`**
+— the game's render loop. Nothing is drawn yet (`dc_gx`'s backend is still
+`NONE`), so a Flycast window on the Sega logo is expected, not a fault. Read
+`kb/STATE.md` §"How far it gets today" before assuming anything is untested.
 
 **Status (2026-08-01): M0 and M1 met, M2 blocked on RAM.** All 3917 TUs compile
-and link for sh-elf. The image spans 21,374,068 B against 16,646,144 B of
-usable RAM and **is over by 8,273,108 B**, so it links but will not boot — the
-failure is size alone, proven by controlled experiment. State the fit as **one
-inequality**, never two pools; splitting it has already produced two wrong
-numbers.
+and link for sh-elf. The image spans 19,564,308 B and, with 4,081,760 B of
+additive heap, **is over by 6,999,924 B** — down from 8,810,740 after S3 banked
+1,810,816 B. State the fit as **one inequality**, never two pools; splitting it
+has already produced two wrong numbers.
 
 ---
 
@@ -105,6 +105,7 @@ numbers.
 | `kb/mem-budget.md` | the original 16 MB ledger. ⚠️ superseded in parts — its own header lists two corrections, and its `-O2`/`-Os` remedies are void |
 | `kb/research-mmu-paging.md` | why MMU paging is DEAD. Read before ever reconsidering |
 | `kb/research-n64-origin.md` | why the 22.5 MB image is *not* an emulation artefact |
+| `kb/research-creative-ram.md` | **unbanked CONCEPTS**, ranked, each with a failure mode and a cheapest experiment. T1 (textures never pooled) is the highest-value open idea in the project |
 | `kb/research-second-tier-memory.md` | ⚠️ salvaged fragment, not a finished doc. VRAM/AICA bandwidth, never run |
 
 ### Assets & disc

@@ -14,28 +14,33 @@ knowledge lives in three companions, read on demand:
 
 ## Headline
 
-**M0 and M1 are met. M2 is blocked on RAM. The port is not yet known to be
-viable at stock 16 MB.**
+**M0 and M1 are met. The port RUNS. M2 is still blocked on RAM, but the gap is
+down from 8,810,740 to 6,999,924 B and the platform layer is no longer a
+suspect.**
 
 - **3917 / 3917 translation units compile and link for sh-elf**, zero
   exclusions. `src/` carries only **four** small `#if defined(TARGET_DC)`
   branches; every *compat* fix lives in `dc/include/dc_prelude.h` as a
   force-include. That is the whole licence to touch `src/`.
 - **The harness works and is verified against real CDIs**, not asserted.
-- **The image does not boot, on size alone**, proven by controlled experiment.
+- **A stubbed image boots and reaches `graph_proc`** — the game's render loop —
+  with both archives mounted off a real disc. See "How far it gets" below.
+- **The full image still does not fit**, and that is now the only thing between
+  here and a playable build.
 
 ## The one inequality
 
 ```
 (image span) + (genuinely additive heap) ≤ 16,646,144
-  image span today  21,375,124   (0x8c010000 → 0x8d472c94)
+  image span today  19,564,308   (0x8c010000 → 0x8d2c8714)
   additive heap      4,081,760   (KOS 262,144 + arena 2,705,504
                                   + ARAM window 1,048,576 + threads 65,536)
-  ⇒ over by          8,810,740
+  ⇒ over by          6,999,924
 ```
 
-Sections: text 6,320,024 / data 2,638,852 / bss 12,415,796. Measured
-2026-08-01 from a **clean full rebuild** of all 3917 TUs.
+Sections: text 6,320,700 / data 2,638,852 / bss 10,669,268. Measured
+2026-08-01 after S3 landed, from a **clean full rebuild** of all 3917 TUs.
+Before S3: text 6,320,024 / data 2,638,852 / bss 12,415,796, span 21,375,124.
 
 ⚠️ **The ARAM window grew 512,000 → 1,048,576 on 2026-08-01, and that is a
 debt, not a decision.** The window was anchored at ARAM offset 0 while every
@@ -63,10 +68,10 @@ Derived form, which is what the plan below is costed against:
 ```
 usable RAM                                    16,646,144
   − additive heap                              4,081,760
-  − .text 6,320,024 + .data 2,638,852          8,958,876
+  − .text 6,320,700 + .data 2,638,852          8,959,552
   ────────────────────────────────────────────────────────
-  = .bss ceiling                                3,605,508
-    .bss today                                 12,415,796  → shed 8,810,288
+  = .bss ceiling                                3,604,832
+    .bss today                                 10,669,268  → shed 7,064,436
 ```
 
 `.text` + `.data` = 8,957,404 B and neither can shrink — `-O0` is mandatory, so
@@ -76,6 +81,42 @@ The one lever big enough is demand-loading the 8,771,358 B of asset destination
 arrays (`kb/levers.md` L1) — that alone lands `.bss` at 3,644,150, under the
 ceiling. **But the pool it loads into is additive heap, so it may be at most
 ~498,250 B.** That constraint drives the whole plan below.
+
+## How far it gets today — read this before assuming anything is untested
+
+`DC_ASSET_STUB=1` + `DC_DISC_ROOT=<flat disc root>` builds an image that fits
+(`margin=1,934,444 OK`) and runs in Flycast. Rebuild and run it with:
+
+```bash
+python3 tools/dcasset/dcasset.py extract "<the ISO>" --out /tmp/discroot
+bash dc/stage-disc.sh /tmp/discroot ~/.cache/oc-dc-discroot
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 bash dc/build-dc.sh
+bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 180
+```
+
+Confirmed running, in order, from one boot: `dc_main.c`'s trampoline · KOS 2.3
+init and the serial console · maple (controller + 2 VMUs) · `MEMLEDGER FIT` ·
+`vid_set_mode` 640x480IL NTSC · the GX accumulator · iso9660 `/cd` mount and a
+14-entry root listing · `ac_entry()` · `boot_main()` → `OSInit()` arena ·
+`DVDInit` · ARAM window · `PADInit` · `GXInit` · `AIInit` · `Na_InitAudio` ·
+`sound_initial()`'s 2.5 s wait · `initial_menu_init` · `dvderr_init` ·
+`sound_initial2()` · `LoadStringTable` (`/cd/static.str` loads) · `JW_Init2`
+mounting **`forest_1st.arc`** (852,896 B, 29 files, RARC sig verified) ·
+`HotStartEntry` · `entry()` · `mainproc` · `CreateIRQManager` · `padmgr_Create`
+· `JW_Init3` mounting **`forest_2nd.arc`** (4,132,608 B, 57 files) ·
+`mMsg_aram_init2` · `famicom_mount_archive` · **`graph_proc`** · the save scan.
+
+It stops at "No save file found". **Nothing is ever drawn** — `dc_gx`'s backend
+is still `NONE (stub)`, so a Flycast window sitting on the Sega logo is the
+expected result, not a fault. Rendering is M2/GLdc.
+
+Known-wrong behaviour in this configuration, all understood:
+
+- Assets are `[1]`-sized, so any asset the game touches is garbage.
+- The ARAM window thrashes: mounting `forest_2nd.arc` rebases it 4 times
+  (`rebases=11` by the end). That counter is the signal PLAN §3.1's LRU can no
+  longer be deferred.
+- Nothing saves — `dc_vmu_write_file()` is `DC_UNIMPLEMENTED`.
 
 ## S1 IS DONE — the port has executed (2026-08-01)
 
@@ -260,19 +301,60 @@ Cost: small — a host-side hash pass over the generated tables gives the number
 without changing the build. Worth doing purely because the answer is cheap and
 currently unknown.
 
-### S3. Bank the independent savings — `kb/levers.md` L3, ~4.3 MB.
+### S3. Bank the independent savings. ✅ PARTLY DONE 2026-08-01 — 1,810,816 B banked.
 
-Six measured, mutually independent moves. Does **not** close the gap alone
-(still ~3.97 MB over), but it is what turns S4's ~498 KB pool into a
-comfortable ~4.8 MB one. Genuinely parallelizable; each item is separable and
-independently measurable. Low risk — relocations of known-size objects.
+Was billed as "six measured, mutually independent moves, ~4.3 MB". **All three
+parts of that description were wrong** — the total is 2,928,267 B, the moves are
+not independent, and every individual estimate was off. `kb/levers.md` L3 now
+carries the re-costed table. Banked so far (commit `b0e009d`):
 
-### S4. Build the loader — `kb/levers.md` L1 + L2.
+| pass | `.bss` | mechanism |
+|---|---:|---|
+| `tools/dcstub/make_src_shrink.py` | −1,159,392 | 7 literals, scratch-tree rewrite, `DC_SRC_SHRINK` |
+| `dc_gx` + `dc_os` | −278,796 | vertex 8192×40 → 2040×32; hand-rolled `ocbp` loop |
+| `pc_m_card` | −308,234 | delete a double buffer, retype, move to the arena |
 
-`pc_assets.c` against `assets.pak`, with relocation fixups for the 16,365
-references. Contract: `kb/asset-pack.md`. The biggest single piece of work left
-in the project, now attempted against a platform layer that S1 proved runs and
-with a pool S3 made generous.
+Still unbanked from L3: **`s_assets[]` name strings, −821,569 B** — the single
+biggest remaining S3 item, and it is `.rodata`, not `.bss`. It needs
+`dcasset gentable` + a `pc/src` scratch-tree rewrite; the mechanism now exists
+(`DC_SRC_SHRINK`'s two swap modes) so it is no longer blocked.
+
+### S4. Build the loader — `kb/levers.md` L1 + L2. ⭐ NOW THE CRITICAL PATH.
+
+`pc_assets.c` against `assets.pak`. Contract: `kb/asset-pack.md`. Four things
+learned since this step was written, all of which change how it must be built:
+
+1. **32,355 relocations, not 16,365.** All `R_SH_DIR32`. `dcasset`'s 16,365
+   references and these are **disjoint sets** — `assets_scan.py` finds literal
+   `pc_load_asset(` call sites, which exist only for `.bss` destinations.
+   Reusable: the pack *format* and the window discipline. Not the extractor.
+2. **Use branch trampolines, not pointers.** Turning `Gfx foo_model[]` into
+   `Gfx *foo_model` changes the symbol's *type* and requires rewriting **1,325
+   `extern Gfx x[];` sites** in hand-written decomp, silent on failure. Instead
+   leave an 8-byte `Gfx foo_model[1]` in `.bss` filled at load with
+   `gsSPBranchList(pool_body)` — `emu64.c:3496` `G_DL_NOPUSH` already
+   implements the branch. Every `extern` keeps working, the address is a
+   link-time constant, and 9,931 of the relocations then need zero runtime
+   fixup. Hard-fail exclusions: `anime_6_model` (`emu64_print.cpp:105`
+   range-checks it) plus ~14 symbols indexed as arrays.
+3. **Textures probably should not be pooled at all.** ~4.6 MB of the 8.5 MB of
+   destinations is texture data whose only consumer is the PVR. Pooling it pays
+   for those bytes twice. See `kb/research-creative-ram.md` T1 — this is the
+   highest-value open idea in the project and it should be settled *before* the
+   pool is sized.
+4. **The pool may not need to be a separate extent at all.** `research-creative-ram.md`
+   T4: every pool byte is pack-backed and therefore evictable, so the pool can
+   live in the arena's tail and share slack with bucket 6's unknown peak.
+   This is a decision to take before the loader's allocator interface is
+   written.
+
+### S5. The remaining gap, honestly stated.
+
+After S3's banked 1,810,816 B the image is **6,999,924 B over**. L1 (asset
+demand-loading) measured **8,460,128 B** of `.bss` recovery in the stub
+experiment, so S4 alone is arithmetically sufficient *if* its pool stays under
+~1.46 MB. That is the whole ballgame, and it is why T1 and T4 above matter more
+than any further `.bss` trimming.
 
 ---
 

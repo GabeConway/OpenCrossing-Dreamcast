@@ -4,9 +4,11 @@ Every way found so far to close the RAM gap, with status. **Read this before
 planning any size work.** Read `kb/closed.md` before *proposing* any — several
 obvious ideas are already dead.
 
-Current gap: **8,273,108 B** over; the `.bss` ceiling is **4,143,556 B** against
-12,415,508 today. See `kb/STATE.md` for the inequality and **for the agreed
-S1–S4 execution order** — this file is the ledger, that file is the plan.
+Current gap: **6,999,924 B** over; the `.bss` ceiling is **3,604,832 B** against
+10,669,268 today (measured 2026-08-01 after S3, clean full rebuild). See
+`kb/STATE.md` for the inequality and the execution order — this file is the
+ledger, that file is the plan. `kb/research-creative-ram.md` holds unbanked
+*concepts* that are not yet levers.
 
 Two results that reorder this list, both derived in `kb/STATE.md`:
 
@@ -30,6 +32,51 @@ changes instruction selection is banned:
 ---
 
 ## Applied
+
+### A3. S3 pass one — −1,746,528 B of `.bss` (4th session, commit `b0e009d`)
+
+Measured against a clean full rebuild, not estimated: `.bss` 12,415,796 →
+10,669,268, `.text` +676, span −1,810,816.
+
+- **`tools/dcstub/make_src_shrink.py`, −1,159,392 B.** Seven numeric literals
+  rewritten into `dc/build/shrinksrc`, swapped in by `dc/Makefile`.
+  `DC_SRC_SHRINK=0` is a byte-identical revert. `src/` untouched.
+  - **actor overlay arenas, −422,192.** `aSTR_overlay` 294,912→512 ·
+    `aNPC_{n,s,k,e}` 75,840→192 · `aGYO` 30,720→32 · `aINS` 21,528→72. They are
+    **dead**, not "mutually exclusive": nothing reads them, and the decomp says
+    so itself at `include/m_actor_dlftbls.h:16` and
+    `src/actor/npc/ac_npc_ctrl.c_inc:549`. Shrink the *element*, not the count,
+    so every loop bound, index and NULL check stays byte-identical.
+  - **`prbuf`, −614,368.** Its only writer is a stubbed no-op — `GXCopyTex`
+    (`dc_gx.c:1524`) and `GXBeginDisplayList` (`:1613`) do nothing on DC.
+  - **`audiomemory` `0x90000`→`0x76000`, −106,496.** Measured allocation
+    ceiling is 481,152 B; 2,176 B margin kept. **Do not cut further** —
+    `misc_heap` runs at 99.4% and `Nas_WaveDmaNew` (`system.c:431`) silently
+    `break`s on exhaustion, dropping voices with no error.
+  - **`graph`/`padmgr`/`irqmgr` stacks, −16,336.** `dc_stubs.c:96`
+    `OSCreateThread` returns 0; no thread ever starts.
+- **`dc_gx` + `dc_os`, −278,796 B.** Vertex staging 8192×40 B → 2040×32 B.
+  `color1`/`_pad`/`_reserved` are never written by anything in the tree. 2040
+  not 2048: the split point must be a multiple of 12 and `2048 % 3 = 2` would
+  cut a triangle in half. **Overflow now flushes and continues** instead of
+  dropping geometry — that is what made the old 8192 a correctness requirement
+  rather than a choice. `dc_os.c` hand-rolls the `ocbp` loop so KOS's 16,384 B
+  `arch_dcache_purge_all` buffer is never instantiated.
+- **`pc_m_card`, −308,234 B.** `l_keepMail`/`Original`/`Diary` were a pure
+  double buffer of `l_aram_block_p_table[]`, deleted; the GCI read now
+  validates all three checksums before committing any byte, with rollback
+  through `mCD_set_aram_save_data()`. `l_keepSave` retyped `Save`→`Save_t` and
+  moved to `zelda_malloc` from the arena bucket 6 already reserves, so additive
+  heap is unchanged. Also fixed a latent overrun: the 32-byte-aligned size
+  table is *larger* than the structs, so the old `memcpy` wrote 28 bytes past
+  `l_keepMail`, landing in linker padding by luck.
+
+**Two claims REFUTED during implementation and deliberately not shipped**
+(−58,368 B not taken): jaudio's `CALLSTACK` is a live task-frame pool —
+`GetCallStack()` (`dvdthread.c:45`) hands out 128 slots and
+`pc_dvd_process_all_tasks()` drains them — and `pc_task_buf` is the live audio
+command buffer `RspStart2` consumes every frame (`neosthread.c:35-39`).
+Shrinking either corrupts audio silently.
 
 ### A1. Bucket 6 dead weight — −1,294,496 B of additive heap (3rd session)
 
@@ -131,17 +178,20 @@ Six agents re-derived every row against the real ELF. **Every estimate in
 the stated *mechanisms* were impossible.** The originals are kept in the right
 column so nobody re-proposes them.
 
-| item | defensible | claimed | what changed |
+| item | defensible | claimed | status |
 |---|---:|---:|---|
-| `s_assets[]` name strings | **−821,569** | −0.89 MB | it is `.rodata`, and the fix is **deletion, not a disc index** |
-| **NEW — census finds (see L8)** | **−771,072** | — | nobody had listed these |
-| actor overlay arenas | **−422,192** | −0.46 MB | they are not "mutually exclusive". They are **dead** |
-| `pc_m_card` | **−308,242** | −0.28 MB | over estimate, but the stated mechanism was wrong |
-| `dc_gx` | **−262,152** | −0.24 MB | under estimate |
-| `.data src/data` → disc, **S3-eligible part only** | **−236,544** | −1.94 MB | the rest is S4 work — see below |
-| `audiomemory`/jaudio | **−106,496** | −0.65 MB | **AICA is impossible here**; the lever is "shrink" |
-| **S3 total** | **2,928,267** | ~4.3 MB | |
-| `.data` display lists → S4 pool (T2) | −901,300 | | **belongs inside S4, not S3** |
+| `s_assets[]` name strings | **−821,569** | −0.89 MB | **LIVE — biggest one left.** It is `.rodata`, and the fix is **deletion, not a disc index** |
+| actor overlay arenas | −422,192 | −0.46 MB | ✅ **BANKED** (A3). Dead, not "mutually exclusive" |
+| `pc_m_card` | −308,234 | −0.28 MB | ✅ **BANKED** (A3) |
+| `dc_gx` | −262,400 | −0.24 MB | ✅ **BANKED** (A3), over estimate |
+| `.data src/data` → disc, **S3-eligible part only** | **−236,544** | −1.94 MB | LIVE. The rest is S4 work — see below |
+| `audiomemory` | −106,496 | −0.65 MB | ✅ **BANKED** (A3). **AICA is impossible here**; the lever is "shrink" |
+| census: `prbuf` | −614,368 | — | ✅ **BANKED** (A3) |
+| census: `sys_stacks` + KOS `buffer.4` | −32,720 | — | ✅ **BANKED** (A3) |
+| census: jaudio `CALLSTACK`/`pc_task_buf` | ~~−58,368~~ | — | ❌ **REFUTED** — both are live. See A3 |
+| **banked so far** | **−1,746,528** | | measured, clean rebuild |
+| **still live in S3** | **−1,058,113** | | `s_assets` + the `data_bgd` split |
+| `.data` display lists → S4 pool | −901,300 | | **belongs inside S4, not S3** |
 
 ### Three structural corrections — these change the plan, not just the numbers
 
@@ -188,21 +238,29 @@ them from `assets.pak`. Separately, `nintendo_hi_0` is declared `0x9900`
 `0x66a0`: **12,896 B of pure slack**. It cannot simply be deleted —
 `src/static/Famicom/famicom.cpp:2097` reuses the buffer.
 
-## L8. Census finds — 771,072 B nobody had listed
+## L8. Census finds — 663,472 B banked, 58,368 refuted
 
-From an independent `nm -S` sweep of the clean non-stub ELF. All four **stack
-with L1/S4** (they are not asset destinations, so they survive the loader).
+From an independent `nm -S` sweep of the clean non-stub ELF. `prbuf`,
+`sys_stacks` and KOS `buffer.4` are **banked in A3**. All of them **stack with
+L1/S4** — they are not asset destinations, so they survive the loader.
 
-| symbol | B | where | why it is recoverable |
+❌ **`CALLSTACK` + `pc_task_buf` (58,368 B) were REFUTED on implementation.**
+The census read the base port's "tasks execute immediately inline. No message
+queue, no thread" comment as meaning the buffers were dead. They are not:
+`GetCallStack()` (`dvdthread.c:45`) hands out 128 × 0x100 B frames that
+`DVDT_AddTask` fills and `pc_dvd_process_all_tasks()` drains, and `pc_task_buf`
+is the live audio command buffer `RspStart2` consumes every frame
+(`neosthread.c:35-39`). **A comment about threading says nothing about whether
+the storage is live.** Do not re-propose these.
+
+**Still live, unverified, lower confidence:**
+
+| symbol | B | where | note |
 |---|---:|---|---|
-| `prbuf` | 614,400 | `src/game/m_play.c:62` | `GXCopyTex` is a loud no-op on DC (`dc_gx.c:1524`) and `GXBeginDisplayList` records nothing (`:1613`), so its only writer (`m_play.c:798`) is dead. A2 already halved this; nothing proposed deleting the rest |
-| `CALLSTACK` + `pc_task_buf` | 58,368 | `jaudio_NES/internal/dvdthread.c:29`, `neosthread.c:26` | a stack for a thread that does not exist, and a double-buffered queue for a path the base port's own comment calls "immediately inline. No message queue, no thread" |
-| `graphStack`/`padmgrStack`/`irqmgrStack` | 16,384 | `src/system/sys_stacks.c:5-7` | `dc_stubs.c:96` `OSCreateThread` returns 0 and says so is load-bearing. Caveat: `src/main.c:55` memsets `padmgrStack` |
-| KOS `buffer.4` | 16,384 | via `dc/src/dc_os.c` | KOS `arch/cache.h:197` allocates it only when `__OPTIMIZE_SIZE__` is unset; otherwise it uses the DCA array at `0xF4000008`. `dc/src` is ours, so this is not an `-O0` question |
-
-Unverified, lower confidence: `m_bg_tex.c:3-34` `*_dummy` placeholders 33,792 B;
-`sys_dynamic` GBI arena 132,104 B (`include/sys_dynamic.h:27-35` carries the
-smaller originals commented out, but shrinking risks a `THA_GA` overflow).
+| `dvd_buf.3` | 65,536 | `jaudio_NES/internal/dvdthread.c:105` | double 32 KB DVD bounce. The census missed it *in the file it audited*. Given `CALLSTACK` was refuted in the same file, **check `__WriteBuffer`'s callers before believing this one** |
+| `sys_dynamic` GBI arena | 132,104 | `include/sys_dynamic.h:27-35` | carries the smaller originals commented out, but shrinking risks a `THA_GA` overflow |
+| `m_bg_tex.c:3-34` `*_dummy` | 33,792 | | placeholders, unverified |
+| `mCD_save_data_aram_malloc` | 147,840 | `src/first_game.c:24` | takes the three ARAM blocks from **libc `malloc`** — genuinely additive `sbrk` heap, permanent from boot. They must outlive scenes so `zelda_malloc` cannot hold them; they need a boot-time reservation inside the arena |
 
 ## L4. `.text` relocation — NOT NEEDED. Do not start this.
 
