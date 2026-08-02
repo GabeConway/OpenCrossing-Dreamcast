@@ -291,7 +291,11 @@ point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`.
 
 1. **Read whichever of the three `kb/research-*.md` files above exist.** They
    answer the viability questions; do not re-derive them.
-2. **Measure bucket 6** if the premises agent did not. Cheapest win available.
+2. **Measure bucket 6** — still unmeasured, and ≥1,294,497 B of its 4 MB is
+   already provably dead. Follow `kb/research-budget-premises.md` §2.4 and §6.1.
+   Cheapest win available. Also settle §6.2's one-`ls` question: do
+   `src/data/**/assets/*.inc` exist? A partial check suggested only 4 exist
+   repo-wide, which would mean the non-`TARGET_PC` branch cannot build at all.
 3. **Implement the `pc_assets.c` runtime loader against `assets.pak`**, then
    demand-load the 8,771,358 B of destination arrays into pooled storage. This
    is the single largest lever and it is loader-only. Two rules from the pack
@@ -300,8 +304,12 @@ point. Clean build ≈ 97 s for 3917 TUs + link + CDI at `-j4`.
    search — correct but minutes slower), and **do not delete `do_swap`** (a
    future regeneration with a swap conflict ships that chunk raw with the
    `PRESWAPPED` bit clear).
-4. **Decide the `.text` question** — MMU paging, overlays, or accept that
-   content must be cut. This is the fork in the road for the project.
+4. **Decide the `.text` question.** MMU paging is dead, so the options are
+   narrower than they were: ScummVM-style code overlays (a real, shipping SH-4
+   `R_SH_DIR32` ELF loader — `backends/platform/dc/dcloader.cpp` + `plugin.x`,
+   in production since 0.7.0), offline asset decimation, or accepting that
+   content must be cut. **This is the fork in the road for the project**, and
+   the decimation/cuts branch is the user's call, not an engineering one.
 5. Re-link, re-run `smoke.sh`, and expect a *real* crash to symbolise once the
    image fits — the first one will be informative.
 
