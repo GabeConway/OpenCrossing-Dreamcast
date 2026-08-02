@@ -28,13 +28,28 @@ viable at stock 16 MB.**
 
 ```
 (image span) + (genuinely additive heap) ≤ 16,646,144
-  image span today  21,374,068   (0x8c010000 → 0x8d472874)
-  additive heap      3,545,184   (KOS 262,144 + arena 2,705,504
-                                  + ARAM window 512,000 + threads 65,536)
-  ⇒ over by          8,273,108
+  image span today  21,375,124   (0x8c010000 → 0x8d472c94)
+  additive heap      4,081,760   (KOS 262,144 + arena 2,705,504
+                                  + ARAM window 1,048,576 + threads 65,536)
+  ⇒ over by          8,810,740
 ```
 
-Sections: text 6,318,552 / data 2,638,852 / bss 12,415,508.
+Sections: text 6,320,024 / data 2,638,852 / bss 12,415,796. Measured
+2026-08-01 from a **clean full rebuild** of all 3917 TUs.
+
+⚠️ **The ARAM window grew 512,000 → 1,048,576 on 2026-08-01, and that is a
+debt, not a decision.** The window was anchored at ARAM offset 0 while every
+RARC archive lives at offset ≥ 8,454,144, so `forest_1st.arc` mounted and all
+851,744 B of it were dropped as out-of-window. Fixing the anchor exposed that
+the boot archive alone does not fit in 512,000 B. **PLAN §3.1's disc-backed LRU
+is what pays this back** — until it lands, 536,576 B of the gap is self-
+inflicted.
+
+⚠️ **Measure only against a clean rebuild.** A flag change alone used to leave
+stale objects: an image built after `DC_ASSET_STUB=1` kept `dc_main.c.o`'s
+`-DDC_ASSET_STUB`, so `--gc-sections` deleted `pc_assets_init` and `s_assets`
+and the "non-stub" ELF read **356,776 B too small**. `dc/build/flags.stamp`
+(`kb/traps.md`) now forces the rebuild; the numbers above are post-fix.
 
 **Do not restate this as two pools** (an "image budget" vs a "heap budget").
 Splitting it produced two wrong numbers already — 14,451,476 and then
@@ -47,11 +62,11 @@ Derived form, which is what the plan below is costed against:
 
 ```
 usable RAM                                    16,646,144
-  − additive heap                              3,545,184
-  − .text 6,318,552 + .data 2,638,852          8,957,404
+  − additive heap                              4,081,760
+  − .text 6,320,024 + .data 2,638,852          8,958,876
   ────────────────────────────────────────────────────────
-  = .bss ceiling                                4,143,556
-    .bss today                                 12,415,508  → shed 8,271,952
+  = .bss ceiling                                3,605,508
+    .bss today                                 12,415,796  → shed 8,810,288
 ```
 
 `.text` + `.data` = 8,957,404 B and neither can shrink — `-O0` is mandatory, so

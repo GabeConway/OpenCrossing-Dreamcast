@@ -77,9 +77,12 @@ if [ -n "${DC_DISC_ROOT:-}" ]; then
     MOUNTARGS+=(-v "$(cd "$DC_DISC_ROOT" && pwd)":/discroot:ro)
 fi
 
+# "${MOUNTARGS[@]}" on its own is an UNBOUND VARIABLE under `set -u` in bash 3.2
+# (the macOS system bash) when the array is empty — which is every build that
+# does not set DC_DISC_ROOT. The +"${...}" form expands to nothing instead.
 exec docker run --rm --platform linux/arm64 \
     -v "$REPO":/work \
-    "${MOUNTARGS[@]}" \
+    ${MOUNTARGS[@]+"${MOUNTARGS[@]}"} \
     "${ENVARGS[@]}" \
     "$IMAGE" \
     bash /work/dc/build-dc-docker.sh

@@ -124,19 +124,85 @@ Two rules from the pack author:
 2. **Do not delete `do_swap`.** A future regeneration with a swap conflict
    ships that chunk raw with the `PRESWAPPED` bit clear.
 
-## L3. The ranked remainder — ~4.3 MB total
+## L3. The ranked remainder — RE-COSTED 2026-08-01. 2,928,267 B, not 4.3 MB.
 
-From `kb/research-size-reduction.md`, measured against the real ELF + map:
+Six agents re-derived every row against the real ELF. **Every estimate in
+`kb/research-size-reduction.md` was wrong, most of them by a lot, and two of
+the stated *mechanisms* were impossible.** The originals are kept in the right
+column so nobody re-proposes them.
 
-| item | saving |
-|---|---:|
-| `.data` `src/data` tables to disc (0.95 MB pointer-free today; 0.99 MB needs a REL-style reloc pass) | −1.94 MB |
-| `s_assets[]` name-string pool → disc index | −0.89 MB |
-| `audiomemory`/jaudio → AICA | −0.65 MB |
-| actor overlay staging arenas → one shared union arena | −0.46 MB |
-| `pc_m_card` | −0.28 MB |
-| `dc_gx` | −0.24 MB |
-| emu64 `texture_buffer_data` → VRAM | partly taken in A2 |
+| item | defensible | claimed | what changed |
+|---|---:|---:|---|
+| `s_assets[]` name strings | **−821,569** | −0.89 MB | it is `.rodata`, and the fix is **deletion, not a disc index** |
+| **NEW — census finds (see L8)** | **−771,072** | — | nobody had listed these |
+| actor overlay arenas | **−422,192** | −0.46 MB | they are not "mutually exclusive". They are **dead** |
+| `pc_m_card` | **−308,242** | −0.28 MB | over estimate, but the stated mechanism was wrong |
+| `dc_gx` | **−262,152** | −0.24 MB | under estimate |
+| `.data src/data` → disc, **S3-eligible part only** | **−236,544** | −1.94 MB | the rest is S4 work — see below |
+| `audiomemory`/jaudio | **−106,496** | −0.65 MB | **AICA is impossible here**; the lever is "shrink" |
+| **S3 total** | **2,928,267** | ~4.3 MB | |
+| `.data` display lists → S4 pool (T2) | −901,300 | | **belongs inside S4, not S3** |
+
+### Three structural corrections — these change the plan, not just the numbers
+
+1. **"Six measured, mutually independent moves" is FALSE.** The largest tranche
+   of the `.data` row — 1,014,088 B of `Gfx` display-list bodies — is strictly
+   **downstream of S4**: its relocation targets are pool addresses that do not
+   exist until S4 assigns them. Bank the `data_bgd` collision split (−236,544)
+   in S3; schedule the rest inside S4.
+2. **L6 and L3 are mutually exclusive, not additive.** L6's 95,774 B of
+   aliasable `.data` is entirely `cKF_*` keyframe tables inside `src/data/**`
+   — exactly what L3's `.data` row moves to disc. If L3 lands, L6 is worth 0.
+3. **L1 is undercounted by 159,037 B.** `stub.list` misses 12 files whose
+   arrays are `pc_load_asset` destinations but whose bounds are macros, or
+   which are `.c_inc` under `include/`. Biggest:
+   `src/actor/npc/ac_npc_needlework_gba.c_inc` 84,704 ·
+   `src/static/nintendo_hi_0.c` 39,168 ·
+   `src/static/JSystem/JFramework/JFWSystem.cpp` 16,765.
+
+### Two mechanism findings worth more than their bytes
+
+- **Branch trampolines.** Turning `Gfx foo_model[]` into `Gfx *foo_model` would
+  change the symbol's *type* and require rewriting **1,325 `extern Gfx x[];`
+  sites** in hand-written decomp, silent on failure. Instead leave an 8-byte
+  `Gfx foo_model[1]` in `.bss` and fill it at load with
+  `gsSPBranchList(pool_body)` — `emu64.c:3496` `G_DL_NOPUSH` already implements
+  the branch. Every `extern` keeps working, the address is a link-time
+  constant, and the 9,931 `.data`→`.data` relocations then need **zero** runtime
+  fixup. Exclusions that must hard-fail in the generator: `anime_6_model`
+  (`emu64_print.cpp:105` range-checks it) plus ~14 symbols indexed as arrays.
+- **S4 has 32,355 relocations, not 16,365.** All `R_SH_DIR32`. `dcasset`'s
+  16,365 references and these are **disjoint sets** — `assets_scan.py` finds
+  literal `pc_load_asset(` call sites, which exist only for `.bss`
+  destinations. Reusable: the pack *format* and the window discipline. Not the
+  extractor.
+
+### Pool relief, which is worth more than `.bss` right now
+
+`kb/STATE.md` caps S4's pool at ~498 KB and calls it the binding constraint.
+The Dreamcast has **no JOY port and no GBA link cable**, so **222,568 B** of
+GBA client/loader payload (`aBTD_island_prg/ldr`, `aNNW_client_prg/ldr`) never
+needs pool bytes at all — **44.7% of the entire pool**, recoverable by dropping
+them from `assets.pak`. Separately, `nintendo_hi_0` is declared `0x9900`
+(39,168 B) but `src/static/boot.c:326-327` prints the real `.aw` size as
+`0x66a0`: **12,896 B of pure slack**. It cannot simply be deleted —
+`src/static/Famicom/famicom.cpp:2097` reuses the buffer.
+
+## L8. Census finds — 771,072 B nobody had listed
+
+From an independent `nm -S` sweep of the clean non-stub ELF. All four **stack
+with L1/S4** (they are not asset destinations, so they survive the loader).
+
+| symbol | B | where | why it is recoverable |
+|---|---:|---|---|
+| `prbuf` | 614,400 | `src/game/m_play.c:62` | `GXCopyTex` is a loud no-op on DC (`dc_gx.c:1524`) and `GXBeginDisplayList` records nothing (`:1613`), so its only writer (`m_play.c:798`) is dead. A2 already halved this; nothing proposed deleting the rest |
+| `CALLSTACK` + `pc_task_buf` | 58,368 | `jaudio_NES/internal/dvdthread.c:29`, `neosthread.c:26` | a stack for a thread that does not exist, and a double-buffered queue for a path the base port's own comment calls "immediately inline. No message queue, no thread" |
+| `graphStack`/`padmgrStack`/`irqmgrStack` | 16,384 | `src/system/sys_stacks.c:5-7` | `dc_stubs.c:96` `OSCreateThread` returns 0 and says so is load-bearing. Caveat: `src/main.c:55` memsets `padmgrStack` |
+| KOS `buffer.4` | 16,384 | via `dc/src/dc_os.c` | KOS `arch/cache.h:197` allocates it only when `__OPTIMIZE_SIZE__` is unset; otherwise it uses the DCA array at `0xF4000008`. `dc/src` is ours, so this is not an `-O0` question |
+
+Unverified, lower confidence: `m_bg_tex.c:3-34` `*_dummy` placeholders 33,792 B;
+`sys_dynamic` GBI arena 132,104 B (`include/sys_dynamic.h:27-35` carries the
+smaller originals commented out, but shrinking risks a `THA_GA` overflow).
 
 ## L4. `.text` relocation — NOT NEEDED. Do not start this.
 
