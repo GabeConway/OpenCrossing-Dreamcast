@@ -301,11 +301,26 @@ static void aram_write(u32 a, const u8* src, u32 len) {
      * (MEASURED, 2026-08-02 console log). Let those writes claim extent slots
      * and the table is full by the time the archives arrive, at which point
      * archive writes become anonymous, pin the pool, and get LOST. Counting
-     * them and returning keeps audio exactly as unimplemented as it was. */
+     * them and returning keeps audio exactly as unimplemented as it was.
+     *
+     * DC_ARAM_AUDIO_DROP=0 lets these writes through so audiorom.img becomes
+     * disc-backed like the archives, which is what stage A needs before jaudio
+     * can synthesise anything but silence ([NEOS_OUT] peak=0 with the audio
+     * pump running and the AICA pulling is exactly this: a live pipe carrying
+     * zeros). ⚠️ Default 1. Flipping it risks the ordering failure described
+     * above — A/B the `[DC/ARAM] LRU` line and require ext< the cap, LOST=0 and
+     * unchanged mapped= for the two archives before believing it. */
+#ifndef DC_ARAM_AUDIO_DROP
+#define DC_ARAM_AUDIO_DROP 1
+#endif
+#if DC_ARAM_AUDIO_DROP
     if (aram_audio_end != 0 && a + len <= aram_audio_end) {
         c_w_audio += len;
         return;
     }
+#else
+    if (aram_audio_end != 0 && a + len <= aram_audio_end) c_w_audio += len;
+#endif
 
     mapped = dc_dvd_provenance(src, len, &entry, &foff);
     if (mapped) mapped = ext_add(a, len, (s32)entry, (u32)foff);
@@ -351,7 +366,7 @@ static void aram_write(u32 a, const u8* src, u32 len) {
     if (!mapped) blk_pin_census();
 }
 
-static void aram_read(u32 a, u8* dst, u32 len) {
+static void aram_read_impl(u32 a, u8* dst, u32 len) {
     u32 pos = a;
     u32 end = a + len;
 
@@ -411,30 +426,212 @@ static void aram_read(u32 a, u8* dst, u32 len) {
                 if (b >= 0) {
                     u32 flo = (blo > elo) ? blo : elo;
                     u32 fhi = (blo + ARAM_BLK < ehi) ? blo + ARAM_BLK : ehi;
+                    int got = 0;
                     memset(aram_window + (u32)b * ARAM_BLK, 0, ARAM_BLK);
                     if (fhi > flo)
-                        dc_dvd_pager_read((int)aram_ext[e].entry,
+                        got = dc_dvd_pager_read((int)aram_ext[e].entry,
                                           aram_ext[e].foff + (flo - elo),
                                           aram_window + (u32)b * ARAM_BLK +
                                               (flo - blo),
                                           fhi - flo);
+                    /* ⚠️ The block was memset to zero above. If the disc read
+                     * failed or came up short, caching it anyway publishes
+                     * ZEROS as authoritative content — and because this path
+                     * bumped c_r_disc unconditionally, the zero counters stayed
+                     * at 0 and the whole thing was invisible. That is exactly
+                     * the size class the message/string TABLE reads use
+                     * (m_msg_main.c_inc:289 asks for 64 B), so a silent short
+                     * read here yields size==0 -> a string of all spaces -> zero
+                     * glyphs drawn, with nothing in the log to show for it.
+                     * Free the block instead so the next read retries. */
+                    if (fhi > flo && got != (int)(fhi - flo)) {
+                        aram_blk[b].tag = ARAM_TAG_FREE;
+                        c_r_zero++;
+                        c_r_zerobyte += n;
+                        DC_LOGE("[DC/ARAM] SHORT READ blk ent=%d off=%u "
+                                "want=%u got=%d — block dropped, not cached\n",
+                                (int)aram_ext[e].entry,
+                                (unsigned)(aram_ext[e].foff + (flo - elo)),
+                                (unsigned)(fhi - flo), got);
+                        memset(dst + (pos - a), 0, n);
+                        pos = stop;
+                        continue;
+                    }
                     c_r_disc++;
                     continue;   /* the resident branch above now serves it */
                 }
             }
 
-            if (dc_dvd_pager_read((int)aram_ext[e].entry, off,
-                                  dst + (pos - a), n) < 0) {
-                memset(dst + (pos - a), 0, n);
-                c_r_zero++;
-                c_r_zerobyte += n;
-            } else {
-                c_r_disc++;
+            /* `< 0` alone treated a short read (or 0) as success and left the
+             * destination holding whatever it had. Demand the full count. */
+            {
+                int got = dc_dvd_pager_read((int)aram_ext[e].entry, off,
+                                            dst + (pos - a), n);
+                if (got != (int)n) {
+                    memset(dst + (pos - a), 0, n);
+                    c_r_zero++;
+                    c_r_zerobyte += n;
+                } else {
+                    c_r_disc++;
+                }
             }
             pos = stop;
         }
     }
     DCStoreRangeNoSync(dst, len);
+}
+
+/* ===========================================================================
+ * DC_ARAM_TBL_PROBE — why the speaker NAME and the REPLY strings draw as
+ * nothing while the dialogue BODY draws fine.  KILL SWITCH: it is compile-time
+ * OFF (0) by default and adds no code at all; -DDC_ARAM_TBL_PROBE=1 turns it
+ * on and it only ever LOGS — it never changes a byte the game sees.
+ * ===========================================================================
+ *
+ * THE THREE RESOURCES SHARE ONE CODE PATH, so one run gives the working
+ * control and the broken case side by side:
+ *
+ *   mMsg_Get_BodyParam (m_msg_main.c_inc:282-303) does ONE 64 B read of a
+ *   resource's u32 offset TABLE (:289), then the caller does one <=96 B read of
+ *   the string BODY. Three callers:
+ *     body    mMsg_Get_MsgDataAddressAndSize  (m_msg_main.c_inc:305) MESSAGE
+ *     name    mString_Get_StringDataAddressAndSize (m_string.c:18)   STRING
+ *     replies mChoice_Get_StringDataAddressAndSize (m_choice_main.c_inc:184)
+ *                                                                    SELECT
+ *   MESSAGE lives in forest_2nd.arc; STRING and SELECT live in forest_1st.arc
+ *   (the split is jsyswrap.cpp:453-457).
+ *
+ * If the table read comes back zeros, size = tmp[ofs+1] - tmp[ofs] = 0, and
+ * mString_Load_StringFromRom (m_string.c:31) / mChoice_Load_ChoseStringFromRom
+ * (m_choice_main.c_inc:528) mem_clear the destination to CHAR_SPACE — an
+ * all-spaces string, which trims to length 0 and draws zero glyphs. Silent by
+ * construction. That is why nothing shows up in any renderer log.
+ *
+ * WHAT THIS PRINTS
+ *
+ *   [DC/TBL] map audio_end=<A> pool=<N> blk ext=<n>
+ *   [DC/TBL] ext[i] aram=[lo,hi) len=<L> ent=<e> foff=<F>
+ *       once, on the first probed read. The two archives are identified by
+ *       LEN, not by name: forest_1st.arc = 851744, forest_2nd.arc = 4130656
+ *       (measured from the disc root, 2026-08-02).
+ *
+ *   [DC/TBL] a=<A> len=<L> ext=<e> ent=<n> foff=<F> hit=c<..>/d<..>/z<..>
+ *            b=<16 bytes, in disc order>
+ *       for every ARAM->MRAM read of <= DC_ARAM_TBL_PROBE_LEN bytes.
+ *       `foff` is the byte offset in the backing file the pager resolved, so it
+ *       can be checked byte-for-byte against the .arc on the host. `b=` is the
+ *       destination AFTER the read, in raw byte order — i.e. still big-endian,
+ *       directly comparable to a hexdump of the .arc (the game byte-swaps
+ *       afterwards in mMsg_Get_BodyParam via pc_bswap32_array).
+ *
+ * THE DECISION TABLE
+ *
+ * MEASURED, not guessed: the RARC directories of the two .arc files in the
+ * disc root, cross-checked against the "[PC] RARC: loading N bytes of file data
+ * to ARAM at A" lines of the 2026-08-02 run. forest_1st loads at 8,454,144 and
+ * forest_2nd at 9,305,888, so:
+ *
+ *   resource            ARAM addr    .arc file off   first 16 B on disc (BE)
+ *   select_data         9,101,728      648,736       486f7273 65536865 ...("Horse")
+ *   select_data_table   9,108,736      655,744       00000005 0000000a 0000000d
+ *   string_data         9,111,744      658,752       54657374 204c696e ...("Test ")
+ *   string_data_table   9,131,744      678,752       00000016 0000001a 0000001e
+ *   message_data        9,741,632      437,696       7f1dcd7f 1e207f1f 207f20cd
+ *   message_data_table 12,441,632    3,137,696       00000048 000000b3 000000b5
+ *
+ * A table fetch reads at base + 32k (mMsg_Get_BodyParam's ALIGN_PREV), so
+ * attribute a probe line by which [base, base+size) window `a` falls in.
+ *
+ *   b= matches the table above  -> the LOADER IS INNOCENT. The bug is in the
+ *                                  draw path; see m_font_main.c_inc:1034-1040,
+ *                                  where the name and the replies are the only
+ *                                  text drawn with mFont_SENTENCE_FLAG_USE_POLY
+ *                                  (-> mFont_gppSetMode, G_RM_XLU_SURF /
+ *                                  G_TP_PERSP) while the body uses
+ *                                  mFont_gppSetRectMode (G_RM_AA_DEC_LINE /
+ *                                  G_TP_NONE).
+ *   b= all zeros                 -> the read failed. ext=-1 or hit=z1 says which.
+ *   a  outside every window above-> JW_GetAramAddress (jsyswrap.cpp:450) picked
+ *                                  the wrong archive or missed the name lookup;
+ *                                  a=0..small means it returned 0.
+ *   no [DC/TBL] line at all for a STRING/SELECT window while MESSAGE lines
+ *                                appear -> the game never asks; the fault is
+ *                                above the loader entirely (mMsg_aram_init(),
+ *                                m_trademark.c:352, is the only caller that
+ *                                initialises String/Choice_table_rom_start,
+ *                                against mMsg_aram_init2() at main.c:77 for
+ *                                MESSAGE).
+ */
+#ifndef DC_ARAM_TBL_PROBE
+#define DC_ARAM_TBL_PROBE 0
+#endif
+/* Reads at or below this length are probed. 256 covers the 64 B table fetch,
+ * mString's <=96 B body fetch and mChoice's <=96 B body fetch, and excludes
+ * every archive-mount transfer (those are 32,768 B). */
+#ifndef DC_ARAM_TBL_PROBE_LEN
+#define DC_ARAM_TBL_PROBE_LEN 256u
+#endif
+/* Hard line cap. The SCIF console at 57600 baud is the bottleneck on real
+ * hardware and in Flycast (kb/traps.md), and a talky scene issues these reads
+ * every frame. 400 lines is ~40 KB of console, which is affordable. */
+#ifndef DC_ARAM_TBL_PROBE_LINES
+#define DC_ARAM_TBL_PROBE_LINES 400u
+#endif
+
+#if DC_ARAM_TBL_PROBE
+static u32 tbl_lines = 0;
+static int tbl_map_dumped = 0;
+#endif
+
+static void aram_read(u32 a, u8* dst, u32 len) {
+#if DC_ARAM_TBL_PROBE
+    int probe = (len <= DC_ARAM_TBL_PROBE_LEN && tbl_lines < DC_ARAM_TBL_PROBE_LINES);
+    u32 s_cache = c_r_cache, s_disc = c_r_disc, s_zero = c_r_zero;
+
+    if (probe && !tbl_map_dumped) {
+        int i;
+        tbl_map_dumped = 1;
+        DC_LOGE("[DC/TBL] map audio_end=%u pool=%u blk ext=%d\n",
+                (unsigned)aram_audio_end, (unsigned)aram_nblk, aram_ext_n);
+        for (i = 0; i < aram_ext_n; i++)
+            DC_LOGE("[DC/TBL] ext[%d] aram=[%u,%u) len=%u ent=%d foff=%u\n",
+                    i, (unsigned)aram_ext[i].lo,
+                    (unsigned)(aram_ext[i].lo + aram_ext[i].len),
+                    (unsigned)aram_ext[i].len, (int)aram_ext[i].entry,
+                    (unsigned)aram_ext[i].foff);
+    }
+#endif
+
+    aram_read_impl(a, dst, len);
+
+#if DC_ARAM_TBL_PROBE
+    if (probe) {
+        int e = ext_lookup(a);
+        unsigned int foff = 0;
+        int ent = -1;
+        u8 b[16];
+        u32 i, n = (len < 16u) ? len : 16u;
+
+        if (e >= 0) {
+            ent  = (int)aram_ext[e].entry;
+            foff = (unsigned int)(aram_ext[e].foff + (a - aram_ext[e].lo));
+        }
+        for (i = 0; i < 16u; i++) b[i] = (i < n) ? dst[i] : 0;
+
+        tbl_lines++;
+        DC_LOGE("[DC/TBL] a=%u len=%u ext=%d ent=%d foff=%u hit=c%u/d%u/z%u "
+                "b=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                "%02x%02x%02x%02x\n",
+                (unsigned)a, (unsigned)len, e, ent, foff,
+                (unsigned)(c_r_cache - s_cache), (unsigned)(c_r_disc - s_disc),
+                (unsigned)(c_r_zero - s_zero),
+                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+        if (tbl_lines == DC_ARAM_TBL_PROBE_LINES)
+            DC_LOGE("[DC/TBL] line cap %u reached — probe silent from here\n",
+                    (unsigned)DC_ARAM_TBL_PROBE_LINES);
+    }
+#endif
 }
 
 #else  /* !DC_ARAM_LRU */
