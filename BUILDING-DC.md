@@ -259,12 +259,12 @@ as host code.
 big to load.**
 
 ```
-   text      data       bss    allocated   image end
-6318568   2638852  12415508   21374996   0x8d472814
+   text      data       bss   image span   image end
+6318552   2638852  12415508   21374068   0x8d472874
 ```
 
 KOS's `_arch_mem_top` for a stock console is `0x8d000000`, so the image ends
-4,663,316 B past the top of RAM before any heap.
+past the top of RAM before any heap is touched.
 
 `harness/dc/smoke.sh dc/build/OpenCrossing.cdi` returns `timeout` with **zero
 bytes of console output** — no KOS banner at all. Attributed by experiment
@@ -278,23 +278,21 @@ port's correctness is testable until the image fits.
 
 Being under `_arch_mem_top` is **not** the bar. KOS's `mm_sbrk()` starts at the
 ELF `end` symbol, with no MMU and no lazy commit, so every `.bss` byte destroys
-a heap byte. Against the ledger's 7.61 MB heap (`dc/include/dc_mem_budget.h`
-buckets 6–12) plus KOS's ~1 MB, **the image budget is 8,035,072 B — so the cut
-required is ~14.45 MB, not the ~5.8 MB the raw arithmetic suggests.**
+a heap byte. The fit is **one inequality**, and stating it as two pools has
+already produced two wrong numbers:
 
-All of it has to come out of layout, not codegen (see the optimization section
-above). The levers, ranked, with `kb/STATE.md` carrying live numbers:
+```
+(image span) + (genuinely additive heap) ≤ 16,646,144
+  21,374,068  +  3,545,184   ⇒ over by 8,273,108 B
+```
 
-1. **`.bss`, 13.5 MB** — the bulk of the overage. Roughly 8.22 MB of it is the
-   15,726 static asset destination arrays; `DC_MAIN_MEMORY_SIZE` is a 4 MB
-   static arena. Both are sized for a 24 MB GameCube, not for need — this game
-   shipped on N64 in 4 MB of RDRAM.
-2. **The resident REL blob, −15.68 MB of peak** — `dcasset pack` already
-   replaces `pc_assets.c`'s resident `foresta.rel` + `main.dol` (16,558,776 B)
-   with an 8.9 MB `assets.pak` on `/cd` plus a 51 KB index. Needs the runtime
-   loader wired up. See `kb/asset-pack.md`.
-3. **`--gc-sections`** with `-ffunction-sections -fdata-sections`.
-4. **Drop non-goal subsystems** — NES emulation, `famicom.arc`.
+All of it has to come out of **layout, not codegen** — see the optimization
+section above.
+
+**Live numbers: `kb/STATE.md`. The ranked levers: `kb/levers.md`. What is
+already ruled out: `kb/closed.md`** — read that one before proposing anything
+here. This section deliberately does not duplicate them; it went stale twice
+when it did.
 
 ---
 
