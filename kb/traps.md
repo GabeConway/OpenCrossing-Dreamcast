@@ -174,6 +174,29 @@ for those see `kb/closed.md`.
   inside the TU, which means the `.c_inc` itself gets `keep_file()`'d and
   shadowed on the include path — `-I$(STUBDIR)/include` in `dc/Makefile`,
   the same mechanism `DC_SRC_SHRINK` already uses.
+- **…and the `.c_inc` trap has a SECOND half, which cost the reply box
+  (2026-08-03).** `cinc_includes()` taught `make_stub_data.py` that a TU's asset
+  arrays and its `_pc_load_src_*()` can live in an `#include`d `.c_inc`. But all
+  of that handling sits **below** an early `continue` that asks the wrong file:
+  `if "#ifdef TARGET_PC" not in text: continue` tests the **`.c`**, and skips
+  the whole TU when it has none — which is exactly the shape of a TU that keeps
+  *all* its asset code in the `.c_inc`. `src/game/m_choice.c` has zero
+  `TARGET_PC` guards and is the **only** one of the 193 keep-list entries with
+  that shape; `src/game/m_msg.c` survived the first fix purely because it
+  happens to carry one.
+  **What it looked like:** `[PC] ASSET MISSING: assets/con_waku_swaku3_tex.bin`
+  and `con_sentaku2_v.bin` — the choice window's only texture and its four
+  vertices — so the reply box was a fully transparent texture on a degenerate
+  quad that the display matrix stretched into a pale haze over the train
+  interior. Reported as "the reply text boxes are messed up". Nothing in the
+  renderer was involved.
+  **Why it hid for two days:** `dc_stub_keep.inc` declared *and called*
+  `_pc_load_src_game_m_choice_draw_c_inc()` either way, so the generated header
+  looked complete; and the reply *text* was missing too until the
+  `tev_const_alpha` fix, so there was no text to notice a missing box around.
+  That mismatch is now a hard error — a `.c_inc` loader call may only be emitted
+  for a `.c_inc` this run actually rewrote. **`grep 'ASSET MISSING' <run>/console.log`
+  must come back empty; it is the cheapest asset-side health check there is.**
 - **An `INCLUDES` change does not invalidate `dc/build/flags.stamp`.** Adding
   `$(STUB_INCLUDES)` changed which `.c_inc` every kept TU sees and make
   rebuilt nothing — the link succeeded and the image was silently still using
@@ -286,6 +309,25 @@ for those see `kb/closed.md`.
   wrong. `tools/dcstub/census_resolve.py --sizes-from <full ELF>` is what
   turns that into real bytes — quoting the stub column as a working-set total
   understates it by about 20%.
+
+## Screenshots are the gate, not the counters (2026-08-03)
+
+- **A change can pass every counter and still be a visible regression.** The
+  alpha texture-env fix (`-DDC_PVR_ALPHAENV`) came back with frames, deepest
+  scene mode, FPS, `ptdrop`, `LOST` and blank-texture count all within noise of
+  its control — and turned the train station canopy from textured beams into a
+  flat teal slab. **Judge a renderer change on a screenshot pair at the same
+  probe index, always.** `tools/dcqa/run_report.py --vs` is the *floor*: it
+  tells you nothing got slower or stopped loading. It cannot see colour.
+- **Build the A/B out of ONE tree and ONE define.** Both sides of that
+  comparison were the same commit, differing only by `DC_XDEFS`. Two separately
+  edited trees would have left the result arguable.
+- **`DC_SCIF_FAST=1` is what makes this affordable.** At KOS's default 57,600
+  baud a 320x240 capture is ~35 s of wall clock; at 1,562,500 it is ~1.4 s. A
+  screenshot run at the default rate reaches a fraction of the frames a plain
+  run does, which is why `kb/RESUME.md` had to warn that the two are different
+  experiments. With the fast console they are the same experiment again.
+  ⚠️ Emulator only — a real coder's cable will not sync at 1.5 Mbps.
 
 ## Harness / emulator
 

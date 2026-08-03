@@ -397,6 +397,13 @@ _Static_assert(sizeof(pvr_vertex_t) == 32, "PT buffer record size");
 #define DC_PVR_PT_ALPHA_REF 144
 #endif
 
+/* Honour the GX alpha combiner when picking the PVR texture env. ON by
+ * default since 2026-08-03; -DDC_PVR_NO_ALPHAENV is the kill switch. The
+ * reasoning, the A/B and the exclusion list are at alpha_env_texel_only(). */
+#if !defined(DC_PVR_NO_ALPHAENV) && !defined(DC_PVR_ALPHAENV)
+#define DC_PVR_ALPHAENV 1
+#endif
+
 #ifndef DC_PVR_PT_BUF_RECS
 #define DC_PVR_PT_BUF_RECS 2048
 #endif
@@ -932,6 +939,157 @@ static int tev_const_color(float* out) {
     return 0;
 }
 
+#ifdef DC_PVR_TEVFOLD
+/* --- TEV stage 0, GENERALISED: fold the whole affine stage into the vertex --
+ *
+ * tev_const_color() above recognises exactly one shape — `b == c == ZERO` with
+ * a constant in `a` or `d`. Everything else falls through and the batch draws
+ * with the rasterised colour, silently dropping whatever the combiner asked
+ * for. That blind spot is wide: `c != ZERO` covers every lerp and every
+ * `const x RASC` modulate, which between them are 24 of the 34 single-texmap
+ * multi-stage configs plus 14 single-stage ones in kb/tev-map-table.md.
+ *
+ * The observation that closes most of it: GX's stage output is
+ * `d + (1-c)*a + c*b`. If none of {a,b,c,d} is a TEXTURE or a previous-stage
+ * term — i.e. each is drawn from {ZERO, ONE, HALF, C0..C2, A0..A2, KONST,
+ * RASC} — then the result is AFFINE in the rasterised colour:
+ *
+ *     stage0 = K0 + K1 * RASC          (per channel, K0/K1 CPU-known)
+ *
+ * and because RASC is shade_vertex()'s own per-vertex output, that folds into
+ * the vertex colour exactly, with no offset colour and no second pass:
+ *
+ *     vtx.rgb := clamp(K0 + K1 * shade_rgb)
+ *
+ * PVR_TXRENV_MODULATE(ALPHA) then computes `(K0 + K1*RASC) * T0`, which is what
+ * GX computes. When K1 == 0 this degenerates to "replace the vertex RGB with a
+ * constant" — byte-for-byte the existing behaviour — which is why this runs
+ * only AFTER tev_const_color() has declined, and can only add coverage.
+ *
+ * THE NAMED INSTANCE: the train window's scenery band, which is the thing a
+ * human called "the mountains behind the train look messed up".
+ * `rom_train_out_bgtree_modelT` (rom_train_out.c:99) is
+ *     gsDPSetCombineLERP(PRIMITIVE, 0, PRIM_LOD_FRAC, ENVIRONMENT, 0,0,0,TEXEL0,
+ *                        TEXEL1, 0, COMBINED, 0, 0,0,0, COMBINED)
+ * and emu64's hand-written case (emu64.c:1753-1763) turns stage 0 into
+ * `(a,b,c,d) = (ZERO, C1, A0, C2)` = **ENV + PRIM_LOD_FRAC * PRIM**, a pure
+ * constant with no texture and no raster term. PRIM is literally the
+ * time-of-day sun+ambient colour — `aTrainWindow_SetLightPrimColorDetail`
+ * (ac_train_window.c:435-485) sets it from
+ * `global_light.ambientColor + kankyo.base_light.sun_color` every frame — and
+ * ENV is `gsDPSetEnvColor(60, 60, 35, 255)`, the darkening that makes the band
+ * read as distant scenery. tev_const_color() rejects it at its very first test
+ * (`color_b == GX_CC_C1`, not ZERO), so the port draws `vtx.cn * T0` instead:
+ * no ENV darkening, no day/night, and a washed-out band.
+ *
+ * DELIBERATE LIMITS, each of which fails CLOSED:
+ *   - `c` must be a pure constant (K1 == 0 for it). If `c` is RASC the product
+ *     `c*b` is quadratic in the raster colour and no vertex fold exists.
+ *   - `color_op` must be GX_TEV_ADD. combine_auto emits GX_TEV_SUB when
+ *     `color_a != ZERO && color_a != color_d` (emu64.c:1237-1241); the field is
+ *     recorded by dc_gx.c:1264-1278 and, until now, never read by anything.
+ *   - any TEXC / TEXA / CPREV / APREV / RASA / unknown arg -> decline.
+ *   - GX_CC_CPREV is 0 and so is TEV_COMBINED, which do NOT mean the same
+ *     thing (kb/traps.md). tev_carg_affine() rejects it explicitly rather than
+ *     treating it as a register.
+ *
+ * WHAT IT STILL GETS WRONG. Stage 1 is not read here any more than it was
+ * before. For the P3 shapes whose second stage is `CPREV + TEXC*CPREV` — the
+ * tree band among them — GX's answer is `K*(1 + T0)` and this produces `K*T0`,
+ * i.e. correct hue and correct day/night response, about K too dark. That is a
+ * different error from today's (wrong hue, no day/night at all), not a smaller
+ * one by construction, so it is judged on a screenshot, not on this comment.
+ *
+ * Kill switch: the whole thing is opt-in behind -DDC_PVR_TEVFOLD.
+ * -DDC_PVR_TEVFOLD_NORASC narrows it to K1 == 0 (constants only, never scaling
+ * the vertex colour), which separates "constants restored" from "18 configs now
+ * modulate the shade" in a single build. */
+static int tev_carg_affine(const DCGXTevStage* ts, int arg,
+                           float* k0, float* k1) {
+    int creg;
+
+    k1[0] = k1[1] = k1[2] = 0.0f;
+
+    switch (arg) {
+        case GX_CC_ZERO: k0[0] = k0[1] = k0[2] = 0.0f; return 1;
+        case GX_CC_ONE:  k0[0] = k0[1] = k0[2] = 1.0f; return 1;
+        case GX_CC_HALF: k0[0] = k0[1] = k0[2] = 0.5f; return 1;
+        case GX_CC_RASC:
+            k0[0] = k0[1] = k0[2] = 0.0f;
+            k1[0] = k1[1] = k1[2] = 1.0f;
+            return 1;
+        default: break;
+    }
+
+    /* C0/C1/C2 — a whole constant register. tev_creg_of() also refuses
+     * GX_CC_CPREV for the aliasing reason in kb/traps.md. */
+    creg = tev_creg_of(arg);
+    if (creg >= 0) {
+        k0[0] = g_gx.tev_colors[creg][0];
+        k0[1] = g_gx.tev_colors[creg][1];
+        k0[2] = g_gx.tev_colors[creg][2];
+        return 1;
+    }
+
+    /* A0/A1/A2 — a register's ALPHA, broadcast to all three channels. These
+     * are GX_CC_A0=3, A1=5, A2=7, interleaved with the colour selectors, so
+     * the register index is (arg-1)/2 into the same tev_colors[] table
+     * ([0] = GX_TEVPREV, [1..3] = GX_TEVREG0..2). This is the arg
+     * tev_creg_of() returns -1 for, and it is exactly the PRIM_LOD_FRAC term
+     * the tree band multiplies its sun colour by. */
+    if (arg == GX_CC_A0 || arg == GX_CC_A1 || arg == GX_CC_A2) {
+        int r = (arg - 1) / 2;
+        k0[0] = k0[1] = k0[2] = g_gx.tev_colors[r][3];
+        return 1;
+    }
+
+    if (arg == GX_CC_KONST) {
+        int k = ts->k_color_sel;          /* GX_TEV_KCSEL_K0..K3 are 0xC..0xF */
+        if (k < 0xC || k > 0xF) return 0;
+        k -= 0xC;
+        k0[0] = g_gx.tev_k_colors[k][0];
+        k0[1] = g_gx.tev_k_colors[k][1];
+        k0[2] = g_gx.tev_k_colors[k][2];
+        return 1;
+    }
+
+    return 0;                             /* TEXC/TEXA/CPREV/APREV/RASA/... */
+}
+
+static int tev_fold_color(float* k0, float* k1) {
+    const DCGXTevStage* ts;
+    float a0[3], a1[3], b0[3], b1[3], c0[3], c1[3], d0[3], d1[3];
+    int i;
+
+    if (g_gx.num_tev_stages < 1)
+        return 0;
+    ts = &g_gx.tev_stages[0];
+
+    if (ts->color_op != GX_TEV_ADD)
+        return 0;
+
+    if (!tev_carg_affine(ts, ts->color_a, a0, a1)) return 0;
+    if (!tev_carg_affine(ts, ts->color_b, b0, b1)) return 0;
+    if (!tev_carg_affine(ts, ts->color_c, c0, c1)) return 0;
+    if (!tev_carg_affine(ts, ts->color_d, d0, d1)) return 0;
+
+    /* A raster-dependent lerp weight makes the result quadratic in RASC. */
+    if (c1[0] != 0.0f || c1[1] != 0.0f || c1[2] != 0.0f)
+        return 0;
+
+    for (i = 0; i < 3; i++) {
+        k0[i] = d0[i] + (1.0f - c0[i]) * a0[i] + c0[i] * b0[i];
+        k1[i] = d1[i] + (1.0f - c0[i]) * a1[i] + c0[i] * b1[i];
+    }
+
+#ifdef DC_PVR_TEVFOLD_NORASC
+    if (k1[0] != 0.0f || k1[1] != 0.0f || k1[2] != 0.0f)
+        return 0;
+#endif
+    return 1;
+}
+#endif /* DC_PVR_TEVFOLD */
+
 /* --- TEV stage 0: the ALPHA half of the same idea -------------------------
  *
  * THE FONT BUG, 2026-08-02. Exactly two things in the dialogue balloon never
@@ -1269,10 +1427,9 @@ static int pt_route_active(void) {
 #ifdef DC_PVR_ALPHAENV
 /* DOES THIS BATCH'S COMBINER SAY "alpha = TEXEL0.a, alone"?
  *
- * ⚠️⚠️ OFF BY DEFAULT. THIS WAS BUILT, RUN, AND MEASURED TO REGRESS.
- * Read the A/B at the bottom of this comment before turning it on. The
- * analysis below is correct as far as it goes; the screenshots are not
- * negotiable.
+ * ON by default since 2026-08-03, but only on the SECOND A/B — the first one
+ * said regress. Read the two A/Bs at the bottom before touching this; the
+ * lesson in them is bigger than the switch.
  *
  * The renderer programmed PVR_TXRENV_MODULATEALPHA on every textured batch
  * since M1 — px = ARGB(col) * ARGB(tex), i.e. final alpha = vertex alpha x
@@ -1329,38 +1486,43 @@ static int pt_route_active(void) {
  * [DC/PVR] report is the runtime answer: **797,728 of 1,190,110 batches, 67 %**,
  * over a 600 s town-reaching run.
  *
- * ================= WHY IT IS OFF: THE MEASURED A/B, 2026-08-03 =============
+ * ============ THE TWO A/Bs, 2026-08-03, AND WHY THE FIRST WAS WRONG ========
  *
- * Two 600 s runs of ONE tree differing only by this define, both reaching the
- * town, screenshots at 320x240 every 400 frames (DC_SCIF_FAST made that
- * affordable). Counters were clean either way — frames 10,349 vs 10,269,
- * ptdrop 0, LOST 0, no new blank textures, FPS within noise. **The counters
- * would have passed this change.** The screenshots did not:
+ * Method both times: two 600 s runs of ONE tree differing only by this define,
+ * both reaching the town, 320x240 screenshots every 400 frames. DC_SCIF_FAST
+ * is what made that affordable — at KOS's default baud a capture costs ~35 s.
  *
- *   WIN  — the dialogue balloon. With MODULATEALPHA a grey block sits behind
- *          the body text and the "Rover" nameplate is desaturated olive; with
- *          MODULATE the balloon is a clean cream oval and the nameplate is the
- *          correct saturated yellow-green.
- *   LOSS — the train station canopy, and it is much bigger on screen. Correct
- *          (MODULATEALPHA): textured orange-brown wooden beams over the
- *          platform, clock legible behind. With MODULATE: a flat teal-green
- *          slab covering the whole structure.
+ * A/B #1 said REGRESS, and the default was set to OFF on the strength of it:
+ *   win  — the dialogue balloon: a grey block behind the body text disappears
+ *          and the "Rover" nameplate goes from desaturated olive to the correct
+ *          saturated yellow-green.
+ *   loss — the train station canopy, much bigger on screen: textured
+ *          orange-brown beams with the clock legible behind became a flat
+ *          teal-green slab.
+ * Counters passed on both sides — frames, ptdrop, LOST, blank textures and FPS
+ * all within noise. **The counters would have shipped that regression.**
  *
- * The loss is the larger, more central object, so the default stays as it
- * shipped. NOT diagnosed, and worth knowing before anyone re-opens this: for a
- * GX_BM_NONE batch the framebuffer is RGB565 with src=ONE dst=ZERO, so alpha
- * cannot affect the result at all, and for a punch-through batch the vertex
- * alpha is ALREADY forced to 255 a few hundred lines below — so this switch
- * can only change blended batches and punch-through routing. The canopy draws
- * through `_texture_z_light_fog_prim_npc` (`ac_station_draw.c_inc:61`) =
- * `G_RM_FOG_SHADE_A | G_RM_AA_ZB_TEX_EDGE2`, which should land on the PT path
- * where this is a no-op. It visibly does not. **Something else is being
- * revealed here** — most likely a batch that was invisible only because its
- * vertex alpha was 0 and is now painted at its texel alpha, over the canopy.
- * The next step is one run with -DDC_PVR_ALPHAENV -DDC_PVR_BATCH_LOG=400 at
- * the same probe interval, reading the batch whose bbox covers the slab.
+ * A/B #2, after the reply box's missing assets were fixed in
+ * tools/dcstub/make_stub_data.py, said the canopy is CORRECT with this ON. The
+ * teal slab was never this switch on its own — it was this switch *plus* the
+ * two zeroed assets. con_waku_swaku3_tex was an all-zero 4,096 B buffer, and
+ * tex_content_hash() (dc_pvr_texture.c:317-322) hashes only the first and last
+ * 256 bytes above 512 B, so an all-zero texture aliases any other texture with
+ * zero ends: the reply panel shared a VRAM image with something it should not
+ * have, and honouring texel alpha then painted it. (That aliasing is filed in
+ * kb/issues.md in its own right.)
  *
- * Turn on with -DDC_PVR_ALPHAENV. */
+ * With the assets present, MODULATE gives the correct balloon AND the correct
+ * canopy, so it is on. The remaining risk list — the nine SHADE-in-alpha
+ * display lists, the 104 all-ZERO stage-0 sites — is unchanged and none of
+ * them match this shape.
+ *
+ * THE LESSON, which outlives the switch: a renderer A/B run against a build
+ * that is missing assets does not measure the renderer. Check
+ * `grep 'ASSET MISSING' <run>/console.log` is empty before believing any
+ * visual comparison.
+ *
+ * Kill switch: -DDC_PVR_NO_ALPHAENV. */
 static int alpha_env_texel_only(void) {
     const DCGXTevStage* ts;
 
@@ -1971,6 +2133,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 #ifndef DC_PVR_NO_TEVCONST
     float tevconst[3];
     int   have_tevconst = 0;
+#ifdef DC_PVR_TEVFOLD
+    float foldk0[3], foldk1[3];
+    int   have_tevfold = 0;
+#endif
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
     float tevalpha = 1.0f;
     int   have_tevalpha = 0;
@@ -2060,6 +2226,12 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     /* Per-batch, not per-vertex: the TEV stage and its registers cannot change
      * inside a batch, only between them. */
     have_tevconst = tev_const_color(tevconst);
+#ifdef DC_PVR_TEVFOLD
+    /* Only where the narrow shape declined, so every batch the old code
+     * handled keeps its exact result and this can only add coverage. */
+    if (!have_tevconst)
+        have_tevfold = tev_fold_color(foldk0, foldk1);
+#endif
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
     have_tevalpha = tev_const_alpha(&tevalpha);
 #endif
@@ -2248,6 +2420,28 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                              ((unsigned int)cr << 16) |
                              ((unsigned int)cg << 8) | (unsigned int)cb;
             }
+#ifdef DC_PVR_TEVFOLD
+            /* K0 + K1 * shade, per channel. K1 == 0 reduces to the replace
+             * above; K1 == 1 with K0 == 0 leaves the shaded colour untouched,
+             * which is what config #089 asks for. */
+            else if (have_tevfold) {
+                unsigned int sr = (cv[k].argb >> 16) & 0xFFu;
+                unsigned int sg = (cv[k].argb >> 8) & 0xFFu;
+                unsigned int sb = cv[k].argb & 0xFFu;
+                int cr = (int)(foldk0[0] * 255.0f + foldk1[0] * (float)sr + 0.5f);
+                int cg = (int)(foldk0[1] * 255.0f + foldk1[1] * (float)sg + 0.5f);
+                int cb = (int)(foldk0[2] * 255.0f + foldk1[2] * (float)sb + 0.5f);
+                if (cr < 0) cr = 0;
+                if (cr > 255) cr = 255;
+                if (cg < 0) cg = 0;
+                if (cg > 255) cg = 255;
+                if (cb < 0) cb = 0;
+                if (cb > 255) cb = 255;
+                cv[k].argb = (cv[k].argb & 0xFF000000u) |
+                             ((unsigned int)cr << 16) |
+                             ((unsigned int)cg << 8) | (unsigned int)cb;
+            }
+#endif
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
             /* MODULATEALPHA computes a = vtx.a * tex.a, so writing the
              * combiner's constant into the vertex alpha makes the hardware

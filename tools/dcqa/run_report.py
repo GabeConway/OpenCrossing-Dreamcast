@@ -70,7 +70,20 @@ BAD_MARKERS = [
     ("oom", re.compile(r"Out of memory|sbrk_base|\bOOM\b")),
     ("short_read", re.compile(r"SHORT READ")),
     ("aram_lost", re.compile(r"LOST=[1-9]")),
+    # The cheapest asset-side health check there is. A stubbed asset that never
+    # loads decodes to a transparent rectangle and reads exactly like a
+    # renderer bug -- that is how the reply box was misdiagnosed for two days
+    # (kb/traps.md). This line is the difference between "the renderer is
+    # wrong" and "the image does not contain the thing".
+    ("asset_missing", re.compile(r"ASSET MISSING")),
 ]
+
+# Absolute tolerance for small-integer counters, where a relative band is
+# useless because the baseline is 0 or near it.
+TOLERANCE_ABS = {
+    "texlog_blank": 3,
+    "tex_uploads": 5,
+}
 
 
 def parse(path):
@@ -270,10 +283,21 @@ def summarise(r):
 #
 # Counters in MUST_BE_ZERO get no tolerance at all — 1 is not 0.
 TOLERANCE = {
-    "frames": 0.03,
+    # ⚠️ TOTAL FRAMES IS CONFOUNDED BY SCENE MIX, so its band is wide on
+    # purpose. The town runs at ~11 FPS and the train intro at ~30, so a run
+    # that reaches the town SOONER accumulates FEWER frames over the same 600 s
+    # -- an improvement reads as a 25 % "regression". Two runs of one build have
+    # been measured 10,499 vs 7,979 for exactly that reason. Use it to catch a
+    # hang or a crash loop, never as a progression metric; `deepest_scene` is
+    # the progression metric.
+    "frames": 0.30,
     "fps_min": 0.10,   # the minimum is a single worst frame; it is the noisiest
-    "fps_p50": 0.03,
-    "fps_max": 0.03,
+    "fps_p50": 0.10,
+    "fps_max": 0.05,
+    # Blank textures are scene-dependent: an object drawn in one run and not the
+    # other changes this by one or two with no code change. A jump of more than
+    # a handful is a real keep-list or loader problem.
+    "texlog_blank": 3.0,
 }
 
 # Which direction is an improvement. None = report the change, judge nothing.
@@ -390,7 +414,8 @@ def print_diff(new, old, fh=sys.stdout):
         d = nv - ov
         mark = ""
         tol = TOLERANCE.get(k, 0.0)
-        noise = ov and abs(d) <= tol * abs(ov)
+        noise = (ov and abs(d) <= tol * abs(ov)) or \
+                abs(d) <= TOLERANCE_ABS.get(k, 0)
         if d and direction:
             good = (d > 0) == (direction > 0)
             if good:
@@ -418,6 +443,9 @@ def print_diff(new, old, fh=sys.stdout):
     p("")
     if regressions:
         p("VERDICT: REGRESSED")
+        p("  (frames alone is weak evidence -- see the TOLERANCE note in this"
+          " file. deepest_scene, the must-be-zero counters and the bad markers"
+          " are the load-bearing checks.)")
         for x in regressions:
             p(f"  - {x}")
         return 1
