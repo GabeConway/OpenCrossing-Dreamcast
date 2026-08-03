@@ -106,6 +106,7 @@ already produced two wrong numbers.
 |---|---|
 | `BUILDING-DC.md` | **the DC build**: entry points, make targets, env knobs, flag assembly, include-path order, prelude, troubleshooting |
 | `harness/dc/README.md` | Flycast harness: setup, the scripts, guest-side protocol, env overrides, known limits |
+| `tools/dcqa/run_report.py` | **the regression gate.** Reduces a `console.log` to the ~20 numbers a "did this get worse" call rests on; `--vs` diffs two runs. A game smoke run always exits 1, so this is the verdict, not the exit code. ⚠️ It is the FLOOR — it cannot see colour, so judge a renderer change on a screenshot pair |
 | `kb/design-toolchain.md` | **index** to the M0 toolchain docs below. Everything is tagged [VERIFIED]/[UNVERIFIED] |
 | `kb/toolchain-decision.md` | why build from source with `kos-chain`; rejected options; fallbacks F1–F5 |
 | `kb/toolchain-host-env.md` | colima/Docker facts, the `$HOME`-only bind-mount trap, the qemu 17–23×/ICE measurement |

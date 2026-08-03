@@ -16,6 +16,42 @@ now*, plus what to do next. Everything else is one hop away.
 
 ## Where the port is
 
+### ⭐ 2026-08-03 — IT BOOTS ON REAL HARDWARE, and stops at the K.K. scene
+
+A padded CD-R burn of `dev` boots on the user's retail Dreamcast. Every
+observation before today came from Flycast. It reaches the title screen and
+stops at the K.K. Slider / player-select scene; three candidates (input never
+arriving — that burn had `DC_AUTOSTART` unset; the CD-R simply being slow, since
+the ARAM pager reads at ~500 KB/s with real seeks while every emulator run has
+`FastGDRomLoad=yes`; or a real hardware-only hang) are written up with the
+disc built to separate them in `kb/RESUME.md` §1 and `kb/state-log.md`.
+
+⚠️ **Never compile `DC_SCIF_FAST` into a hardware build** — a coder's cable
+will not sync at 1.5 Mbps and the console, crash dumps included, is lost.
+⚠️ **`DC_CDI_PAD=1` for burns.** The 740 MB CDI is 314,663 raw 2352-byte
+sectors = 69.9 minutes and fits a 74-min CD-R, despite what the byte count
+suggests.
+
+### 2026-08-03 — two visible bugs fixed, and the measurement rules that found them
+
+- **The reply box now renders.** It had no assets: `make_stub_data.py` skipped
+  `src/game/m_choice.c` because the *`.c`* has no `#ifdef TARGET_PC`, so its
+  `.c_inc` — which holds the panel's only texture and its four vertices — was
+  never rewritten. `ASSET MISSING` 2 → 0, blank uploads 2/306 → **0/306**.
+- **The alpha texture-env fix is in and ON.** 78 % of display-list sites ask for
+  alpha = TEXEL0.a alone; the port multiplied by the vertex alpha, which on
+  those draws is the `G_RM_FOG_SHADE_A` fog coefficient. The dialogue balloon is
+  now a solid cream oval instead of transparent.
+- **`tools/dcqa/run_report.py`** is the regression gate; `DC_SCIF_FAST=1` makes
+  320x240 screenshots cost ~1.4 s instead of ~35 s, so a screenshot run reaches
+  the town like any other.
+- **Three rules this cost:** `ASSET MISSING` must be empty before any visual
+  comparison is believed; judge a renderer change on a screenshot pair, not on
+  counters; and total frames is not a progression metric (the town is 11 FPS and
+  the train intro 30, so arriving sooner *lowers* the count — 10,499 vs 7,979 on
+  one build).
+
+
 ⚠️ **Updated 2026-08-02 (session 2). The port now REACHES THE TOWN.**
 `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`; mode 9 is `mFI_FIELD_FG` +
 `mEv_CheckFirstIntro()` TRUE (`m_field_make.c:1292`) = SCENE_FG, the outdoor
