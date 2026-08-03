@@ -1,30 +1,83 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-02, end of the **"the town is reachable"** session (the
-second of that date). Read `kb/STATE.md` next; this file is only the unfinished
-part plus the gotchas that would cost a fresh context an hour. Full narrative:
+Rewritten 2026-08-03. Read `kb/STATE.md` next; this file is the unfinished part
+plus the gotchas that would cost a fresh context an hour. Full narrative:
 `kb/state-log.md`, top entry.
 
-## 0. ⚠️ NOTHING IS COMMITTED
+## 0. Everything is committed
 
-`git status` shows 10 modified files — `dc/src/{dc_pvr,dc_aram,dc_audio,dc_misc,
-dc_pad,dc_vi}.c`, `dc/include/dc_platform.h`, `tools/dcstub/keeplist-opening.txt`,
-`kb/RESUME.md`, `kb/traps.md`, plus this session's `kb/state-log.md`. All of it
-compiles and runs. **The main thread commits; agents do not.**
+`git status` is clean on `dev`. The last six commits are this session:
+the regression gate, `DC_SCIF_FAST`, the alpha texture-env fix, the NPOT
+closure, the reply-box asset fix, and the alpha-env default flip.
+**The main thread commits; agents do not.**
+
+## 0b. THE THREE RULES THIS SESSION ADDED
+
+1. **`grep 'ASSET MISSING' <run>/console.log` must be empty before you believe
+   any visual comparison.** A renderer A/B against a build that is missing
+   assets does not measure the renderer — that mistake shipped one fix in the
+   OFF position for half a session.
+2. **Judge a renderer change on a screenshot pair, not on counters.** The
+   alpha-env change passed frames, FPS, `ptdrop`, `LOST` and blank-texture
+   count while turning the station canopy into a flat slab.
+3. **Total frames is NOT a progression metric.** The town is ~11 FPS and the
+   train intro ~30, so reaching the town sooner *lowers* the frame count. Two
+   runs of one build measured 10,499 vs 7,979. Use `deepest_scene`.
 
 ## 1. Where the port is
+
+### ⭐ IT BOOTS ON REAL HARDWARE (2026-08-03)
+
+A padded CD-R burn of `dev` boots on the user's retail Dreamcast and **stops at
+the K.K. Slider / player-select scene**. Three candidates, in order of
+likelihood, and they are very different:
+
+1. **Input never arrives** — that burn had `DC_AUTOSTART` unset, so it waits on
+   a real controller through `PADRead`. `dc_pad.c`.
+2. **The disc, not a hang** — the ARAM pager reads off a CD-R at ~500 KB/s with
+   real seeks, and every Flycast run has `FastGDRomLoad=yes`. Player-select is
+   exactly where `forest_1st`/`forest_2nd` page in (57 reads / 2,742,848 B on
+   the last emulator run). On hardware that is minutes.
+3. **A genuine hardware-only hang** — the interesting one. Told apart from (2)
+   by whether the scene is still animating.
+
+A `DC_AUTOSTART=300` + `DC_CDI_PAD=1` disc was handed over to separate them;
+the decision table is in its README. **Await that result before theorising.**
+
+⚠️ **Never put `DC_SCIF_FAST` in a hardware build** — a coder's cable will not
+sync at 1.5 Mbps and the console, crash dumps included, is lost.
+⚠️ **`DC_CDI_PAD=1` for burns.** The 740 MB file is raw 2352-byte sectors =
+314,663 sectors = 69.9 min, so it fits a 74-min CD-R despite the byte count.
+
+### In the emulator
 
 **The port reaches the TOWN.** `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`; mode 9 is
 `mFI_FIELD_FG` + `mEv_CheckFirstIntro()` TRUE (`m_field_make.c:1292`) = SCENE_FG,
 the outdoor field. Title → player-select (K.K. on the lit stage) → train intro
 with Rover → name entry → town, unattended, in one run.
 
-Numbers on the last full run: **16,889 frames / 600 s**, town ~12 FPS, earlier
-scenes 20-29 FPS, `image_span` 10,699,616 B, `margin` 3,588,448 B, fit OK.
+Numbers on the last full run at HEAD (2026-08-03): **~10,500 frames / 600 s**,
+town ~11 FPS, earlier scenes 22-30 FPS, `ASSET MISSING` 0, blank texture uploads
+**0 of 306**, `ptdrop` 0, `LOST` 0. Binary end `0x8caa4fd0`, so the image span
+is 11,096,016 B and the fit holds.
 
-Human verdict on the current build: K.K. correct, Rover correct, scrolling trees
-and glass present. **Still wrong: the train door, and the scrolling window
-texture sits entirely ABOVE the window.**
+⚠️ Frame counts across runs are NOT comparable — see rule 3 above.
+
+**Verified by screenshot at HEAD:** K.K. Slider and his dialogue; Rover, the
+dialogue balloon (a solid cream oval, correct) and the name plate; the reply
+box with its cursor; the name-entry keyboard; the train interior; the station
+exterior with a correctly textured canopy, the clock, flowers and brick paving.
+
+**Open, reported by a human against HEAD and NOT yet fixed** — these are the
+next jobs:
+
+1. **The text-input (name entry) screen looks very wrong.** Not yet
+   investigated. It renders and is legible in a 320x240 capture, so start by
+   getting a screenshot of what the human is seeing rather than assuming.
+2. **The text while Rover is on the phone looks wrong.** Not yet investigated.
+   Likely the same font/TEV family as items in §5.
+3. **The scenery band through the train window ("the mountains look messed
+   up").** Diagnosed, patch written and OFF — see §5a.
 
 ## 2. The build line — use this, do not re-derive it
 
@@ -34,27 +87,35 @@ DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
 DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 \
   bash dc/build-dc.sh
 bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 600 -c config:LimitFPS=no
+python3 tools/dcqa/run_report.py <run>/console.log --vs <baseline>/console.log
 ```
 
-**Use a 600 s timeout and `-c config:LimitFPS=no`.** The town is ~4,000 frames
-in; 240 s does not get there. `LimitFPS=no` unlocks the frame limiter (the
-harness passes `-c` straight to Flycast) and is the user's own play-testing
-setting.
+**Always `--timeout 600` and `-c config:LimitFPS=no`.** The town is ~4,000
+frames in; 240 s does not get there, and `LimitFPS=no` is the user's own
+play-testing setting.
 
-Add `DC_FB_PROBE=200 DC_FB_IMAGE=2` **and** `--fb-writeback` to get screenshots,
-then `python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots`.
+### Screenshots — now cheap, use them on every renderer change
 
-⚠️ **A screenshot run is not a progression run.** `DC_FB_IMAGE` streams ~205 KB
-of base64 per frame over a 57600-baud SCIF and eats ~150 s of a 200 s timeout —
-the same build reaches **5069 frames without it versus 1379 with it**. Never
-judge how far the game gets from a screenshot run.
+```bash
+DC_SCIF_FAST=1 DC_FB_PROBE=400 DC_FB_IMAGE=2 DC_TEX_LOG=1   # add to the build
+bash harness/dc/smoke.sh <img> --timeout 600 --fb-writeback -c config:LimitFPS=no
+python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots
+```
 
-The trailing `-` in `paste -sd: -` is required; BSD paste on macOS will not read
-stdin without it.
+`DC_SCIF_FAST=1` raises the console from 57,600 to 1,562,500 baud, so a 320x240
+capture costs ~1.4 s instead of ~35 s. **The old warning that "a screenshot run
+is not a progression run" no longer applies when it is set** — a 600 s
+screenshot run reaches the town like any other. ⚠️ Emulator only; a real
+coder's cable will not sync at 1.5 Mbps, so never put it in a hardware build.
 
-⚠️ **Build to a copy before a long run.** Flycast holds `dc/build/OpenCrossing.cdi`
-open; `cp` it to the scratchpad and run the copy, so the next build is not
-blocked for 10 minutes.
+⚠️ **Build to a copy before a long run.** Flycast holds
+`dc/build/OpenCrossing.cdi` open; `cp` it to the scratchpad and run the copy.
+
+⚠️ **Never edit the tree while a build is running**, and never run two builds
+at once — `dc/build/` is one shared object tree.
+
+The trailing `-` in `paste -sd: -` is required; BSD paste will not read stdin
+without it.
 
 ## 2b. What the second session changed (details in `kb/state-log.md`)
 
@@ -254,6 +315,43 @@ convention on DC (`dc_mtx.c:474`). Dump the tree batch's `uv=` from
 `DC_PVR_BATCH_LOG=1` and compare against that derivation — that is one run.
 
 </details>
+
+### 5a. The train window's scenery band — diagnosed, patch built, OFF by default
+
+This is the human's "the mountains behind the train look messed up".
+
+`rom_train_out_bgtree_modelT` (`rom_train_out.c:99`) is
+`gsDPSetCombineLERP(PRIMITIVE, 0, PRIM_LOD_FRAC, ENVIRONMENT, 0,0,0,TEXEL0,
+TEXEL1, 0, COMBINED, 0, 0,0,0, COMBINED)`, and emu64's hand-written case
+(`emu64.c:1753-1763`) makes stage 0 `(a,b,c,d) = (ZERO, C1, A0, C2)` =
+**ENV + PRIM_LOD_FRAC x PRIM**: a pure constant, no texture and no raster term.
+PRIM is literally the time-of-day sun+ambient colour
+(`aTrainWindow_SetLightPrimColorDetail`, `ac_train_window.c:435-485`, rewritten
+every frame) and ENV is `gsDPSetEnvColor(60, 60, 35, 255)`, the darkening that
+makes the band read as distant scenery.
+
+`tev_const_color()` rejects it at its first test — `color_b == GX_CC_C1`, not
+ZERO — so the port draws `vtx.cn * T0`: no ENV darkening, no day/night, a
+washed-out band.
+
+**`-DDC_PVR_TEVFOLD` fixes stage 0 exactly.** It generalises the narrow shape
+to the whole affine stage, `d + (1-c)a + c*b` over
+`{ZERO, ONE, HALF, C0..C2, A0..A2, KONST, RASC}`, folded into the vertex colour
+as `K0 + K1*RASC`. It runs only where the old shape declined, so every batch the
+old code handled keeps its exact result. Measured: no regression, and the window
+scenery visibly darkens — the ENV term arriving.
+
+**It is OFF because it is not yet exact and no screenshot says the trade is a
+win.** For the P3 shapes whose second stage is `CPREV + TEXC*CPREV` — the band
+among them — GX computes `K*(1 + T0)` and this computes `K*T0`, i.e. about K too
+dark. Today's error is "wrong hue, no day/night"; the fold's is "right hue,
+right day/night, too dark". Neither is correct.
+
+**The exact completion is the PVR's OFFSET COLOUR.** `oargb` is added after the
+texture env, so `col = K` with `oargb = K` gives `K(1 + T0)` exactly.
+`dc_pvr.c` writes `pv.oargb = 0` unconditionally and never enables
+`cxt.gen.specular`. That is the next concrete step for this item, and it needs
+`oargb` folded into `header_key()` like every other header bit.
 
 ### 2b. Two train-station bugs, traced 2026-08-02 — read `kb/station-bugs.md`.
 

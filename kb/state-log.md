@@ -10,6 +10,172 @@
 
 ---
 
+## ⭐ 2026-08-03 — IT BOOTS ON REAL HARDWARE
+
+A padded CD-R burn of the `dev` build (`DC_ASSET_STUB=1`, checked-in opening
+keep list, `DC_AUTOSTART` unset, no `DC_SCIF_FAST`) **boots on the user's retail
+Dreamcast**. Until now every observation in this log came from Flycast.
+
+**It stops at the K.K. Slider / player-select scene.** Three candidate causes,
+and they are very different from each other:
+
+1. **Input never arrives.** That burn had `DC_AUTOSTART` unset, so the game is
+   waiting for a real controller through `PADRead`. If the real maple path
+   differs from Flycast's, the scene simply never advances. `dc_pad.c`.
+2. **The disc, not a hang.** The ARAM pager services a miss with a real read
+   off a CD-R at ~500 KB/s *with seeks*, and every Flycast run has
+   `FastGDRomLoad=yes`. The player-select scene is exactly where
+   `forest_1st`/`forest_2nd` are paged in — `[DC/ARAM] LRU` on the last
+   emulator run shows 57 disc reads / 2,742,848 B / 2 opens. On hardware that
+   is minutes, not milliseconds. **`kb/traps.md` already warns that a short
+   run is usually not a hang; this is the hardware version of the same trap.**
+3. **A genuine hardware-only hang.** The one worth chasing. Distinguished from
+   (2) by whether the scene is still animating.
+
+**The disc built to separate them:** `DC_AUTOSTART=300` + `DC_CDI_PAD=1`,
+handed over with the decision table above. It needs no coder's cable — if it
+walks past K.K. unattended the cause is (1), if it stalls while still animating
+it is (2), if the picture is frozen it is (3).
+
+⚠️ **Do not put `DC_SCIF_FAST` in a hardware build.** A real coder's cable will
+not sync at 1,562,500 baud, and the console — including any crash dump — is
+lost.
+
+⚠️ **`DC_CDI_PAD=1` for burns.** The 740 MB file is raw 2352-byte sectors:
+314,663 sectors = 69.9 minutes, which fits a 74- or 80-min CD-R. The byte count
+looks like it will not fit and that is an artefact of the format.
+
+---
+
+## 2026-08-03 — the reply box had no assets, and the counters nearly shipped a regression
+
+Two visible bugs fixed, one measurement discipline changed, and one lever built
+that makes every future rendering question cheaper.
+
+### The regression gate came first, and it earned its keep immediately
+
+A game smoke run always exits 1 (the game never returns), so every "did this
+build get worse" call had been a hand-grep over a 2.6 MB log.
+`tools/dcqa/run_report.py` reduces a console.log to the ~20 numbers that
+decide it and `--vs` diffs two runs.
+
+**It caught its own flaw within the session, twice, and both are written into
+the tool:**
+
+1. **Base64 matches everything.** The first version reported `oom x748` off a
+   screenshot log, because `OOM` occurs in real `FBROW` pixel data. `FBROW` is
+   now skipped before any matcher sees it.
+2. **Total frames is confounded by scene mix.** The town runs at ~11 FPS and
+   the train intro at ~30, so a run that reaches the town *sooner* accumulates
+   *fewer* frames in the same 600 s. Two runs of ONE build measured **10,499 vs
+   7,979**. `frames` now has a 30 % band and is documented as a hang detector;
+   `deepest_scene` is the progression metric.
+
+### `DC_SCIF_FAST` — screenshots stop being a different experiment
+
+KOS's default SCIF is 57,600 baud and KOS busy-waits on the TX FIFO, so a
+`DC_FB_IMAGE` capture costs ~35 s of wall clock. That is why `kb/RESUME.md` had
+to warn that a screenshot run is not a progression run — 5069 frames without it
+versus 1379 with it. The harness selftest has used 1,562,500 baud since M0;
+`DC_SCIF_FAST=1` gives the game build the same ~27x.
+
+Measured: a 90 s run reached 1889 frames with five **320x240** captures at
+29.9 FPS p50. The old 160x120 build managed 12,449 frames over 900 s at 20.1.
+4x the linear resolution AND no progression cost. Emulator only — a coder's
+cable will not sync at 1.5 Mbps.
+
+### The reply box: two assets that were never in the image
+
+Human report: "the reply text boxes are messed up". Not a renderer bug. Every
+log on disk back to 2026-08-02 carries exactly two asset failures and no
+others:
+
+```
+[PC] ASSET MISSING: assets/con_waku_swaku3_tex.bin
+[PC] ASSET MISSING: assets/con_sentaku2_v.bin
+```
+
+`con_waku_swaku3_tex` is the choice window's **only** texture — one filled I4
+128x64 ellipse, there is no 9-slice and no border — and `con_sentaku2_v` is its
+four vertices. Zeroed, that is a transparent texture on a degenerate quad which
+the display matrix stretches into the pale haze visible across the lower half
+of the train interior.
+
+**Cause: the `.c_inc` trap has a second half.** `cinc_includes()` already knew a
+TU's asset arrays and loader can live in an `#include`d `.c_inc` — that was the
+dialogue-balloon fix. But all of that handling sits *below* an early
+`continue` that asks the wrong file: `if "#ifdef TARGET_PC" not in text` tests
+the **`.c`**, and skips the whole TU when it has none, which is exactly the
+shape of a TU that keeps all its asset code in the `.c_inc`.
+`src/game/m_choice.c` has zero `TARGET_PC` guards and is the **only** one of the
+193 keep-list entries with that shape; `src/game/m_msg.c` survived the first fix
+purely because it happens to carry one.
+
+It hid because `dc_stub_keep.inc` declared *and called*
+`_pc_load_src_game_m_choice_draw_c_inc()` either way, so the generated header
+looked complete — and because the reply *text* was missing too until the
+`tev_const_alpha` fix, so there was no text to notice a missing box around. That
+mismatch is now a **hard error**.
+
+Measured: `ASSET MISSING` 2 → 0, blank texture uploads 2/306 → 0/306,
+`dc_stub_keep.inc` 1 → 2 `.c_inc` rows, frames 10,439 → 10,499, `ptdrop` 0,
+`LOST` 0. The reply panel now renders — a yellow rounded box with "Please! /
+No way!" and the cursor triangle.
+
+### The alpha texture-env fix, and the A/B that was measuring a broken image
+
+`PVR_TXRENV_MODULATEALPHA` had been programmed on every textured batch since
+M1, making final alpha `vertex.a x texel.a`. Pushed through emu64's real
+tables, **4,376 of 5,611 display-list sites (78 %)** have stage-0 alpha
+`(ZERO, ZERO, ZERO, TEXA)` — texel alpha alone — and the vertex alpha byte there
+is the `G_RM_FOG_SHADE_A` fog coefficient, which this port does not use because
+it fogs in PVR hardware. `PVR_TXRENV_MODULATE` is the exact match. It fires on
+**574,504 of 941,818 batches** at runtime.
+
+**A/B #1 said REGRESS and the fix was shipped OFF.** The dialogue balloon got
+correct (a grey block behind the body text disappears, the nameplate goes from
+desaturated olive to the right yellow-green) and the train station canopy
+became a flat teal-green slab where it had been textured beams. Counters passed
+on both sides — **the counters would have shipped that regression.**
+
+**A/B #2, after the reply-box assets were fixed, said the canopy is CORRECT.**
+The teal slab was never this switch alone; it was this switch *plus* the two
+zeroed assets. `tex_content_hash` (`dc_pvr_texture.c:317-322`) hashes only the
+first and last 256 bytes above 512 B, so an all-zero texture aliases any other
+texture with zero ends — the reply panel shared a VRAM image with something it
+should not have, and honouring texel alpha then painted it.
+
+**The lesson, which outlives the switch: a renderer A/B run against a build
+that is missing assets does not measure the renderer.** `grep 'ASSET MISSING'`
+must be empty before any visual comparison is believed. That is now a bad
+marker in the gate, an entry in `kb/traps.md`, and a paragraph in the code.
+
+### NPOT + `GX_REPEAT`: real bug, zero instances
+
+Censused all 12,108 Dolphin-path texture binds in `src/data` (3,212 files, every
+display list enumerable as source): **0** are NPOT + REPEAT/MIRROR. The artists
+clamped every NPOT axis, and the N64 tile path forces `GX_CLAMP` for any
+dimension outside `{4,8,…,512}`. All three candidate fixes are recorded as
+rejected with reasons in `kb/closed.md`. One unverified sub-8 residual has a
+detector rather than a patch.
+
+### Built but OPT-IN, because its benefit is unproven
+
+`-DDC_PVR_TEVFOLD` generalises `tev_const_color()` from one shape to the whole
+affine stage — `d + (1-c)a + c*b` over `{ZERO, ONE, HALF, C0..C2, A0..A2,
+KONST, RASC}` folded into the vertex colour as `K0 + K1*RASC`. It restores the
+train window band's `ENV + PRIM_LOD_FRAC * PRIM` constant, which is the
+time-of-day sun+ambient colour, and which the narrow shape rejects at its first
+test. Measured: no regression, and the window scenery visibly darkens — which
+is the ENV term arriving. It stays off because for the P3 shapes whose second
+stage is `CPREV + TEXC*CPREV` (the band among them) GX computes `K*(1+T0)` and
+this computes `K*T0`, i.e. about K too dark, and no screenshot yet says that
+trade is a win. **The exact completion is the PVR's offset colour**: `oargb` is
+added after the texture env, so `col = K` with `oargb = K` gives `K(1+T0)`
+exactly. `dc_pvr.c` currently writes `oargb = 0` and leaves specular disabled.
+
+---
+
 ## 2026-08-02 (session 2) — the town is reachable; three renderer bugs of one family
 
 **Headline: the port reaches the TOWN.** `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`;
