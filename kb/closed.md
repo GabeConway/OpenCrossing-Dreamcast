@@ -128,6 +128,61 @@ Low priority now: with MMU paging dead, VRAM and AICA are only interesting as
 destinations for specific buffers (`texture_buffer_data`, audio), not as
 general storage.
 
+## NPOT + `GX_REPEAT` textures — the bug is real and has ZERO instances
+
+Filed as an open renderer defect in `kb/RESUME.md` §5 item 2: a non-power-of-two
+texture is padded up to POT in VRAM and its UVs are scaled by
+`u_scale = w / pot_w` (`dc_pvr_texture.c:1211`, applied `dc_pvr.c:2017-2021`).
+That is exact for `GX_CLAMP` and structurally wrong for `GX_REPEAT`, because the
+PVR wraps at the padded boundary, so tile *n* starts at `n·u_scale` instead of
+`n`. `GX_MIRROR` is wrong the same way.
+
+**Censused exhaustively, 2026-08-03. `src/data` is 3,212 files and every display
+list in the game is enumerable as source.** All eight Dolphin-path macro
+spellings parsed with their per-macro argument orders (note
+`gDPSetTextureImage_Dolphin` swaps `h` and `w` relative to `gsDP…`,
+`gbi_extensions.h:1102-1107`), each `SetTextureImage` paired with the next
+`SetTile` in file order — **12,108 texture binds**:
+
+| class | binds | share |
+|---|---:|---:|
+| POT + REPEAT/MIRROR — fine | 6,958 | 57.5 % |
+| mixed: NPOT axis CLAMPed, POT axis wrapped — fine | 765 | 6.3 % |
+| NPOT + CLAMP — fine (edge-pad is correct there) | 408 | 3.4 % |
+| POT + CLAMP — fine | 3,977 | 32.9 % |
+| **NPOT + REPEAT or MIRROR — the bug** | **0** | **0.0 %** |
+
+The artists were disciplined: every NPOT axis in the shipped data carries
+`GX_CLAMP` **on that axis**. The 765 "mixed" binds (e.g. 16×48
+`GX_MIRROR,GX_CLAMP`) are the pattern that looks dangerous and is not. All 972
+binds at `w = 48` clamp the 48 axis. The N64 tile path cannot produce the bug at
+all: `emu64.c:2195-2223` computes GX wrap from `cs/ms/ct/mt` **only** for a
+dimension in `{4,8,16,32,64,128,256,512}` and its `default:` arm forces
+`GX_CLAMP`.
+
+Also evaluated and rejected, so nobody re-derives them:
+
+- **Period replication when padding** is exact only when `pot/real` is an
+  integer, and for any genuinely NPOT `w` that ratio is strictly between 1 and 2
+  — so it is exact for *no* NPOT size this game ships.
+- **CPU-side UV folding** is wrong in the common case, not the rare one: folding
+  is per vertex and the hardware interpolates linearly between folded values, so
+  a triangle spanning a wrap boundary plays the texture backwards. The logged
+  train-window batch (`uv=-2.80,0.02..-1.80,1.02`) crosses an integer boundary
+  *inside* the primitive.
+- **Resampling to POT** would need a resampler `dc_pvr_texture.c` does not have,
+  cost a bilinear pass per upload on SH-4 at `-O0`, and blur every font sheet and
+  UI element — all of which are `GX_CLAMP` and exact today.
+
+**Residual, unverified and sub-8 only.** `next_pot()` floors at
+`DC_PVR_TEX_MIN_DIM = 8` (`dc_pvr_texture.c:942-946`), so a GX dimension of 4 —
+POT to GX, NPOT to us — gets `u_scale = 0.5`. `emu64.c:2196,2227` both list
+`case 4:`, so a 4-wide N64 tile with `cs==0 && ms==0` can reach `GX_REPEAT` at
+runtime. No static call site exhibits it. Detector rather than patch: assert no
+`DC_TEX_LOG` upload has `w < 8 || h < 8` with `wrap=1|2` on the matching
+`BATCH` line. If one ever appears, the narrowed fix is periodic replication for
+sub-8 only, where the ratio *is* an exact power of two.
+
 ---
 
 ## Caveat on the wider `kb/`

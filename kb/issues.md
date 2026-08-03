@@ -2,6 +2,42 @@
 
 ## Open
 
+- **DC: the texture cache's content hash only samples the ends of a large
+  buffer** (2026-08-03, found by code audit, not by a report — unverified
+  against a run). `tex_content_hash` (`dc/src/dc_pvr_texture.c:317-322`) hashes
+  the whole buffer only when `data_size <= 512`; above that it hashes the
+  **first 256 and last 256 bytes only**. Combined with the cache hit at
+  `:1037-1043`, any texture regenerated in place at a stable address that
+  changes only in its interior renders its first frame forever.
+  The reachable victim is the Famicom minigame screen: `famicom.cpp:2226`
+  re-inits a 256×228 `GX_TF_RGB565` object every frame over
+  `wp->result_bufp` (116,736 B). Its POT pad is exactly
+  `DC_PVR_TEX_SCRATCH_TEXELS`, so it is accepted (`:1049` tests `>`, not `>=`).
+  Two failure modes, both structural: identical sampled bytes → a frozen
+  image; differing sampled bytes → a fresh 128 KB VRAM entry **every frame**,
+  churning the 512-entry table. Confined to the unlockable minigame, so it is
+  low priority — but a full hash is not affordable per frame either, and the
+  right fix is probably to exempt an explicitly-invalidated object rather than
+  to hash harder.
+
+- **DC: unhandled texture formats decode to a transparent rectangle in
+  silence.** `decode_gc_texture`'s `default: break`
+  (`dc/src/dc_pvr_texture.c:686`) leaves the zero-filled scratch and logs
+  nothing, so an unsupported format is indistinguishable from a missing asset —
+  the exact confusion `DC_TEX_LOG` was built to end. Reachable formats:
+  `GX_TF_Z24X8` (`JFWDisplay.cpp:416`) and `GX_TF_C14X2`. One `DC_LOGE` in that
+  arm closes it. Also noted in `kb/texture-path.md` §2.
+
+- **DC: `dc_gx_backend_texture_release` is dead code and the refcount is
+  decorative.** `GXInitTexObj` memsets the whole object (`dc/src/dc_gx.c:2034`),
+  dropping `TEXOBJ_BACKEND_TEX` without calling release; every later bind of the
+  same content takes the cache-hit path and does `hit->refs++`
+  (`dc_pvr_texture.c:1041`), so `refs` only ever increases and `:1232` returns
+  early forever. Inert today for two independent reasons — `evict_lru` ignores
+  `refs` entirely (`:918-930`) and `GXDestroyTexObj` has **zero** callers in
+  `src/` — but any future eviction policy that respects `refs` will deadlock
+  against it.
+
 - **Villagers "fishing on land" during the fishing tournament**
   (2026-07-19 user report). Tourney flow: `anglingtournament_start`
   (ac_event_manager.c:2722) reserves the pool block and spawns 5 NPCs;
