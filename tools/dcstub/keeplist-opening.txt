@@ -200,3 +200,67 @@ src/data/submenu/map/kan_tizu.c
 src/game/m_bg_tex.c
 src/game/m_choice.c
 src/game/m_msg.c
+
+# --- the TITLE-SCREEN demo working set (censused 2026-08-02, session 3) ---
+# The list above was censused from a run that reaches SCENE_FG, the playable
+# town. The title screen is a DIFFERENT town view: it frames its own acres and
+# its own animals, so it draws 46 files that run never touched. Nobody noticed
+# until the ground-texture fix landed, because until then the whole town floor
+# was black and the untextured pieces had nothing to stand out against — a
+# human called the result "the train station is very broken on the title
+# screen with missing textures".
+#
+# Ruled out first, by A/B on a clean build of committed HEAD: the punch-through
+# list, the mirrored TEV alpha constant, the constant-colour form, the edge-
+# extended NPOT pad and the 16-bit rounding. Turning all of them off changed
+# nothing about the title screen. It was never a renderer regression.
+#
+# Reproduce: DC_ASSET_CENSUS=1 <the usual line>, run 150 s, then
+#   census_resolve.py <run>/console.log --sizes-from dc/build/nonstub/AnimalCrossing.elf --top 0
+#   census_keeplist.py census.txt --map dc/build/nonstub/AnimalCrossing.map --with-default
+src/actor/npc/ac_npc.c
+src/actor/npc/ac_tamaire_npc1.c
+src/data/field/bg/acre/police_indoor/police_indoor.c
+src/data/field/bg/acre/tmpr4/tmpr4.c
+src/data/model/act_f37_kurage.c
+src/data/model/act_m_koorogi.c
+src/data/model/act_m_kumo.c
+src/data/model/act_mus_kaseki_a1.c
+src/data/model/int_hnw013.c
+src/data/model/int_hnw015.c
+src/data/model/int_hnw017.c
+src/data/model/int_hnw019.c
+src/data/model/int_hnw021.c
+src/data/model/int_hnw023.c
+src/data/model/int_hnw025.c
+src/data/model/int_hnw047.c
+src/data/model/int_hnw061.c
+src/data/model/int_hnw067.c
+src/data/model/int_hnw094.c
+src/data/model/int_hnw115.c
+src/data/model/int_sum_hal_box01.c
+src/data/model/int_sum_oldclk01.c
+src/data/model/int_sum_sofe01.c
+src/data/model/int_tak_shuttle.c
+src/data/model/int_yos_turkey_watch.c
+src/data/npc/model/tex/cat_6.c
+src/data/npc/model/tex/cat_7.c
+src/data/npc/model/tex/cbr_5.c
+src/data/npc/model/tex/cbr_9.c
+src/data/npc/model/tex/chn_6.c
+src/data/npc/model/tex/crd_2.c
+src/data/npc/model/tex/dog_4.c
+src/data/npc/model/tex/dog_8.c
+src/data/npc/model/tex/duk_11.c
+src/data/npc/model/tex/duk_8.c
+src/data/npc/model/tex/goa_1.c
+src/data/npc/model/tex/goa_3.c
+src/data/npc/model/tex/goa_6.c
+src/data/npc/model/tex/wip_1.c
+src/data/npc/model/tex/wls_1.c
+src/data/npc/model/tex/wol_1.c
+src/data/npc/model/tex/wol_4.c
+src/data/npc/model/tex/wol_6.c
+src/game/m_common_data.c
+src/static/jaudio_NES/game/game64.c
+src/system/sys_dynamic.c
