@@ -93,6 +93,10 @@
  *                           in the `a` slot rather than `d` (5 sites)
  *   -DDC_PVR_NO_FOG         no hardware fog; byte-identical to pre-fog output
  *   -DDC_PVR_FOG_LOG=<N>    one fog state line every Nth frame
+ *   -DDC_PVR_NO_FTRV        scalar C matrix-vector per vertex instead of the
+ *                           SH-4 FTRV instruction (kb/perf-dc.md)
+ *   -DDC_PVR_NO_SHADEFAST   restore the per-component lighting evaluation and
+ *                           the unconditional eye/normal transform
  */
 
 #include "dc_platform.h"
@@ -133,6 +137,12 @@ static unsigned int s_prim_unsupported;
 #if DC_PVR_BACKEND
 
 #include <dc/pvr.h>
+/* SH-4 FTRV: dc_gx_backend_submit() folds projection*modelview into ONE 4x4 and
+ * then runs a matrix-vector multiply PER VERTEX. At -O0 that is 16 multiplies,
+ * 12 adds and ~60 stack round-trips of C; FTRV is one instruction. The matrix
+ * is loaded into XMTRX once per BATCH. See the DC_PVR_NO_FTRV block in
+ * dc_gx_backend_submit() and kb/perf-dc.md. */
+#include <dc/matrix.h>
 
 /* --- Viewport shadow -------------------------------------------------------
  * GXSetViewport hands us GameCube screen pixels, baked here into a scale and
@@ -581,8 +591,20 @@ static int cull_gx_to_pvr(int mode) {
  * splits GX_COLOR0A0 into its colour and alpha halves (dc_gx.c).
  *
  * Light positions and directions are VIEW space in GX, and `eye` here is the
- * post-modelview position, so they are already in the same space. */
+ * post-modelview position, so they are already in the same space.
+ *
+ * ⚠️ PERF, 2026-08-02 (kb/perf-dc.md). The original of this file evaluated ONE
+ * COMPONENT PER CALL and shade_vertex() called it four times per vertex — so a
+ * lit vertex ran the 8-light loop, its sqrtf and its spot attenuation FOUR
+ * TIMES to produce four numbers that differ only in which `lights[li].color[]`
+ * element they multiply. chan_eval() below inverts the nesting: one pass over
+ * the lights, all the components of one channel control at a time. The
+ * arithmetic is otherwise term for term identical.
+ *
+ * Kill switch: -DDC_PVR_NO_SHADEFAST restores the per-component form, which is
+ * kept verbatim below rather than reconstructed, so the A/B is exact. */
 #ifndef DC_PVR_NO_LIGHTING
+#ifdef DC_PVR_NO_SHADEFAST
 static float chan_component(int ci, int is_alpha,
                             const float* vtx_rgba, const float* eye,
                             const float* nrm, int comp) {
@@ -652,6 +674,98 @@ static float chan_component(int ci, int is_alpha,
     if (illum > 1.0f) illum = 1.0f;
     return mat * illum;
 }
+#else /* the hoisted form — one light loop for a whole channel control */
+/* Evaluate channel control ctl = ci*2+is_alpha for components [lo,hi] of one
+ * vertex, writing out[lo..hi]. Everything inside the light loop except the
+ * final multiply-accumulate is component-independent, which is the whole point:
+ * the light vector, its length, the one sqrtf, the normalise, N.L and the spot
+ * attenuation are computed once for the three colour components instead of
+ * three times.
+ *
+ * ⚠️ ONE DELIBERATE FP DIFFERENCE. The old inner term was
+ * `color[comp] * ndl * atten`, i.e. `(color*ndl)*atten`; this is
+ * `color[comp] * (ndl*atten)`. Same value to within one ulp of a float that is
+ * then clamped to [0,1] and quantised to 8 bits, so it cannot change a pixel —
+ * but it is not bit-identical, and that is worth knowing before blaming a
+ * one-LSB colour diff on something else. */
+static void chan_eval(int ci, int is_alpha, int lo, int hi,
+                      const float* vtx_rgba, const float* eye,
+                      const float* nrm, float* out) {
+    int ctl = ci * 2 + is_alpha;
+    float mat[4], illum[4];
+    int comp, li;
+
+    for (comp = lo; comp <= hi; comp++)
+        mat[comp] = (g_gx.chan_ctrl_mat_src[ctl] == GX_SRC_VTX)
+                        ? vtx_rgba[comp] : g_gx.chan_mat_color[ci][comp];
+
+    if (!g_gx.chan_ctrl_enable[ctl]) {
+        for (comp = lo; comp <= hi; comp++) out[comp] = mat[comp];
+        return;
+    }
+
+    for (comp = lo; comp <= hi; comp++)
+        illum[comp] = (g_gx.chan_ctrl_amb_src[ctl] == GX_SRC_VTX)
+                          ? vtx_rgba[comp] : g_gx.chan_amb_color[ci][comp];
+
+    for (li = 0; li < 8; li++) {
+        float dx, dy, dz, d2, d, atten, ndl, w;
+        if (!(g_gx.chan_ctrl_light_mask[ctl] & (1 << li)))
+            continue;
+
+        dx = g_gx.lights[li].pos[0] - eye[0];
+        dy = g_gx.lights[li].pos[1] - eye[1];
+        dz = g_gx.lights[li].pos[2] - eye[2];
+        d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < 1e-12f) continue;
+        d = sqrtf(d2);
+        dx /= d; dy /= d; dz /= d;
+
+        /* Diffuse term. GX_DF_NONE means "no N.L factor at all", which is how
+         * fullbright materials are expressed; it is not the same as N.L = 0. */
+        switch (g_gx.chan_ctrl_diff_fn[ctl]) {
+            case GX_DF_NONE:
+                ndl = 1.0f;
+                break;
+            case GX_DF_SIGN:
+                ndl = nrm[0] * dx + nrm[1] * dy + nrm[2] * dz;
+                break;
+            default: /* GX_DF_CLAMP */
+                ndl = nrm[0] * dx + nrm[1] * dy + nrm[2] * dz;
+                if (ndl < 0.0f) ndl = 0.0f;
+                break;
+        }
+
+        /* attn = max(0, a . (1, cos, cos^2)) / (k . (1, d, d^2)), with cos the
+         * angle off the light's own direction. GX_AF_NONE is a flat 1. */
+        atten = 1.0f;
+        if (g_gx.chan_ctrl_attn_fn[ctl] == GX_AF_SPOT) {
+            float cosa = -(g_gx.lights[li].dir[0] * dx +
+                           g_gx.lights[li].dir[1] * dy +
+                           g_gx.lights[li].dir[2] * dz);
+            float num = g_gx.lights[li].a0 +
+                        g_gx.lights[li].a1 * cosa +
+                        g_gx.lights[li].a2 * cosa * cosa;
+            float den = g_gx.lights[li].k0 +
+                        g_gx.lights[li].k1 * d +
+                        g_gx.lights[li].k2 * d2;
+            if (num < 0.0f) num = 0.0f;
+            atten = (den > 1e-9f) ? (num / den) : 0.0f;
+        }
+
+        w = ndl * atten;
+        for (comp = lo; comp <= hi; comp++)
+            illum[comp] += g_gx.lights[li].color[comp] * w;
+    }
+
+    for (comp = lo; comp <= hi; comp++) {
+        float f = illum[comp];
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        out[comp] = mat[comp] * f;
+    }
+}
+#endif /* DC_PVR_NO_SHADEFAST */
 #endif /* !DC_PVR_NO_LIGHTING */
 
 /* --- TEV stage 0: constant colour inputs -----------------------------------
@@ -941,15 +1055,48 @@ static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
                ((unsigned int)v->color0[0] << 16) |
                ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
 
+#ifndef DC_PVR_NO_SHADEFAST
+    /* THE PASS-THROUGH CASE, and it is the common one.
+     *
+     * With no light enabled on either half of the channel and both material
+     * sources set to GX_SRC_VTX, GX's whole channel equation collapses to
+     * "the vertex colour", and chan_component() below was spending four
+     * float divides, four multiplies, four clamps and four float->int
+     * conversions arriving back at the byte it started from. Returning the
+     * bytes is EXACT, not an approximation: pack_argb() computes
+     * (int)(b/255*255 + 0.5) and the round-trip error is ~1e-5, four orders of
+     * magnitude below the 0.5 that would change the answer.
+     *
+     * This is also what licenses dc_gx_backend_submit() to skip the eye-space
+     * position and the normal transform entirely — see `need_light` there. The
+     * predicate is duplicated deliberately and the two must not drift: every
+     * path below that reads `eye` or `nrm` is guarded by chan_ctrl_enable[]. */
+    if (!g_gx.chan_ctrl_enable[0] && !g_gx.chan_ctrl_enable[1] &&
+        g_gx.chan_ctrl_mat_src[0] == GX_SRC_VTX &&
+        g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX)
+        return ((unsigned int)v->color0[3] << 24) |
+               ((unsigned int)v->color0[0] << 16) |
+               ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
+#endif
+
     rgba[0] = v->color0[0] * (1.0f / 255.0f);
     rgba[1] = v->color0[1] * (1.0f / 255.0f);
     rgba[2] = v->color0[2] * (1.0f / 255.0f);
     rgba[3] = v->color0[3] * (1.0f / 255.0f);
 
+#ifdef DC_PVR_NO_SHADEFAST
     return pack_argb(chan_component(0, 0, rgba, eye, nrm, 0),
                      chan_component(0, 0, rgba, eye, nrm, 1),
                      chan_component(0, 0, rgba, eye, nrm, 2),
                      chan_component(0, 1, rgba, eye, nrm, 3));
+#else
+    {
+        float out[4];
+        chan_eval(0, 0, 0, 2, rgba, eye, nrm, out);   /* the colour half */
+        chan_eval(0, 1, 3, 3, rgba, eye, nrm, out);   /* the alpha half  */
+        return pack_argb(out[0], out[1], out[2], out[3]);
+    }
+#endif
 #endif
 }
 
@@ -1628,7 +1775,10 @@ void dc_gx_backend_frame_end(void) {
 }
 
 void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
-    float comb[4][4];
+    /* 32-byte aligned for mat_load(): KOS requires 8 and wants 32. Under
+     * -DDC_PVR_NO_FTRV nothing reads it through mat_load and the alignment is
+     * merely harmless. */
+    float comb[4][4] __attribute__((aligned(32)));
     const float (*mv)[4];
     const float (*pr)[4];
     const float (*nm)[3];
@@ -1640,6 +1790,20 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     float tevalpha = 1.0f;
     int   have_tevalpha = 0;
 #endif
+#endif
+#if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)
+    /* Does anything this batch draws actually need the eye-space position and
+     * the transformed, renormalised normal? Both are per-VERTEX and neither is
+     * cheap — the normal alone costs a 3x3 multiply, a dot product, a sqrtf and
+     * a divide — and shade_vertex() reads them only from inside chan_eval()'s
+     * `chan_ctrl_enable[ctl]` branch. So when no channel enables a light the
+     * whole of both is dead code that ran anyway, on every vertex of the town.
+     *
+     * The predicate must stay identical to the one shade_vertex() uses to take
+     * its pass-through path; it is written out in both places on purpose,
+     * because a mismatch would mean reading uninitialised eye[]/nrm[] rather
+     * than producing a wrong colour, and that is a much worse failure. */
+    int need_light;
 #endif
     int i, j, step, per_prim;
 
@@ -1732,9 +1896,34 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             float s = pr[i][0] * mv[0][j] + pr[i][1] * mv[1][j] +
                       pr[i][2] * mv[2][j];
             if (j == 3) s += pr[i][3];
+#ifdef DC_PVR_NO_FTRV
             comb[i][j] = s;
+#else
+            /* TRANSPOSED on purpose. mat_load() copies 16 consecutive floats
+             * into XF0..XF15 in order (KOS matrix.s: eight `fmov @r4+, xdN`),
+             * and FTRV computes fr0' = XF0*x + XF4*y + XF8*z + XF12*w — i.e. it
+             * reads the loaded array COLUMN-major. Writing the fold transposed
+             * is free here (it is one index swap in a 16-iteration loop that
+             * runs once per batch) and saves transposing 3,000 times a frame. */
+            comb[j][i] = s;
+#endif
         }
     }
+#ifndef DC_PVR_NO_FTRV
+    /* XMTRX is a single global hardware register bank, so this is only safe
+     * because NOTHING in the vertex loop below can touch it: apply_texgen,
+     * shade_vertex, emit_triangle and pvr_prim are all plain C or integer
+     * asm, and dc_mtx.c's PSMTX* — the only other XMTRX user in the image —
+     * is not reachable from here. Interrupts and thread switches ARE safe:
+     * KOS's entry.s saves and restores BOTH floating-point banks
+     * (kernel/entry.s, the `frchg` pair around eight `fmov drN,@-r0`). */
+    mat_load((const matrix_t*)comb);
+#endif
+
+#if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)
+    need_light = (g_gx.num_chans > 0) &&
+                 (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
+#endif
 
     step = per_prim;
     for (i = 0; i + per_prim <= count; i += step) {
@@ -1746,11 +1935,27 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             float ox = v->position[0], oy = v->position[1], oz = v->position[2];
             float eye[3], nrm[3], nl;
 
+#ifdef DC_PVR_NO_FTRV
             cv[k].x = comb[0][0] * ox + comb[0][1] * oy + comb[0][2] * oz + comb[0][3];
             cv[k].y = comb[1][0] * ox + comb[1][1] * oy + comb[1][2] * oz + comb[1][3];
             cv[k].z = comb[2][0] * ox + comb[2][1] * oy + comb[2][2] * oz + comb[2][3];
             cv[k].w = comb[3][0] * ox + comb[3][1] * oy + comb[3][2] * oz + comb[3][3];
+#else
+            {
+                /* One FTRV against the matrix loaded above. mat_trans_nodiv is
+                 * KOS's no-perspective-divide form: this backend needs the raw
+                 * clip-space w for the near-plane clip and does its own divide
+                 * in emit_projected(). */
+                float tx = ox, ty = oy, tz = oz, tw = 1.0f;
+                mat_trans_nodiv(tx, ty, tz, tw);
+                cv[k].x = tx; cv[k].y = ty; cv[k].z = tz; cv[k].w = tw;
+            }
+#endif
 
+#if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)
+            if (need_light)
+#endif
+            {
             eye[0] = mv[0][0] * ox + mv[0][1] * oy + mv[0][2] * oz + mv[0][3];
             eye[1] = mv[1][0] * ox + mv[1][1] * oy + mv[1][2] * oz + mv[1][3];
             eye[2] = mv[2][0] * ox + mv[2][1] * oy + mv[2][2] * oz + mv[2][3];
@@ -1767,6 +1972,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                     nl = 1.0f / sqrtf(nl);
                     nrm[0] *= nl; nrm[1] *= nl; nrm[2] *= nl;
                 }
+            }
             }
 
             apply_texgen(v, &cv[k].u, &cv[k].v);

@@ -25,6 +25,74 @@ static void (*vi_post_callback)(u32) = NULL;
 static u64 frame_start_us = 0;
 static int s_logic_tick_count = 0;
 
+/* ==========================================================================
+ * Frame-phase attribution (-DDC_PERF_PHASE) — see kb/perf-dc.md
+ * ==========================================================================
+ * The [PERF] line reports FPS and `gx=`, and the gap between them was being
+ * guessed at. It is large: at 10.3 FPS the frame is 97 ms and gx= is 27 ms, so
+ * 72 % of the town frame was unattributed.
+ *
+ * The decomposition this measures, and why it is the right one:
+ *
+ *   graph.c:401-429 runs the game logic `ticks_per_visual` times per PRESENTED
+ *   frame and sets g_pc_frameskip_active on all but the last. At the default
+ *   g_pc_fps_target = 30 that is exactly TWO logic ticks per displayed frame,
+ *   one of which is thrown away — emu64 still walks the whole display list and
+ *   still drives every GX setter on the skipped tick; only dc_gx_flush_vertices
+ *   and the present are elided.
+ *
+ *   VIWaitForRetrace() is called once per LOGIC TICK, at the end of it. So the
+ *   interval from the previous call's exit to this call's entry is exactly one
+ *   tick's game work, and g_pc_frameskip_active on entry says which kind it
+ *   was. Accumulating those two intervals separately splits the frame into
+ *   "work that produced pixels" and "work that was discarded" — a distinction
+ *   no existing counter could make.
+ *
+ * Everything reported is per PRESENTED frame, averaged over the same 30-frame
+ * window as [PERF], so the numbers add up to the [PERF] frame time:
+ *
+ *   [PHASE] draw=<ms in the presented tick, gx included>
+ *           skip=<ms in discarded logic ticks>  nskip=<how many>
+ *           cull=<ms in the whole-batch AABB cull>
+ *           xform=<ms in dc_gx_backend_submit: SH-4 T&L + TA submit>
+ *           vi=<ms in this function outside the ticks: swap, pace, probes>
+ *           v=<vertices submitted>  vlit=<of which in lit batches>
+ *           us/v=<microseconds per submitted vertex>
+ *
+ * Cost when enabled: four dc_time_us() reads per tick here plus two per batch
+ * in dc_gx.c. Off by default so the shipping build is byte-identical. */
+#ifdef DC_PERF_PHASE
+extern u64 dc_gx_cull_time_us;
+extern u64 dc_gx_submit_time_us;
+extern unsigned int dc_gx_phase_verts;
+extern unsigned int dc_gx_phase_verts_lit;
+extern unsigned int dc_gx_phase_batches_lit;
+extern unsigned int dc_gx_phase_src_verts;
+
+static u64 s_ph_last_exit  = 0;   /* when the previous tick was released     */
+static u64 s_ph_draw_us    = 0;   /* game work on presented ticks            */
+static u64 s_ph_skip_us    = 0;   /* game work on discarded (frameskip) ticks*/
+static u64 s_ph_vi_us      = 0;   /* time inside VIWaitForRetrace itself     */
+static u64 s_ph_cull_us    = 0;
+static u64 s_ph_xform_us   = 0;
+static unsigned int s_ph_nskip = 0;
+static unsigned int s_ph_verts = 0;
+static unsigned int s_ph_vlit  = 0;
+static unsigned int s_ph_vsrc  = 0;
+#endif
+
+#ifdef DC_PERF_GXAPI
+/* GX entry-point census — see the block in dc_gx.c. Reported next to [PHASE]
+ * because the two answer one question together: [PHASE] says how many ms are in
+ * display-list traversal, [GXAPI] says how many GX calls that traversal makes,
+ * and the product bounds how much of it is editable at all. */
+extern unsigned int dc_gx_api_pos, dc_gx_api_clr, dc_gx_api_tc;
+extern unsigned int dc_gx_api_nrm, dc_gx_api_begin, dc_gx_api_dirty;
+extern u64 dc_gx_api_vtx_us;
+static u64 s_api_pos, s_api_clr, s_api_tc, s_api_nrm, s_api_begin, s_api_dirty;
+static u64 s_api_vtx_us;
+#endif
+
 /* Dynamic-FPS controller (g_pc_fps_target == 6 selects it via settings). */
 static double s_dyn_ema_us = 0.0;
 static int    s_dyn_inited = 0;
@@ -111,6 +179,24 @@ void VIWaitForRetrace(void) {
     u64 vi_enter, t_before_swap, t_after_swap;
     double frame_ms = 0.0;
 
+#ifdef DC_PERF_PHASE
+    /* FIRST statement in the function: everything between the previous exit and
+     * here is the game's own work for the tick that just finished, and
+     * g_pc_frameskip_active still holds that tick's flag. */
+    {
+        u64 ph_now = dc_time_us();
+        if (s_ph_last_exit) {
+            if (g_pc_frameskip_active) {
+                s_ph_skip_us += ph_now - s_ph_last_exit;
+                s_ph_nskip++;
+            } else {
+                s_ph_draw_us += ph_now - s_ph_last_exit;
+            }
+        }
+        s_ph_last_exit = ph_now;   /* re-stamped on the way out */
+    }
+#endif
+
     /* Always poll input, even on logic-only ticks. */
     if (!dc_platform_poll_events()) {
         g_pc_running = 0;
@@ -135,6 +221,13 @@ void VIWaitForRetrace(void) {
         retrace_count++;
         pc_frame_counter++;
         if (vi_post_callback) vi_post_callback(retrace_count);
+#ifdef DC_PERF_PHASE
+        {
+            u64 ph_out = dc_time_us();
+            s_ph_vi_us += ph_out - s_ph_last_exit;
+            s_ph_last_exit = ph_out;
+        }
+#endif
         return;
     }
 
@@ -153,6 +246,23 @@ void VIWaitForRetrace(void) {
     dc_pace_frame();
 
     dc_gx_frame_timing_snapshot();
+
+#ifdef DC_PERF_PHASE
+    /* Must come after the snapshot: dc_gx.c publishes and clears its per-frame
+     * accumulators there, so reading before it would double-count one frame and
+     * miss the next. */
+    s_ph_cull_us  += dc_gx_cull_time_us;
+    s_ph_xform_us += dc_gx_submit_time_us;
+    s_ph_verts    += dc_gx_phase_verts;
+    s_ph_vlit     += dc_gx_phase_verts_lit;
+    s_ph_vsrc     += dc_gx_phase_src_verts;
+#endif
+#ifdef DC_PERF_GXAPI
+    s_api_pos   += dc_gx_api_pos;    s_api_clr   += dc_gx_api_clr;
+    s_api_tc    += dc_gx_api_tc;     s_api_nrm   += dc_gx_api_nrm;
+    s_api_begin += dc_gx_api_begin;  s_api_dirty += dc_gx_api_dirty;
+    s_api_vtx_us += dc_gx_api_vtx_us;
+#endif
 
     /* Adaptive stutter detection: only log frames well above the average. */
     {
@@ -200,6 +310,44 @@ void VIWaitForRetrace(void) {
             /* Paired with [PERF] on purpose: without a renderer census next
              * to the draw-call count, a black screen cannot be attributed
              * between "nothing submitted" and "submitted and discarded". */
+#ifdef DC_PERF_PHASE
+            /* Per PRESENTED frame, so it lines up with the FPS above: 30 is the
+             * window size, not a magic number. `us/v` is the one number to
+             * optimise against — it is xform time divided by the vertices that
+             * actually reached the transform, and it is invariant to how much
+             * geometry the scene happens to contain. */
+            {
+                double n = 30.0;
+                DC_LOGE("[PHASE] draw=%.1f skip=%.1f (n=%u) vi=%.1f | "
+                        "cull=%.1f xform=%.1f | v=%u vsrc=%u vlit=%u "
+                        "us/v=%.2f\n",
+                        (double)s_ph_draw_us / 1000.0 / n,
+                        (double)s_ph_skip_us / 1000.0 / n,
+                        (unsigned)(s_ph_nskip),
+                        (double)s_ph_vi_us / 1000.0 / n,
+                        (double)s_ph_cull_us / 1000.0 / n,
+                        (double)s_ph_xform_us / 1000.0 / n,
+                        (unsigned)(s_ph_verts / 30u),
+                        (unsigned)(s_ph_vsrc / 30u),
+                        (unsigned)(s_ph_vlit / 30u),
+                        s_ph_verts ? (double)s_ph_xform_us / (double)s_ph_verts
+                                   : 0.0);
+                s_ph_draw_us = s_ph_skip_us = s_ph_vi_us = 0;
+                s_ph_cull_us = s_ph_xform_us = 0;
+                s_ph_nskip = s_ph_verts = s_ph_vlit = s_ph_vsrc = 0;
+            }
+#endif
+#ifdef DC_PERF_GXAPI
+            DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "
+                    "posms=%.2f\n",
+                    (unsigned)(s_api_pos / 30u), (unsigned)(s_api_clr / 30u),
+                    (unsigned)(s_api_tc / 30u), (unsigned)(s_api_nrm / 30u),
+                    (unsigned)(s_api_begin / 30u),
+                    (unsigned)(s_api_dirty / 30u),
+                    (double)s_api_vtx_us / 1000.0 / 30.0);
+            s_api_pos = s_api_clr = s_api_tc = s_api_nrm = 0;
+            s_api_begin = s_api_dirty = 0; s_api_vtx_us = 0;
+#endif
             dc_pvr_report();
             fps_start = now;
             fps_count = 0;
@@ -251,6 +399,13 @@ void VIWaitForRetrace(void) {
     retrace_count++;
     pc_frame_counter++;
     if (vi_post_callback) vi_post_callback(retrace_count);
+#ifdef DC_PERF_PHASE
+    {
+        u64 ph_out = dc_time_us();
+        s_ph_vi_us += ph_out - s_ph_last_exit;
+        s_ph_last_exit = ph_out;
+    }
+#endif
 }
 
 u32  VIGetRetraceCount(void) { return retrace_count; }

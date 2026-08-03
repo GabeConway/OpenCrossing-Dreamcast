@@ -91,6 +91,74 @@ u64 dc_gx_texload_time_us = 0;
 static u64 s_flush_time_acc = 0;
 u64 dc_gx_texload_acc = 0;   /* non-static: also written by the texture path */
 
+/* ---- Frame-phase attribution (-DDC_PERF_PHASE) ----------------------------
+ * kb/perf-dc.md. `gx=` in the [PERF] line is the WHOLE of dc_gx_flush_vertices,
+ * which is three very different jobs bolted together: the whole-batch AABB
+ * frustum cull, the SH-4 transform/light/emit in dc_pvr.c, and the bookkeeping
+ * around both. A single number cannot say which one to attack, and the two that
+ * matter are affected by opposite changes — cheaper culling means MORE geometry
+ * reaches the transform.
+ *
+ * These are published unconditionally (so dc_vi.c can print them without an
+ * #ifdef of its own) and only WRITTEN under -DDC_PERF_PHASE: two extra
+ * dc_time_us() reads per batch is ~600 timer reads/frame in the town, which is
+ * measurable against the thing being measured. Zero means "not instrumented",
+ * which is distinguishable from "measured as zero" because verts= is zero too.
+ *
+ * verts_lit is the number that decides whether the lighting path is worth
+ * optimising at all: it counts vertices in batches whose channel control
+ * actually enables a light, i.e. the vertices for which chan_component()'s
+ * 8-light loop can run. The test is deliberately the same one dc_pvr.c's
+ * chan_component() applies, so the two cannot drift apart silently. */
+u64 dc_gx_cull_time_us = 0;
+u64 dc_gx_submit_time_us = 0;
+unsigned int dc_gx_phase_verts = 0;
+unsigned int dc_gx_phase_verts_lit = 0;
+unsigned int dc_gx_phase_batches_lit = 0;
+unsigned int dc_gx_phase_src_verts = 0;
+#ifdef DC_PERF_PHASE
+static u64 s_cull_time_acc = 0;
+static u64 s_submit_time_acc = 0;
+static unsigned int s_phase_verts = 0;
+static unsigned int s_phase_verts_lit = 0;
+static unsigned int s_phase_batches_lit = 0;
+/* ---- GX API census (-DDC_PERF_GXAPI) --------------------------------------
+ * The phase split says ~58 % of a town frame is display-list traversal: the
+ * game's draw code plus emu64 plus THIS FILE's GX entry points. Only the last
+ * of those three is editable (CLAUDE.md forbids touching src/), so the ranking
+ * question for any further work is "how much of that 58 ms is the GX API?".
+ *
+ * Counting answers it without the observer effect a per-call timer would have:
+ * one increment is a handful of cycles against a function whose body is tens of
+ * instructions at -O0, whereas two dc_time_us() reads per call would cost more
+ * than the calls being measured. `vtxus` is the one aggregate timer, and only
+ * on GXPosition3f32 — the single hottest entry point and the one that owns the
+ * 32-byte staging copy — so its overhead is bounded and attributable.
+ *
+ * -DDC_PERF_GXAPI, off by default. */
+unsigned int dc_gx_api_pos = 0, dc_gx_api_clr = 0, dc_gx_api_tc = 0;
+unsigned int dc_gx_api_nrm = 0, dc_gx_api_begin = 0, dc_gx_api_dirty = 0;
+u64 dc_gx_api_vtx_us = 0;
+#ifdef DC_PERF_GXAPI
+static unsigned int s_api_pos, s_api_clr, s_api_tc, s_api_nrm,
+                    s_api_begin, s_api_dirty;
+static u64 s_api_vtx_us;
+#define DC_GXAPI(counter) do { (counter)++; } while (0)
+#else
+#define DC_GXAPI(counter) do { } while (0)
+#endif
+
+/* Vertices the GAME handed us for the batch currently staged, against the
+ * `count` the backend is then asked to transform. They differ only because
+ * GXBegin() rewrites GX_TRIANGLESTRIP/GX_TRIANGLEFAN into independent
+ * triangles: an N-vertex strip becomes 3*(N-2) buffered vertices, so the
+ * ratio of the two is exactly the transform work a native PVR strip would
+ * save. It cannot be inferred from the [PERF] counters — prim_draws[2] is
+ * zero precisely BECAUSE the conversion already happened. */
+static unsigned int s_batch_src_verts = 0;
+static unsigned int s_phase_src_verts = 0;
+#endif
+
 /* Set when a flush actually broke a batch; the next state change claims it,
  * attributing the break to its cause. */
 static int s_flush_pending_attr = 0;
@@ -202,6 +270,9 @@ static int dc_tex_mtx_id_to_slot(int id) {
 
 void dc_gx_mark_dirty(unsigned int flag) {
     unsigned int m;
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_dirty);
+#endif
     if (s_flush_pending_attr) {
         pc_gx_flush_reason[__builtin_ctz(flag)]++;
         s_flush_pending_attr = 0;
@@ -248,6 +319,9 @@ static int dc_gx_reserve_verts(int need) {
 static void dc_gx_commit_vertex(void) {
     int i;
 
+#ifdef DC_PERF_PHASE
+    s_batch_src_verts++;   /* one call == one vertex the game emitted */
+#endif
     if (!s_conv_active) {
         if (dc_gx_reserve_verts(1)) {
             g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
@@ -342,8 +416,12 @@ static int dc_gx_batch_is_offscreen(int count) {
     float (*mv)[4];
     float (*pr)[4];
     int outside[6];
-    int i, c, ci, p;
+#ifdef DC_GX_NO_FAST_AABB
+    int i, c;
+#endif
+    int ci, p;
 
+#ifdef DC_GX_NO_FAST_AABB
     mn[0] = mx[0] = v[0].position[0];
     mn[1] = mx[1] = v[0].position[1];
     mn[2] = mx[2] = v[0].position[2];
@@ -354,6 +432,43 @@ static int dc_gx_batch_is_offscreen(int count) {
             if (pv > mx[c]) mx[c] = pv;
         }
     }
+#else
+    /* ⚠️ PERF, 2026-08-02 (kb/perf-dc.md). MEASURED at 4.1 ms of a 100 ms town
+     * frame, over every vertex of every batch — including the 71 % that this
+     * function then rejects, which is the point of it.
+     *
+     * The loop above is arithmetically identical, but at -O0 the `[c]` inner
+     * loop costs its own counter, and `v[i].position[c]` recomputes
+     * base + i*sizeof(DCGXVertex) + c*4 with a multiply on every one of the
+     * three components. Walking a pointer and holding the six extrema in named
+     * scalars removes all of that address arithmetic; nothing about the
+     * comparison changes.
+     *
+     * `else if` is not a shortcut that can bite: after the seed both extrema
+     * start equal, so a value below the running minimum is necessarily below
+     * the running maximum, and NaN takes neither branch in either form —
+     * exactly as before, which keeps the cull conservative.
+     *
+     * Kill switch: -DDC_GX_NO_FAST_AABB restores the indexed form verbatim. */
+    {
+        const DCGXVertex* p = v;
+        const DCGXVertex* end = v + count;
+        float n0, n1, n2, x0, x1, x2;
+        n0 = x0 = p->position[0];
+        n1 = x1 = p->position[1];
+        n2 = x2 = p->position[2];
+        for (++p; p < end; ++p) {
+            float a = p->position[0];
+            float b = p->position[1];
+            float d = p->position[2];
+            if (a < n0) n0 = a; else if (a > x0) x0 = a;
+            if (b < n1) n1 = b; else if (b > x1) x1 = b;
+            if (d < n2) n2 = d; else if (d > x2) x2 = d;
+        }
+        mn[0] = n0; mn[1] = n1; mn[2] = n2;
+        mx[0] = x0; mx[1] = x1; mx[2] = x2;
+    }
+#endif
 
     mv = g_gx.pos_mtx[g_gx.current_mtx];
     pr = g_gx.projection_mtx;
@@ -391,6 +506,16 @@ void dc_gx_flush_vertices(void) {
 
     if (count == 0) return;
     t0 = dc_time_us();
+#ifdef DC_PERF_PHASE
+    /* Snapshot-and-clear on EVERY exit path below, so the source count always
+     * belongs to the batch whose `count` it is being compared against. A
+     * mid-batch split (dc_gx_reserve_verts) flushes here too, and both halves
+     * then carry their own share. */
+    { unsigned int src_here = s_batch_src_verts; s_batch_src_verts = 0;
+#define DC_PH_SRC src_here
+#else
+#define DC_PH_SRC 0u
+#endif
 
     /* Frameskip: no submission. dirty stays set so the next surviving flush
      * applies everything that changed during the skipped ticks. */
@@ -400,17 +525,27 @@ void dc_gx_flush_vertices(void) {
         return;
     }
 
-    if (dc_gx_batch_cull &&
-        (g_gx.current_primitive == GX_QUADS ||
-         g_gx.current_primitive == GX_TRIANGLES ||
-         g_gx.current_primitive == GX_TRIANGLESTRIP ||
-         g_gx.current_primitive == GX_TRIANGLEFAN) &&
-        dc_gx_batch_is_offscreen(count)) {
-        pc_gx_culled_draws++;
-        s_flush_pending_attr = 1;
-        s_flush_time_acc += dc_time_us() - t0;
-        g_gx.current_vertex_idx = 0;
-        return;
+    {
+        int cullable = dc_gx_batch_cull &&
+            (g_gx.current_primitive == GX_QUADS ||
+             g_gx.current_primitive == GX_TRIANGLES ||
+             g_gx.current_primitive == GX_TRIANGLESTRIP ||
+             g_gx.current_primitive == GX_TRIANGLEFAN);
+        int off;
+#ifdef DC_PERF_PHASE
+        u64 tc = dc_time_us();
+        off = cullable && dc_gx_batch_is_offscreen(count);
+        s_cull_time_acc += dc_time_us() - tc;
+#else
+        off = cullable && dc_gx_batch_is_offscreen(count);
+#endif
+        if (off) {
+            pc_gx_culled_draws++;
+            s_flush_pending_attr = 1;
+            s_flush_time_acc += dc_time_us() - t0;
+            g_gx.current_vertex_idx = 0;
+            return;
+        }
     }
 
     pc_gx_draw_call_count++;
@@ -423,12 +558,29 @@ void dc_gx_flush_vertices(void) {
     }
 
     /* ---- THE SEAM ---- */
+#ifdef DC_PERF_PHASE
+    {
+        u64 ts = dc_time_us();
+        int lit = (g_gx.num_chans > 0) &&
+                  (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
+        dc_gx_backend_submit(g_gx.current_primitive, g_gx.vertex_buffer, count);
+        s_submit_time_acc += dc_time_us() - ts;
+        s_phase_verts += (unsigned int)count;
+        s_phase_src_verts += DC_PH_SRC;
+        if (lit) { s_phase_batches_lit++; s_phase_verts_lit += (unsigned int)count; }
+    }
+#else
     dc_gx_backend_submit(g_gx.current_primitive, g_gx.vertex_buffer, count);
+#endif
 
     g_gx.dirty = 0;
     s_flush_pending_attr = 1;
     g_gx.current_vertex_idx = 0;
     s_flush_time_acc += dc_time_us() - t0;
+#ifdef DC_PERF_PHASE
+    }
+#endif
+#undef DC_PH_SRC
 }
 
 void dc_gx_frame_timing_snapshot(void) {
@@ -436,6 +588,31 @@ void dc_gx_frame_timing_snapshot(void) {
     dc_gx_texload_time_us = dc_gx_texload_acc;
     s_flush_time_acc = 0;
     dc_gx_texload_acc = 0;
+#ifdef DC_PERF_PHASE
+    dc_gx_cull_time_us = s_cull_time_acc;
+    dc_gx_submit_time_us = s_submit_time_acc;
+    dc_gx_phase_verts = s_phase_verts;
+    dc_gx_phase_verts_lit = s_phase_verts_lit;
+    dc_gx_phase_batches_lit = s_phase_batches_lit;
+    dc_gx_phase_src_verts = s_phase_src_verts;
+    s_phase_src_verts = 0;
+#endif
+#ifdef DC_PERF_GXAPI
+    dc_gx_api_pos = s_api_pos;     s_api_pos = 0;
+    dc_gx_api_clr = s_api_clr;     s_api_clr = 0;
+    dc_gx_api_tc = s_api_tc;       s_api_tc = 0;
+    dc_gx_api_nrm = s_api_nrm;     s_api_nrm = 0;
+    dc_gx_api_begin = s_api_begin; s_api_begin = 0;
+    dc_gx_api_dirty = s_api_dirty; s_api_dirty = 0;
+    dc_gx_api_vtx_us = s_api_vtx_us; s_api_vtx_us = 0;
+#endif
+#ifdef DC_PERF_PHASE
+    s_cull_time_acc = 0;
+    s_submit_time_acc = 0;
+    s_phase_verts = 0;
+    s_phase_verts_lit = 0;
+    s_phase_batches_lit = 0;
+#endif
 }
 
 /* ==========================================================================
@@ -551,6 +728,9 @@ void dc_gx_end_frame(void) {
  * ========================================================================== */
 void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     u32 eff_prim = primitive;
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_begin);
+#endif
     int conv = 0, conv_fan = 0;
     int emit_count;
 
@@ -629,6 +809,10 @@ void GXEnd(void) { dc_gx_commit_pending_and_flush(); }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
     u8 cr, cg, cb, ca;
+#ifdef DC_PERF_GXAPI
+    u64 t_api = dc_time_us();
+    DC_GXAPI(s_api_pos);
+#endif
 
     if (g_gx.vertex_pending)
         dc_gx_commit_vertex();
@@ -658,6 +842,9 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.position[1] = y;
     g_gx.current_vertex.position[2] = z;
     g_gx.vertex_pending = 1;
+#ifdef DC_PERF_GXAPI
+    s_api_vtx_us += dc_time_us() - t_api;
+#endif
 }
 
 void GXPosition3u16(u16 x, u16 y, u16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
@@ -683,6 +870,9 @@ void GXPosition1x16(u16 index) {
 void GXPosition1x8(u8 index) { GXPosition1x16(index); }
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_nrm);
+#endif
     /* Stored as s16 fixed point; SH-4 lighting consumes it that way. */
     float sx = x * DC_GX_NRM_SCALE, sy = y * DC_GX_NRM_SCALE, sz = z * DC_GX_NRM_SCALE;
     if (sx >  32767.0f) sx =  32767.0f; if (sx < -32768.0f) sx = -32768.0f;
@@ -693,6 +883,9 @@ void GXNormal3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.normal[2] = (short)sz;
 }
 void GXNormal3s16(s16 x, s16 y, s16 z) {
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_nrm);
+#endif
     g_gx.current_vertex.normal[0] = x;
     g_gx.current_vertex.normal[1] = y;
     g_gx.current_vertex.normal[2] = z;
@@ -710,6 +903,9 @@ void GXNormal1x16(u16 index) {
 void GXNormal1x8(u8 index) { GXNormal1x16(index); }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_clr);
+#endif
     g_gx.current_vertex.color0[0] = r;
     g_gx.current_vertex.color0[1] = g;
     g_gx.current_vertex.color0[2] = b;
@@ -735,6 +931,9 @@ void GXColor4f32(float r, float g, float b, float a) {
 
 /* Channel 0 only — emu64 emits one texcoord; multi-tex uses matrix transforms. */
 void GXTexCoord2f32(f32 s, f32 t) {
+#ifdef DC_PERF_GXAPI
+    DC_GXAPI(s_api_tc);
+#endif
     g_gx.current_vertex.texcoord[0] = s;
     g_gx.current_vertex.texcoord[1] = t;
 }
