@@ -1000,6 +1000,27 @@ static int tev_const_color(float* out) {
  * different error from today's (wrong hue, no day/night at all), not a smaller
  * one by construction, so it is judged on a screenshot, not on this comment.
  *
+ * ⚠️ MEASURED 2026-08-03, AND IT REGRESSES SOMETHING. A 600 s run with this on
+ * (against an otherwise identical build, both reaching the town, both with
+ * ASSET MISSING = 0) passes every counter — no ptdrop, no LOST, no new blank
+ * textures, FPS within noise — and the train window's scenery band visibly
+ * darkens, which is the ENV term correctly arriving. But **the train station
+ * canopy renders as a flat teal slab with no texture at all**, where the same
+ * build without this shows correctly textured beams.
+ *
+ * A flat, UNTEXTURED result is the clue and it does not fit "the vertex colour
+ * was replaced by a constant" — that would still be modulated by the texel.
+ * The likely shape is the one at dc_pvr.c's GX_TEXMAP_NULL guard: a config
+ * whose stage 0 binds GX_TEXMAP_NULL and carries the texture on stage 1, so
+ * `tex` is nulled, the batch is untextured, and the folded constant becomes the
+ * whole colour. emu64.c:1764-1773 is exactly that shape and its true output is
+ * `T0 * lerp(RASC, C1, A0)`. That guard reads only stage 0 and should ask
+ * whether ANY stage binds a texmap. Fixing it is probably a precondition for
+ * turning the fold on, not a separate job.
+ *
+ * So: this is off, it is not ready, and the next step is that guard plus the
+ * oargb work above — not a wider fold.
+ *
  * Kill switch: the whole thing is opt-in behind -DDC_PVR_TEVFOLD.
  * -DDC_PVR_TEVFOLD_NORASC narrows it to K1 == 0 (constants only, never scaling
  * the vertex colour), which separates "constants restored" from "18 configs now

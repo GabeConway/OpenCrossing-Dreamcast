@@ -341,8 +341,19 @@ as `K0 + K1*RASC`. It runs only where the old shape declined, so every batch the
 old code handled keeps its exact result. Measured: no regression, and the window
 scenery visibly darkens — the ENV term arriving.
 
-**It is OFF because it is not yet exact and no screenshot says the trade is a
-win.** For the P3 shapes whose second stage is `CPREV + TEXC*CPREV` — the band
+**It is OFF because a screenshot says it REGRESSES.** With the fold on, the
+train station canopy renders as a **flat teal slab with no texture at all**,
+where the identical build without it shows correctly textured beams. Every
+counter passed. A flat *untextured* result does not fit "the vertex colour was
+replaced by a constant" — that would still be modulated by the texel — so the
+likely shape is `dc_pvr.c`'s `GX_TEXMAP_NULL` guard, which reads **stage 0
+only**: a config that binds `GX_TEXMAP_NULL` on stage 0 and carries the texture
+on stage 1 (`emu64.c:1764-1773` is exactly that, true output
+`T0 * lerp(RASC, C1, A0)`) gets `tex = NULL`, draws untextured, and the folded
+constant becomes the whole colour. **Fix that guard — "does ANY stage bind a
+texmap" — before touching the fold again.**
+
+It is also not yet exact even where it does fire.** For the P3 shapes whose second stage is `CPREV + TEXC*CPREV` — the band
 among them — GX computes `K*(1 + T0)` and this computes `K*T0`, i.e. about K too
 dark. Today's error is "wrong hue, no day/night"; the fold's is "right hue,
 right day/night, too dark". Neither is correct.
