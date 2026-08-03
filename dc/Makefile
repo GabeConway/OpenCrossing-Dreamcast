@@ -445,6 +445,20 @@ ifneq ($(DC_PVR_BATCH_LOG),)
 DEFINES += -DDC_PVR_BATCH_LOG=$(DC_PVR_BATCH_LOG)
 endif
 
+# DC_SCIF_FAST=1 — raise the console from KOS's 57,600 baud to 1,562,500
+# (~5.8 KB/s -> ~150 KB/s). EMULATOR RUNS ONLY: a real coder's cable will not
+# sync at 1.5 Mbps and a hardware build with this set loses its console, crash
+# dumps included. The harness's own selftest has used exactly this rate since
+# M0 (harness/dc/selftest/selftest.c:134).
+#
+# What it buys: a DC_FB_IMAGE screenshot is ~205 KB of base64, i.e. ~35 s of
+# wall clock at the default rate. At the fast rate it is ~1.4 s, so a
+# screenshot run stops being a different experiment from a progression run and
+# full 640x480 captures (DC_FB_IMAGE=1) become affordable.
+ifneq ($(DC_SCIF_FAST),)
+DEFINES += -DDC_SCIF_FAST=$(DC_SCIF_FAST)
+endif
+
 # DC_XDEFS — raw extra -D flags, appended last so they win.
 #
 # The renderer's kill switches (DC_PVR_NO_CULL, DC_PVR_CULL_INVERT,

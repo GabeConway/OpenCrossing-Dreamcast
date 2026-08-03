@@ -527,7 +527,47 @@ static void dc_stub_keep_assets(void) {
 }
 #endif /* DC_ASSET_STUB */
 
+#if !defined(DC_HOST_STUB) && defined(DC_SCIF_FAST)
+#include <dc/scif.h>
+#include <kos/dbgio.h>
+
+/* RAISE THE CONSOLE BAUD — EMULATOR RUNS ONLY.
+ *
+ * KOS's default SCIF rate is 57,600 baud = ~5.8 KB/s, and KOS busy-waits on the
+ * TX FIFO, so console output is charged to the guest as real frame time. That
+ * is not a footnote here: emu64's shared-vertex warning printed 10,877 times in
+ * one 600 s town run and cost 8x the frame rate (kb/traps.md), and a single
+ * DC_FB_IMAGE screenshot is ~205 KB of base64 — about 35 SECONDS of wall clock
+ * at the default rate, which is why a screenshot run reaches a fraction of the
+ * frames a plain run does and must never be read as a progression run.
+ *
+ * Flycast models the SCIF divisor faithfully, and the harness's own selftest
+ * has run at 1,562,500 baud (~150 KB/s) since M0 — see
+ * harness/dc/selftest/selftest.c:134 and harness/dc/console.sh's "two
+ * guest-side rules". Same call here, so the game build gets the same ~27x.
+ *
+ * ⚠️ EMULATOR ONLY, and that is why it is opt-in rather than default: a real
+ * coder's cable will not sync at 1.5 Mbps, so a hardware run with this compiled
+ * in loses its console entirely — including any crash dump. `dc/build-dc.sh`
+ * does not set it; `DC_SCIF_FAST=1` does.
+ *
+ * ⚠️ Still NEVER call scif_flush() (kb/traps.md): Flycast does not re-raise
+ * TEND on an idle TX FIFO, KOS latches serial_enabled = 0, and the console dies
+ * permanently. scif_init() after set_parameters is the documented sequence and
+ * does not flush. */
+static void dc_scif_fast_init(void) {
+    scif_set_parameters(1562500, 1);
+    scif_init();
+    dbgio_dev_select("scif");
+}
+#else
+static void dc_scif_fast_init(void) { }
+#endif
+
 int main(int argc, char* argv[]) {
+    /* 0. Console speed, before anything can print. */
+    dc_scif_fast_init();
+
     /* 1. The ledger goes first: it measures .text/.data/.bss from the linker
      *    symbols and publishes pc_image_base/_end, which emu64's seg2k0
      *    pointer heuristic reads. Any allocation before this is invisible to

@@ -80,6 +80,7 @@ ENVARGS=(
     -e DC_CONSOLE_LIMIT="${DC_CONSOLE_LIMIT:-}"
     -e DC_TEX_LOG="${DC_TEX_LOG:-}"
     -e DC_PVR_BATCH_LOG="${DC_PVR_BATCH_LOG:-}"
+    -e DC_SCIF_FAST="${DC_SCIF_FAST:-}"
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
