@@ -486,7 +486,44 @@ void pc_settings_load(void) {
     g_pc_settings.sfx_volume    = 100;
     g_pc_settings.voice_volume  = 100;
     g_pc_settings.zoom_enabled  = 0;
-    /* fps_target: 3 == 30 fps. PLAN §1 — 30 is the DESIGN TARGET. */
+    /* fps_target: 6 == DYNAMIC. PLAN §1's 30 fps is the design target for how
+     * many frames we PRESENT; it is not how fast the game should run.
+     *
+     * This was 3 (a hard 30) and that is why [PERF] reported "34 % speed".
+     * src/graph.c:405-422 derives the number of logic ticks per presented
+     * frame from this setting. On the fixed path (case 3) it is a constant
+     * TWO — correct only if we actually present 30 fps. The town presents 10,
+     * so the game got 20 logic ticks per second instead of 60 and ran in slow
+     * motion. On the dynamic path it is `60.0 / g_pc_fps_target`, so as the
+     * controller lowers the render target to what the hardware can really do,
+     * graph runs proportionally MORE ticks per frame and game logic stays at
+     * 60 Hz — the base port's own default, whose comment reads "logic stays
+     * 100%% speed, render fps floats" (pc/src/pc_settings.c:30).
+     *
+     * The controller this selects is already here: dc_dynamic_fps_update() in
+     * dc_vi.c, EMA alpha 0.25, clamped to [10, 30] for this target, with the
+     * upward probe that stops the measurement latching bistable. It has simply
+     * never been reachable, because nothing set fps_target to 6.
+     *
+     * The trade is real and is the right way round: fewer PRESENTED frames,
+     * correct game speed. A frameskipped tick costs 7.3 ms against a drawn
+     * tick's 91.4 (kb/perf-dc.md), so the extra ticks are cheap.
+     *
+     * ⚠️ TRIED 2026-08-02 AND REVERTED — the idea is sound, the evidence is
+     * not there, and it may cost visual frames. Setting this to 6 left the
+     * [PERF] speed reading at 33-36 %, unchanged. That is because "speed" in
+     * that line is simply fps/30, NOT the logic rate, so it could not have
+     * shown the win even if there was one — and a human on a concurrent build
+     * reported the game "runs super slow", which is exactly what 6 logic ticks
+     * per presented frame would look like.
+     *
+     * To settle it properly, instrument the LOGIC rate directly: count
+     * game_main ticks per wall second and compare 3 against 6. If the dynamic
+     * path really does hold 60 ticks/s where the fixed path gives 20, it is
+     * worth the presented frames; if it does not, this is dead. Do not flip it
+     * again without that number.
+     *
+     * Set 6 for dynamic, 0 for uncapped. */
     g_pc_settings.fps_target    = 3;
     g_pc_settings.render_scale  = 100;
     g_pc_settings.window_size   = 2;   /* 640x480 */

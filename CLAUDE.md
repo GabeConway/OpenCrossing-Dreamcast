@@ -179,6 +179,7 @@ already produced two wrong numbers.
 | `kb/audio-stage-a-software.md` | stage A: rspsim at 22 kHz, effect-cut order, `snd_stream`, main-RAM footprint |
 | `kb/audio-stage-b-aica.md` | stage B: the exact seam, AICA register map, residency policy, the offline tools |
 | `kb/audio-plan-of-record.md` | the plan of record, and the ranked list of what is still unmeasured |
+| `kb/upstream-pc-port.md` | what the upstream ACGC-PC-Port releases do and do NOT give us. **Their perf work does not transfer** (shader variants; the PVR has none, and we are CPU-bound). Read before mining their changelog |
 | `kb/perf-dc.md` | **where the town frame's 100 ms actually goes**, measured: 58 % emu64/display-list traversal (`src/`, closed to editing), 26 % renderer, 7 % game logic. The `-DDC_PERF_PHASE` / `-DDC_PERF_GXAPI` instruments, the applied per-vertex wins (FTRV, hoisted lighting), and what was ruled out — strip conversion, textures, batch merging |
 | `kb/texture-path.md` | **what happens to a GC texture on its way to VRAM** — filtering, format, per-format colour loss, mipmaps, the VRAM budget, the NPOT pad. Read before proposing any texture-quality work: paletted and VQ are both closed here with reasons |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |

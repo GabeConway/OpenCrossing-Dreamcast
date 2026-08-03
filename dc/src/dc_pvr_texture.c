@@ -1165,7 +1165,12 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
                 if (k == (int)distinct) seen[distinct++] = v;
             }
         }
-        DC_LOG("[DC/TEXLOG] %dx%d gxfmt=%d ci=%d tlut=%p n=%d tfmt=%d be=%d "
+        /* DC_LOGE, not DC_LOG: this block is already behind its own compile
+         * flag, so gating it a second time on g_pc_verbose only produces the
+         * failure mode where -DDC_TEX_LOG=1 yields an empty log and the run is
+         * read as "no uploads happened". A diagnostic you asked for by name
+         * must never be conditional on anything else. */
+        DC_LOGE("[DC/TEXLOG] %dx%d gxfmt=%d ci=%d tlut=%p n=%d tfmt=%d be=%d "
                "class=%d data=%p nonzero=%u/%d lo=%04X hi=%04X distinct%s=%u"
                " raw=%04X,%04X,%04X,%04X"
                " pal=%02X%02X%02X%02X,%02X%02X%02X%02X,%02X%02X%02X%02X\n",

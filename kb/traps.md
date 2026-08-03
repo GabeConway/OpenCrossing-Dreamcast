@@ -433,3 +433,39 @@ for those see `kb/closed.md`.
   concurrent `make` runs corrupt it. Investigation agents get read-only
   `sh-elf-nm`/`objdump`/`readelf` over `docker run`, never `make`.
 - **Always give absolute paths in scripts** — agents run from varying cwds.
+
+## Renderer — destination alpha does not exist (2026-08-02)
+
+`GX_BL_DSTALPHA` / `GX_BL_INVDSTALPHA` must NOT map literally to
+`PVR_BLEND_DESTALPHA` / `PVR_BLEND_INVDESTALPHA`. **KOS renders into RGB565, so
+there is no stored destination alpha and the hardware reads 1.0.** emu64 uses
+the N64 two-pass memory-alpha decal idiom for every ground shadow in the game
+(`emu64.c:2289`/`:2291`, RDP side `m_rcp.c:131`): pass A writes alpha with
+colour update off, pass B blends against it. With DESTALPHA reading 1.0, pass B
+collapses to `src*1 + dst*0` and the shadow paints **opaque**. This presented
+as "the train station is very broken on the title screen with missing
+textures" — the textures were fine; a navy slab was painted over them.
+Substituting SOURCE alpha is exact, because both passes draw the same geometry
+with the same texture and prim alpha. Kill switch `-DDC_PVR_KEEP_DSTALPHA`.
+
+## Instrumentation — `DC_LOG` is gated on verbose, NOT flood-limited
+
+⚠️ Correction to a claim made mid-session. `DC_LOG` is **not** suppressed by the
+console flood limiter — `dc_misc.c:136` calls `vfprintf` directly. It is gated
+on `g_pc_verbose`, which `DC_ASSET_STUB` forces on (`dc_main.c:81`). If a
+`DC_TEX_LOG`/`DC_LOG` diagnostic prints nothing, the build simply lacks the
+`-D`. Diagnostics behind their own flag should still use `DC_LOGE` so they are
+not double-gated.
+
+## Builds — never build while an agent has the tree
+
+Two builds this session silently included another agent's in-flight edits to
+`dc_gx.c`/`dc_vi.c`, one of which had broken the `DC_FB_PROBE` hook — so every
+screenshot run returned zero framebuffer output and an "A/B" was never testing
+what it claimed. Concurrent `make` in `dc/build` also produced an `ld` bus
+error and a `flags.stamp` that reverted to another session's `DEFINES`, giving
+an image whose `DC_MAIN_MEMORY_SIZE` disagreed with its ledger and aborted at
+boot. **Verification builds go in a detached worktree at committed HEAD**, and
+⚠️ **that worktree must live under `$HOME`** — colima cannot bind-mount
+`/private/tmp`, and a build from there fails with
+`bash: /work/dc/build-dc-docker.sh: No such file or directory`.

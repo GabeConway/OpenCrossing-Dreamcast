@@ -530,8 +530,47 @@ static int blend_gx_to_pvr(int f) {
         case GX_BL_INVSRCCLR:   return PVR_BLEND_INVDESTCOLOR;
         case GX_BL_SRCALPHA:    return PVR_BLEND_SRCALPHA;
         case GX_BL_INVSRCALPHA: return PVR_BLEND_INVSRCALPHA;
+        /* ⚠️ DESTINATION ALPHA DOES NOT EXIST ON THIS FRAMEBUFFER.
+         *
+         * emu64 uses the N64 two-pass memory-alpha decal idiom for every
+         * ground shadow in the game:
+         *   pass A  ZMODE_DEC|G_DECAL_GEQUAL|G_DECAL_SPECIAL
+         *           -> GXSetBlendMode(GX_BM_NONE, ONE, ZERO)      emu64.c:2289
+         *           -> GXSetColorUpdate(FALSE)/AlphaUpdate(TRUE)  emu64.c:2347
+         *           writes the shadow's ALPHA into the framebuffer, paints
+         *           nothing (already neutralised by the colour-mask block).
+         *   pass B  ZMODE_DEC|G_DECAL_SPECIAL
+         *           -> GXSetBlendMode(GX_BM_BLEND, DSTALPHA, INVDSTALPHA)
+         *                                                          emu64.c:2291
+         *           blends using the alpha pass A left behind.
+         * RDP side: m_rcp.c:131, GBL_c2(G_BL_CLR_IN, G_BL_A_IN, G_BL_CLR_MEM,
+         * G_BL_A_MEM).
+         *
+         * KOS renders into RGB565. There is NO stored destination alpha, so
+         * PVR_BLEND_DESTALPHA reads 1.0 and pass B collapses to src*1 + dst*0
+         * — the shadow paints OPAQUE. MEASURED 2026-08-02: batch 4241,
+         * bm=1,6,7, argb=A4001E4B, bbox 133,251..804,449; sampled pixels there
+         * read 00204A / 001C4A / 002052, the prim colour verbatim. A human
+         * reported it as "the train station is very broken on the title screen
+         * with missing textures" — the textures were fine; a navy slab was
+         * painted over them.
+         *
+         * Substituting SOURCE alpha is EXACT here, not an approximation: both
+         * passes draw the same geometry with the same texture and the same
+         * prim alpha, so the destination alpha pass B reads back is by
+         * construction its own source alpha. It would only break if some other
+         * draw wrote framebuffer alpha for a LATER, DIFFERENT primitive to
+         * read — and GXSetAlphaUpdate(TRUE) appears exactly once in emu64, in
+         * pass A above.
+         *
+         * Kill switch: -DDC_PVR_KEEP_DSTALPHA restores the literal mapping. */
+#ifdef DC_PVR_KEEP_DSTALPHA
         case GX_BL_DSTALPHA:    return PVR_BLEND_DESTALPHA;
         case GX_BL_INVDSTALPHA: return PVR_BLEND_INVDESTALPHA;
+#else
+        case GX_BL_DSTALPHA:    return PVR_BLEND_SRCALPHA;
+        case GX_BL_INVDSTALPHA: return PVR_BLEND_INVSRCALPHA;
+#endif
         default:                return PVR_BLEND_ONE;
     }
 }
