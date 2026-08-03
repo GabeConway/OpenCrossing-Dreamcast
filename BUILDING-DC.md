@@ -117,6 +117,7 @@ colima (4 cores), `-j4`:
 | `DC_AUDIO` | `1` | `0` → no output device, no synthesis pump. Audio is ON by default but currently produces silence (see `kb/RESUME.md` item 8) |
 | `DC_AUDIO_BUDGET_US` | `4000` | per-frame ceiling on jaudio synthesis; on exhaustion the pump drops an audio frame rather than stalling the game loop |
 | `DC_AUDIO_HEADROOM` | `2048` | samples kept free at the top of the ring. ⚠️ Do **not** gate the pump on "ring less than half full" — a stalled consumer then leaves it half full forever and synthesis never runs (measured deadlock, `synth_frames=0`) |
+| `DC_SCIF_FAST` | unset | `1` → raise the console from KOS's 57,600 baud to **1,562,500** (~5.8 KB/s → ~150 KB/s), the rate the harness selftest has used since M0. ⚠️ **Emulator only** — a real coder's cable will not sync at 1.5 Mbps and a hardware build with this set has no console and no crash dump. What it buys: a `DC_FB_IMAGE` screenshot drops from ~35 s to ~1.4 s, so a screenshot run stops being a different experiment from a progression run |
 | `DC_XDEFS` | unset | raw extra `-D` flags, appended last. How the renderer kill switches are reached — see below |
 | `V` | unset | `V=1` echoes full compiler command lines |
 
@@ -138,6 +139,7 @@ question instead of an argument from source.
 | `DC_PVR_NO_TEXNULL` | restore the old behaviour where a draw with `GX_TEXMAP_NULL` still inherited `tex_handle[0]` — i.e. 2D panes sampling a stale texture's texel (0,0) |
 | `DC_PVR_NO_ALPHATEST` | restore the old cutout handling: alpha-tested batches keep `src=ONE dst=ZERO`, so fully transparent texels paint at full opacity and write depth |
 | `DC_PVR_NO_COLORMASK` | ignore `GXSetColorUpdate(GX_FALSE)`; depth-only passes paint solid geometry again |
+| `DC_PVR_ALPHAENV` | ⚠️ **OPT-IN — measured to regress, off by default.** Gives a batch whose GX stage-0 alpha combiner is exactly `(ZERO, ZERO, ZERO, TEXA)` — 78 % of display-list sites, 67 % of runtime batches — `PVR_TXRENV_MODULATE` instead of `MODULATEALPHA`, so its alpha is the texel's alone rather than `vertex.a × texel.a`. That is the GX-correct answer (the vertex alpha byte there is the `G_RM_FOG_SHADE_A` **fog coefficient**, and this port fogs in PVR hardware), and it *does* clean up the dialogue balloon — but a 320×240 A/B over two 600 s runs shows the **train station canopy collapse to a flat teal slab**. Counters pass; the screenshots do not. Diagnosis and next experiment are in the comment at `alpha_env_texel_only()`. `[DC/PVR] alphaenv texel_only=` reports how often it fires |
 | `DC_PVR_NO_PUNCHTHRU` | **the punch-through kill switch.** Disables `PVR_LIST_PT_POLY` (`opb_sizes[4]` back to `PVR_BINSIZE_0`), so no batch is deferred and every cutout goes back through the 2026-08-02 blend approximation in the single general list. Restores the pre-punch-through behaviour verbatim |
 
 #### Punch-through tuning (all imply punch-through is ON)

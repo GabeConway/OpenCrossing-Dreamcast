@@ -433,6 +433,18 @@ static unsigned int s_pt_hi;        /* worst single-frame record count       */
 static unsigned int s_pt_drop;      /* triangles dropped to buffer overflow  */
 static int          s_pt_warned;    /* the one-shot overflow shout, below    */
 
+#ifdef DC_PVR_ALPHAENV
+/* The batch being submitted asks for alpha = TEXEL0.a alone, so its poly header
+ * gets PVR_TXRENV_MODULATE instead of MODULATEALPHA. Decided once per batch in
+ * dc_gx_backend_submit(), exactly like s_pt_route, so header_key() and
+ * compile_header() can never disagree about it.
+ *
+ * ⚠️ OPT-IN, and it is off by default because it was MEASURED to regress. See
+ * alpha_env_texel_only() below for the A/B. */
+static int          s_alpha_env_texel;
+static unsigned int s_env_texel_batches;  /* how often it fired (cumulative)  */
+#endif
+
 /* One 32-byte TA record into the deferred stream. Records are uniform, so once
  * the buffer is full it stays full for the rest of the frame — which is what
  * makes "drop the whole triangle" implementable as a position rollback. */
@@ -1190,6 +1202,16 @@ static unsigned int header_key(const dc_pvr_tex_t* tex) {
          * pointer does NOT imply the same header. */
         k = (k * 33u) + (unsigned int)g_gx.tex_obj_wrap_s[0];
         k = (k * 33u) + (unsigned int)g_gx.tex_obj_wrap_t[0];
+#ifdef DC_PVR_ALPHAENV
+        /* The texture env is baked into the compiled header, so two batches
+         * that agree on everything else and disagree on the alpha combiner are
+         * DIFFERENT headers. Leave this out and ensure_header() hits the cache,
+         * every later batch inherits whichever env compiled first, and the fix
+         * silently does nothing — the same trap already documented above for
+         * the alpha test and for fog. One integer, not the four raw stage
+         * fields, so the cache does not churn. */
+        k = (k * 33u) + (unsigned int)s_alpha_env_texel;
+#endif
     }
     return k ? k : 1u;
 }
@@ -1243,6 +1265,123 @@ static int pt_route_active(void) {
     return 1;
 #endif
 }
+
+#ifdef DC_PVR_ALPHAENV
+/* DOES THIS BATCH'S COMBINER SAY "alpha = TEXEL0.a, alone"?
+ *
+ * ⚠️⚠️ OFF BY DEFAULT. THIS WAS BUILT, RUN, AND MEASURED TO REGRESS.
+ * Read the A/B at the bottom of this comment before turning it on. The
+ * analysis below is correct as far as it goes; the screenshots are not
+ * negotiable.
+ *
+ * The renderer programmed PVR_TXRENV_MODULATEALPHA on every textured batch
+ * since M1 — px = ARGB(col) * ARGB(tex), i.e. final alpha = vertex alpha x
+ * texel alpha. **The game almost never asks for that product.**
+ *
+ * Pushing every gsDPSetCombineLERP / gsDPSetCombineMode site in src/ through
+ * emu64's real tables (the 8x2 tbla at emu64.c:322-325, the arg reorder at
+ * emu64.c:1091-1105 and its combine_auto twin at :1245-1257, plus the 33
+ * combine_manual cases) and matching at GX stage 0 gives 5,611 display-list
+ * sites, of which **4,376 — 78 % — are exactly (a,b,c,d) = (ZERO, ZERO, ZERO,
+ * TEXA)**, which under GX's `d + (1-c)*a + c*b` is TEXEL0.a and nothing else.
+ * The vertex alpha byte on those draws is not an opacity at all: they run
+ * G_RM_FOG_SHADE_A (5,795 occurrences in src/), where it is the per-vertex FOG
+ * COEFFICIENT for the N64 blender. This port fogs in PVR hardware off 1/w
+ * (fog_program()), so that byte has no consumer here — but MODULATEALPHA was
+ * multiplying it into the result anyway, dimming or erasing geometry that GX
+ * would have drawn at the texel's own alpha.
+ *
+ * That is the same defect the punch-through path already patches by hand
+ * (`cv[k].argb |= 0xFF000000u` in dc_gx_backend_submit) after it deleted the
+ * train door and the window's tunnel mask outright. The ⚠️ note left at that
+ * fix — "MODULATEALPHA is wrong for this game's alpha combiner everywhere, not
+ * only on PT" — is this function.
+ *
+ * PVR_TXRENV_MODULATE is `px = A(tex) + RGB(col) * RGB(tex)` (KOS 2.3,
+ * dc/pvr/pvr_header.h:125, read out of the SDK image rather than assumed):
+ * alpha straight from the texel, RGB still modulated by the shaded vertex
+ * colour. That is a term-for-term match for this shape, and it needs no
+ * vertex-alpha surgery, so near-clipped vertices and lerp_vtx() come along for
+ * free.
+ *
+ * DELIBERATELY NARROW. Only the one shape, and only when the FINAL alpha is
+ * stage 0's:
+ *   - stage 1, if present, must be the identity pass-through (ZERO, ZERO,
+ *     ZERO, APREV) = `d` = the previous stage. 5,158 of the 5,611 sites (92 %)
+ *     are exactly that. Anything else means a later stage rewrites alpha and
+ *     this decision is not ours to make.
+ *   - three or more stages: bail. dc_pvr.c reads no stage past 1.
+ * Everything unrecognised keeps MODULATEALPHA, which is what shipped.
+ *
+ * WHAT MUST NOT BE COLLAPSED INTO THIS. Nine display-list sites really do put
+ * SHADE in the alpha combiner — G_ACMUX_SHADE maps to GX_CA_RASA at
+ * emu64.c:324, so the claim "no display list does" is false, just rare
+ * (0.16 %). Five are alpha = SHADE.a alone (m_rcp.c:66,170; m_fbdemo.c:15, the
+ * screen wipe; int_sum_classicwardrope01.c:83; m_submenu_ovl.c:320) and four
+ * mix SHADE with the texel or a constant (obj_museum5.c:160, obj_suisou1.c:117,
+ * room_lightR.c:35, int_tak_lion.c:139). None of them match `d == GX_CA_TEXA`
+ * with the other three ZERO, so all nine keep MODULATEALPHA. The 104 sites
+ * whose stage-0 alpha is all-ZERO likewise do not match and are left alone
+ * deliberately — their real alpha comes from a stage this backend cannot see.
+ *
+ * ⚠️ The site counts above are STATIC. They say how much of the data has this
+ * shape, not how many batches per frame do; s_env_texel_batches in the
+ * [DC/PVR] report is the runtime answer: **797,728 of 1,190,110 batches, 67 %**,
+ * over a 600 s town-reaching run.
+ *
+ * ================= WHY IT IS OFF: THE MEASURED A/B, 2026-08-03 =============
+ *
+ * Two 600 s runs of ONE tree differing only by this define, both reaching the
+ * town, screenshots at 320x240 every 400 frames (DC_SCIF_FAST made that
+ * affordable). Counters were clean either way — frames 10,349 vs 10,269,
+ * ptdrop 0, LOST 0, no new blank textures, FPS within noise. **The counters
+ * would have passed this change.** The screenshots did not:
+ *
+ *   WIN  — the dialogue balloon. With MODULATEALPHA a grey block sits behind
+ *          the body text and the "Rover" nameplate is desaturated olive; with
+ *          MODULATE the balloon is a clean cream oval and the nameplate is the
+ *          correct saturated yellow-green.
+ *   LOSS — the train station canopy, and it is much bigger on screen. Correct
+ *          (MODULATEALPHA): textured orange-brown wooden beams over the
+ *          platform, clock legible behind. With MODULATE: a flat teal-green
+ *          slab covering the whole structure.
+ *
+ * The loss is the larger, more central object, so the default stays as it
+ * shipped. NOT diagnosed, and worth knowing before anyone re-opens this: for a
+ * GX_BM_NONE batch the framebuffer is RGB565 with src=ONE dst=ZERO, so alpha
+ * cannot affect the result at all, and for a punch-through batch the vertex
+ * alpha is ALREADY forced to 255 a few hundred lines below — so this switch
+ * can only change blended batches and punch-through routing. The canopy draws
+ * through `_texture_z_light_fog_prim_npc` (`ac_station_draw.c_inc:61`) =
+ * `G_RM_FOG_SHADE_A | G_RM_AA_ZB_TEX_EDGE2`, which should land on the PT path
+ * where this is a no-op. It visibly does not. **Something else is being
+ * revealed here** — most likely a batch that was invisible only because its
+ * vertex alpha was 0 and is now painted at its texel alpha, over the canopy.
+ * The next step is one run with -DDC_PVR_ALPHAENV -DDC_PVR_BATCH_LOG=400 at
+ * the same probe interval, reading the batch whose bbox covers the slab.
+ *
+ * Turn on with -DDC_PVR_ALPHAENV. */
+static int alpha_env_texel_only(void) {
+    const DCGXTevStage* ts;
+
+    if (g_gx.num_tev_stages < 1)
+        return 0;
+    ts = &g_gx.tev_stages[0];
+    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_b != GX_CA_ZERO ||
+        ts->alpha_c != GX_CA_ZERO || ts->alpha_d != GX_CA_TEXA)
+        return 0;
+
+    if (g_gx.num_tev_stages > 2)
+        return 0;
+    if (g_gx.num_tev_stages == 2) {
+        const DCGXTevStage* t1 = &g_gx.tev_stages[1];
+        if (t1->alpha_a != GX_CA_ZERO || t1->alpha_b != GX_CA_ZERO ||
+            t1->alpha_c != GX_CA_ZERO || t1->alpha_d != GX_CA_APREV)
+            return 0;
+    }
+    return 1;
+}
+#endif /* DC_PVR_ALPHAENV */
 
 static void compile_header(const dc_pvr_tex_t* tex) {
     pvr_poly_cxt_t cxt;
@@ -1392,6 +1531,13 @@ static void compile_header(const dc_pvr_tex_t* tex) {
         /* MODULATEALPHA is px = ARGB(col) * ARGB(tex): the GX "modulate"
          * TEV config, which kb/tev-map.md shows dominating the 101 configs. */
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
+#ifdef DC_PVR_ALPHAENV
+        /* ...but its ALPHA half is wrong for 78 % of this game's draws. See
+         * alpha_env_texel_only() above; s_alpha_env_texel is that predicate,
+         * evaluated once per batch so header_key() agrees with this. */
+        if (s_alpha_env_texel)
+            cxt.txr.env = PVR_TXRENV_MODULATE;
+#endif
         wrap_gx_to_pvr(g_gx.tex_obj_wrap_s[0], g_gx.tex_obj_wrap_t[0],
                        &uv_clamp, &uv_flip);
         cxt.txr.uv_clamp = (pvr_uv_clamp_t)uv_clamp;
@@ -1894,6 +2040,13 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     if (s_pt_route) s_pt_batches++;
 #endif
 
+#ifdef DC_PVR_ALPHAENV
+    /* Same rule as s_pt_route: decided BEFORE header_key()/compile_header(),
+     * once, so the two cannot disagree about which env this batch wants. */
+    s_alpha_env_texel = (tex && tex->base) ? alpha_env_texel_only() : 0;
+    if (s_alpha_env_texel) s_env_texel_batches++;
+#endif
+
 #ifndef DC_PVR_NO_FOG
     /* Remember what this batch wants; frame_begin programs it. Must run every
      * batch, not only on a header-key change — the fog parameters are not in
@@ -2236,6 +2389,15 @@ void dc_pvr_report(void) {
             s_pt_batches, s_pt_verts, s_pt_recs, s_pt_hi,
             (int)DC_PVR_PT_BUF_RECS, s_pt_drop, (int)DC_PVR_PT_ALPHA_REF,
             (unsigned int)sizeof(s_pt_buf));
+#endif
+#ifdef DC_PVR_ALPHAENV
+    /* The runtime answer to alpha_env_texel_only()'s static 78 %: how many
+     * textured batches actually asked for alpha = TEXEL0.a and so got
+     * PVR_TXRENV_MODULATE instead of MODULATEALPHA. A drop to 0 means the
+     * predicate stopped matching (a dc_gx.c recording change); it is not
+     * expected to move otherwise. */
+    DC_LOGE("[DC/PVR] alphaenv texel_only=%u of %u batches\n",
+            s_env_texel_batches, s_batches);
 #endif
     dc_pvr_texture_report();
 }
