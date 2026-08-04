@@ -1,7 +1,37 @@
 # Session state — resume here
 
-Updated 2026-08-02. This file is **short on purpose**: only what is true *right
+Updated 2026-08-04. This file is **short on purpose**: only what is true *right
 now*, plus what to do next. Everything else is one hop away.
+
+## ⭐ 2026-08-04 — the headline, and it reframes the whole FPS problem
+
+**Current, probe-free, audio off:** FPS p50 **24.3**, p1 11.6, min 10.7. The
+town (scene 9) p50 **14.9** and it never exceeds 14.9. `us/v` p50 **3.81 µs**
+(was 4.71), `xform` p50 **10.0 ms** (was 12.6), vertex-memo hit rate **48.2 %**.
+
+**THE ARITHMETIC EVERY FPS PLAN MUST START FROM.** The town frame is
+**19-27 % renderer** (`gx=`, in `dc/`, editable) and **77-80 % emu64 traversal +
+game logic** (in `src/`, closed to editing, compiler flags banned) — at the
+median AND at the 1 % lows alike. **Deleting the renderer entirely takes the
+worst frames from 11.8 to 15.2 FPS.** The 1 % lows are not a separate problem;
+14 of the 17 worst windows are the town, which is the same wall, deeper.
+
+**AUDIO WORKS, AND COSTS 45 % OF THE FRAME RATE.** One jaudio DAC frame is
+~19.8 ms of SH-4 for ~35 ms of audio, so synthesis needs ~57 % of the machine to
+stay level. FPS p50 23.5 off vs 13.0 on. **`DC_AUDIO` therefore defaults to 0**;
+`-DDC_AUDIO=1` turns it on. No budget setting fixes this — budgeting made it
+*worse* (10.9). Root cause of the silence was that the AICA ARM7 **ran and then
+wedged** on a Timer-A FIQ that is never delivered.
+
+**⚠️ NEVER build a perf run with `DC_FB_PROBE`** — the dump costs 1,506 ms into
+the `vi` bucket and dragged p1 from 11.56 to 8.50 in numbers that had already
+been quoted. Screenshot runs and perf runs are different experiments again.
+
+**The open decision is `kb/RESUME.md` §4** — interposing on emu64's dispatch
+table (legal by the letter, near the spirit of the `-O0` directive, worth
+25-35 ms) versus **F1**, offline bbox-CULLDL injection (no sign-off needed,
+10-20 ms, costs 60-120 KB). New research: `kb/research-fps-ideas.md`,
+`kb/research-ram-tiers.md`.
 
 | file | read it when |
 |---|---|

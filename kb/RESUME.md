@@ -1,138 +1,272 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-03. Read `kb/STATE.md` next; this file is the unfinished part
-plus the gotchas that would cost a fresh context an hour. Full narrative:
-`kb/state-log.md`, top entry.
+Rewritten 2026-08-04. Read `kb/STATE.md` next. Full narrative: `kb/state-log.md`,
+top entry. Everything below §5 is older material kept because it is still the
+reasoning behind items that are now closed.
 
 ## 0. Everything is committed
 
-`git status` is clean on `dev`. The last six commits are this session:
-the regression gate, `DC_SCIF_FAST`, the alpha texture-env fix, the NPOT
-closure, the reply-box asset fix, and the alpha-env default flip.
+`git status` clean on `dev`. The 2026-08-04 session is these six commits:
+
+```
+960cdda docs(dc): two research files, two corrections, and the decision gate
+cd99cc8 perf(dc): the GX entry-point micro-wins measure ZERO, and that is the result
+210660d feat(dc): sound comes out -- the ARM7 was wedged on a FIQ that never fires
+06d951b feat(dc): the splash becomes a title card and a real loading screen
+0f7ddb3 fix(dc): one scene per frame, and size the vertex memo by load factor
+8e877f4 fix(dc): the second texture's alpha, and the train window's light
+3d3a05f perf(dc): memoise the vertex emu64 keeps re-sending, and stop dividing
+```
+
 **The main thread commits; agents do not.**
 
-## 0b. THE THREE RULES THIS SESSION ADDED
+## 0b. THE MEASUREMENT RULES. Five now, and rule 4 invalidated numbers I had quoted.
 
-1. **`grep 'ASSET MISSING' <run>/console.log` must be empty before you believe
-   any visual comparison.** A renderer A/B against a build that is missing
-   assets does not measure the renderer — that mistake shipped one fix in the
-   OFF position for half a session.
-2. **Judge a renderer change on a screenshot pair, not on counters.** The
-   alpha-env change passed frames, FPS, `ptdrop`, `LOST` and blank-texture
-   count while turning the station canopy into a flat slab.
-3. **Total frames is NOT a progression metric.** The town is ~11 FPS and the
-   train intro ~30, so reaching the town sooner *lowers* the frame count. Two
-   runs of one build measured 10,499 vs 7,979. Use `deepest_scene`.
+1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
+   any visual comparison.
+2. **Judge a renderer change on a screenshot pair, not on counters.**
+3. **Total frames is NOT a progression metric.** Use `deepest_scene`.
+4. ⚠️ **NEVER build a perf run with `DC_FB_PROBE`.** The framebuffer dump costs
+   **1,506 ms**, smeared over the following 30-frame window, and it lands in the
+   `vi` bucket. In one run it hit 26 of 358 windows and dragged p1 from
+   **11.56 FPS to 8.50**. A counter-identical pair proves it: same `cmds=2629
+   v=2712 draws=90 culled=137 gx=13.0 draw=60.7`, one window at 8.5 FPS with
+   `vi=50.6`, two windows later 14.9 FPS with `vi=0.3`. `DC_SCIF_FAST` fixed the
+   *progression* problem; it did not fix this one. **Screenshot runs and perf
+   runs are different experiments again.**
+5. ⚠️ **Estimate from a matched-frame A/B, not from instruction counts.** A
+   code-size census off the linked map predicted 1.5-3 ms for the GX entry-point
+   work; the A/B measured **+0.4 %, i.e. zero** (`kb/perf-dc.md` §3.7). Two
+   builds and two 600 s runs would have been cheaper than the estimate.
 
 ## 1. Where the port is
 
-### ⭐ IT BOOTS ON REAL HARDWARE (2026-08-03)
+### It boots on real hardware; in the emulator it reaches the town
 
-A padded CD-R burn of `dev` boots on the user's retail Dreamcast and **stops at
-the K.K. Slider / player-select scene**. Three candidates, in order of
-likelihood, and they are very different:
+`[SCENE_MODE] 0 → 3 → 4 → 18 → 9`. Title → player-select → train intro with
+Rover → name entry → town, unattended, in one 600 s run.
 
-1. **Input never arrives** — that burn had `DC_AUTOSTART` unset, so it waits on
-   a real controller through `PADRead`. `dc_pad.c`.
-2. **The disc, not a hang** — the ARAM pager reads off a CD-R at ~500 KB/s with
-   real seeks, and every Flycast run has `FastGDRomLoad=yes`. Player-select is
-   exactly where `forest_1st`/`forest_2nd` page in (57 reads / 2,742,848 B on
-   the last emulator run). On hardware that is minutes.
-3. **A genuine hardware-only hang** — the interesting one. Told apart from (2)
-   by whether the scene is still animating.
+**Current numbers (2026-08-04, probe-free, audio off):**
 
-A `DC_AUTOSTART=300` + `DC_CDI_PAD=1` disc was handed over to separate them;
-the decision table is in its README. **Await that result before theorising.**
+| | |
+|---|---|
+| FPS | min 10.7, p1 11.6, p50 **24.3**, max 29.9 (capped at `fps_target`) |
+| the town (scene 9) | min 10.7, p50 **14.9**, and it never exceeds 14.9 |
+| `us/v` | p50 **3.81 µs** (was 4.71) |
+| `xform` | p50 **10.0 ms** (was 12.6) |
+| `vmemo` hit rate | **48.2 %** |
+| `ASSET MISSING` / `ptdrop` / `LOST` | 0 / 0 / 0 |
 
-⚠️ **Never put `DC_SCIF_FAST` in a hardware build** — a coder's cable will not
-sync at 1.5 Mbps and the console, crash dumps included, is lost.
-⚠️ **`DC_CDI_PAD=1` for burns.** The 740 MB file is raw 2352-byte sectors =
-314,663 sectors = 69.9 min, so it fits a 74-min CD-R despite the byte count.
+### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN
 
-### In the emulator
+The town frame is **19-27 % renderer** (`gx=`, all in `dc/`, editable) and
+**77-80 % emu64 traversal + game logic** (all in `src/`, closed to editing,
+compiler flags banned) — at the median AND at the 1 % lows alike.
 
-**The port reaches the TOWN.** `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`; mode 9 is
-`mFI_FIELD_FG` + `mEv_CheckFirstIntro()` TRUE (`m_field_make.c:1292`) = SCENE_FG,
-the outdoor field. Title → player-select (K.K. on the lit stage) → train intro
-with Rover → name entry → town, unattended, in one run.
+**Deleting the renderer entirely takes the worst frames from 11.8 to 15.2 FPS.**
 
-Numbers on the last full run at HEAD (2026-08-03): **~10,500 frames / 600 s**,
-town ~11 FPS, earlier scenes 22-30 FPS, `ASSET MISSING` 0, blank texture uploads
-**0 of 306**, `ptdrop` 0, `LOST` 0. Binary end `0x8caa4fd0`, so the image span
-is 11,096,016 B and the fit holds.
+The 1 % lows are not a separate problem: 14 of the 17 worst probe-free windows
+are the outdoor town, which is the same wall as the median, deeper. Within the
+town, `emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` (r = 0.954), and `draws`
+predicts nothing (r ≈ 0.0) — commands and lit vertices are the cost, not batches.
 
-⚠️ Frame counts across runs are NOT comparable — see rule 3 above.
+## 2. The build lines — THERE ARE NOW TWO, and mixing them is rule 4
 
-**Verified by screenshot at HEAD:** K.K. Slider and his dialogue; Rover, the
-dialogue balloon (a solid cream oval, correct) and the name plate; the reply
-box with its cursor; the name-entry keyboard; the train interior; the station
-exterior with a correctly textured canopy, the clock, flowers and brick paving.
-
-**Open, reported by a human against HEAD and NOT yet fixed** — these are the
-next jobs:
-
-1. **The text-input (name entry) screen looks very wrong.** Not yet
-   investigated. It renders and is legible in a 320x240 capture, so start by
-   getting a screenshot of what the human is seeing rather than assuming.
-2. **The text while Rover is on the phone looks wrong.** Not yet investigated.
-   Likely the same font/TEV family as items in §5.
-3. **The scenery band through the train window ("the mountains look messed
-   up").** Diagnosed, patch written and OFF — see §5a.
-
-## 2. The build line — use this, do not re-derive it
+Common prefix:
 
 ```bash
 DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-opening.txt | paste -sd: -)" \
 DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 \
-  bash dc/build-dc.sh
-bash harness/dc/smoke.sh dc/build/OpenCrossing.cdi --timeout 600 -c config:LimitFPS=no
-python3 tools/dcqa/run_report.py <run>/console.log --vs <baseline>/console.log
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1900000 DC_AUTOSTART=300 DC_SCIF_FAST=1 \
 ```
 
-**Always `--timeout 600` and `-c config:LimitFPS=no`.** The town is ~4,000
-frames in; 240 s does not get there, and `LimitFPS=no` is the user's own
-play-testing setting.
-
-### Screenshots — now cheap, use them on every renderer change
-
+**PERF run — no framebuffer probe:**
 ```bash
-DC_SCIF_FAST=1 DC_FB_PROBE=400 DC_FB_IMAGE=2 DC_TEX_LOG=1   # add to the build
-bash harness/dc/smoke.sh <img> --timeout 600 --fb-writeback -c config:LimitFPS=no
+  DC_XDEFS='-DDC_PERF_PHASE' bash dc/build-dc.sh
+bash harness/dc/smoke.sh <copy>.cdi --timeout 600 -c config:LimitFPS=no
+```
+
+**SCREENSHOT run — probe on, `--fb-writeback` REQUIRED:**
+```bash
+  DC_FB_PROBE=400 DC_FB_IMAGE=2 DC_XDEFS='-DDC_PERF_PHASE' bash dc/build-dc.sh
+bash harness/dc/smoke.sh <copy>.cdi --timeout 600 --fb-writeback -c config:LimitFPS=no
 python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots
 ```
 
-`DC_SCIF_FAST=1` raises the console from 57,600 to 1,562,500 baud, so a 320x240
-capture costs ~1.4 s instead of ~35 s. **The old warning that "a screenshot run
-is not a progression run" no longer applies when it is set** — a 600 s
-screenshot run reaches the town like any other. ⚠️ Emulator only; a real
-coder's cable will not sync at 1.5 Mbps, so never put it in a hardware build.
+`DC_FB_IMAGE=1` gives 640x480 instead of 320x240, at 4x the console cost — it
+eats about a third of the run's progression, so use it only when 320x240 cannot
+answer the question.
 
-⚠️ **Build to a copy before a long run.** Flycast holds
-`dc/build/OpenCrossing.cdi` open; `cp` it to the scratchpad and run the copy.
+**Verdict on any run:** `python3 tools/dcqa/run_report.py <run>/console.log --vs <baseline>/console.log`
 
-⚠️ **Never edit the tree while a build is running**, and never run two builds
-at once — `dc/build/` is one shared object tree.
+⚠️ **Build to a COPY of the CDI before a long run** — Flycast holds
+`dc/build/OpenCrossing.cdi` open. ⚠️ **Never edit the tree while a build runs**,
+and never run two builds at once.
 
-The trailing `-` in `paste -sd: -` is required; BSD paste will not read stdin
-without it.
+## 2b. What the 2026-08-04 session changed
 
-## 2b. What the second session changed (details in `kb/state-log.md`)
+- **The renderer got 19 % faster per vertex.** Two causes, both from reading
+  what emu64 actually emits: (a) it hands the backend an expanded triangle SOUP,
+  re-emitting every shared vertex once per referencing triangle, so a per-batch
+  memo keyed on the source vertex is exact and hits 48.2 %; (b) `$KOS_CFLAGS`
+  has `-mfsrra` but not `-funsafe-math-optimizations`, so `1.0f/sqrtf(x)` was
+  compiled as `fsqrt` + three `fdiv` — `frsqrt()` is one FSRRA. `fipr` replaced
+  the eye/normal transforms. `kb/perf-dc.md` §3.5-3.6.
+- **The train window's light.** It is a PRODUCT OF TWO TEXTURES on a one-TMU
+  GPU: TEXEL0 a 64x8 horizontal ramp, TEXEL1 a 16x16 vertical one, and neither
+  is a light shaft on its own. texmap1 was dropped, and since all four shine
+  vertices share `s = 168.0` (GX_CLAMP) what remained was one constant — a flat
+  white wedge. Now texmap1's alpha is sampled per vertex from an 8x8 map built
+  at upload. **Human-confirmed fixed.** 0.45 % of batches.
+- **Audio works.** Three faults, in `kb/state-log.md`. The third is the one
+  nobody would have guessed: the ARM7 **ran and then wedged**, spinning in
+  `timer_wait(10)` because the Timer-A FIQ that increments `AICA_MEM_CLOCK` is
+  never delivered. A self-arming SH-4-side clock kick releases it.
+- **`DC_AUDIO` now defaults to 0** — see §3.
+- **`dc_gx_backend_frame_begin()` ran twice per scene** (52 `BATCHLOG BEGIN`
+  against 27 `END`). `pc_gx_begin_frame()` has two callers. Guarded.
+- **The splash** is a title card with a real progress bar on the keep-list load.
+- **The GX entry-point micro-wins measured zero.** Rule 5.
 
-- **`dc_pad.c` — A-dominant autostart.** START/A was 1:1; past the title, START
-  advances almost nothing. This is what reached the town.
-  `DC_AUTOSTART_START_EVERY=2` restores the old pattern.
-- **`dc_misc.c` — `vprintf` now goes through the flood limiter.** emu64's
-  `Printf0` bypassed the `printf` override and cost **8× the frame rate** in
-  town. See `kb/traps.md`.
-- **`dc_pvr.c` — three fixes:** `GX_TEXMAP_NULL` no longer inherits a texture;
-  alpha-tested cutouts blend instead of painting transparent texels opaque;
-  `GXSetColorUpdate(FALSE)` is honoured as `src=ZERO dst=ONE`.
-- **`dc_aram.c` — short/failed reads no longer cache zeros as authoritative.**
-- **`dc_audio.c` + `dc_vi.c` — real `snd_stream` device and a budgeted pump.**
-  Ships **`DC_AUDIO=0` by default is NOT set** — audio is ON; use
-  `DC_XDEFS='-DDC_AUDIO=0'` to remove it. It is harmless but produces silence.
-- **keep list 77 → 107 files**, incl. the hand-added `boy_model.c`.
+## 3. AUDIO WORKS AND COSTS 45 % OF THE FRAME RATE
+
+One jaudio DAC frame is **~19.8 ms of SH-4** (`synth_us=19840`) for **~35 ms of
+audio**, so synthesis runs at ~1.8x real time and needs **~57 % of the machine**
+to stay level with playback. Matched 600 s runs at one commit:
+
+| build | FPS p50 | deepest scene |
+|---|---|---|
+| audio off | **23.5** | 18 (town) |
+| audio on | 13.0 | 18 |
+| audio on + predictive budget | 10.9 | 4 |
+
+**The budgeted run is worse, and that is not a tuning failure.** When the ring
+starves the budget is deliberately overridden (a late sample beats a gap), and
+at this cost the ring starves essentially always, so the override becomes the
+normal path and MORE frames get synthesised. No value of `DC_AUDIO_BUDGET_US`
+buys both smooth sound and a playable frame rate. The cost is the algorithm, and
+the algorithm is jaudio in `src/` at `-O0`.
+
+**`-DDC_AUDIO=1` turns sound on.** Everything needed is in the tree and working.
+
+## 4. THE OPEN DECISION — the user's call, not engineering's
+
+`kb/research-fps-ideas.md` carries this in full. The short version:
+
+emu64's dispatch table (`emu64.c:5702`) is a **non-const file-static array of
+member-function pointers in `.data`**, and nothing protects it. So `dc/` can
+replace individual emu64 handlers with `objcopy` — a Makefile step that edits
+the OBJECT FILE, not the source. **`src/` stays unedited, `src/` stays at `-O0`,
+`dc/` already builds at `-O2`.**
+
+| | what | win | gate |
+|---|---|---|---|
+| **G1** | Per-opcode timing histogram: wrap each table entry in a thunk that calls the original. Says which commands actually cost the 58 ms. | 0 ms | **none — just do it** |
+| G2 | Reimplement only the dispatch LOOP (`emu64_taskstart_r`, `:5769-5901`) in `dc/` at `-O2`, calling the untouched `-O0` handlers through the same table. | 7-14 ms | **needs sign-off** |
+| G3 | `-O2` shadow handlers for `dl_G_VTX` and the TRI path, with a runtime batch AABB cull built in. **The only idea large enough to reach ~20 FPS town.** | 25-35 ms | **needs sign-off** |
+
+**The honest framing.** G2/G3 are legal by the letter and walk near the *spirit*
+of the `-O0` directive. What broke before was the compiler miscompiling 3,917
+TUs globally; this is a hand-vetted rewrite of 2-6 functions behind the
+screenshot and regression gates. Real distinction — not engineering's to decide.
+G3's technical landmine is the decal-Z path in `set_position`
+(`emu64.c:2724-2783`); keep it calling the original and shadow only the common
+path.
+
+### The alternative that needs NO sign-off
+
+**F1 — offline bbox-CULLDL injection. 10-20 ms, costs 60-120 KB of `.data`.**
+
+emu64 already contains a working display-list cull (`dl_G_CULLDL`,
+`emu64.c:5189`), and the game's data uses it **twice in all of `src/`**. The
+acre and object display lists are C text with **zero interior pointers**
+(`grep -rE "gsSPDisplayList\(&" src/data` → 0), so the proven scratch-tree
+rewriter can split them into chunks, each prefixed with 8 synthetic AABB corner
+vertices and a `gsSPCullDisplayList` — byte-for-byte the idiom the game itself
+uses at `ac_field_draw.c:322-334`. This makes emu64 skip work *before* it pays
+`-O0` price for vertices our AABB cull would throw away anyway.
+
+**The fact that motivates it: 60 % of the vertices emu64 produces are discarded
+by our own cull after emu64 has already built them** — 6,951 in, 2,757 out, 138
+of 228 batches culled, ~29 ms/frame of wasted traversal.
+
+### Recommended order
+
+1. **G1** (no gate, and it de-risks every estimate below).
+2. **F1 on ONE acre** as a proof — one hand-edited file, one run, read
+   `cull_rejected` and the matched-frame `cmds` drop.
+3. Decide G2/G3 on real numbers. Rule 5 says discount the estimates.
+
+## 4b. Free first step for either path
+
+`pc_emu64_frame_noop/vtx/tri/dl_cmds` and
+`pc_emu64_frame_cull_visible/rejected` are already maintained by emu64
+(`emu64.c:5824-5834`, `:5309-5315`) and defined in `dc/src/dc_gx.c:90-97` — but
+`[PERF]` prints only `cmds`. Adding them is one printf and gives the town's
+opcode mix and the current CULLDL hit rate for nothing.
+
+## 5. Open, in priority order — REWRITTEN 2026-08-04
+
+1. **FPS.** §4. This is the whole game now.
+2. **The station roof clip-through.** Human-reported twice. `kb/station-bugs.md`
+   §2 has the three hypotheses. **H1 (a state leak) is now ELIMINATED**: every
+   batch in a logged station frame carries `zt=1`, 71 `zw=1`, and the roof
+   itself is `cut=1 pt=1` as predicted. H2 (cutout-edge ghosting under bilinear
+   filtering, which manufactures mid-alpha at punch-through boundaries) is the
+   leading hypothesis. ⚠️ **Not reproduced in any captured frame** — the
+   autostart never walks a character under the roof, so this needs either a
+   scripted input or a human on hardware.
+3. **The reply/choice bubble.** ❌ **The MESSAGE balloon is NOT oversized** —
+   measured twice, batch bbox `79.8,266.7..587.6,473.9` = 508x207 of 640x480,
+   and counting near-white pixels in the decoded PNG gives **245 px of 320,
+   exactly the authored `width = 245.0` (`m_msg_main.c_inc:394`)**. Pixel-exact
+   at its authored size. **Do not go looking for a scale bug in the transform
+   chain; there isn't one.** What remains unchecked is the CHOICE panel
+   (`con_sentaku2_v`), which IS text-fitted by `scale_x/scale_y`
+   (`m_choice_main.c_inc:137-171`) and never appeared in a probe frame. Needs a
+   capture with the reply prompt on screen.
+4. **The name-entry screen** and **the text while Rover is on the phone** —
+   still not investigated.
+5. **Real-hardware audio.** `kick=` in the `[DC/AUDIO]` line says whether the
+   Timer-A FIQ works on a real console. If `kick=0` there, the wedge is a
+   Flycast artefact and the workaround is emulator-only.
+6. **`emu64_set_aflags()`** (`emu64.c:6048`, declared in
+   `include/libforest/emu64.h:13`) is an ordinary extern C function, so `dc/`
+   can drive emu64's debug flag array at runtime **with no `src/` edit and no
+   interposition**. Several flags skip work (`AFLAGS_SKIP_TEXTURE_CONV`,
+   `AFLAGS_SKIP_TILE_SETUP`, …). Most will break rendering — that is expected —
+   but each is a one-line build with a real A/B. **Unswept.**
+
+## 5a. RAM — two corrections landed, and the gating experiment
+
+`kb/research-ram-tiers.md` is new. Two errors in existing docs were corrected in
+place:
+
+- **`kb/ram-plan.md` P4 was stale by ~917 KB** (billed −1,048,576 when the
+  disc-backed pager already cut the ARAM line to 131,072).
+- **`kb/texture-path.md` reads as killing VQ** when it only kills *runtime* VQ
+  encoding; offline VQ (ram-plan P2) never touches `PVR_TXRLOAD_VQ_LOAD`.
+
+**The single highest-leverage RAM action is one unrun experiment:** build and
+run `harness/dc/bench/bench_mem.c`. It exists, has never been run, and it gates
+five separate ideas at once by settling the project's one missing number —
+SH-4-from-VRAM read bandwidth.
+
+## 5b. What the 3DS port gives us
+
+`AnimalCrossing-3ds-Port/ACGC-3ds` commit `cef117e`. **Its two biggest wins are
+already banked here**: skipping the VBlank wait on frameskip ticks (our
+`dc_vi.c` already returns before the swap, and `vi=0.5 ms` proves it) and GX
+state early-outs (`dc_gx_state_dedup`, on ~35 setters). Its `GXBegin` batch
+merging is worth ~0.4 ms by our own arithmetic. Its **`acre_render` draw-scope
+setting (9/5/1 acres) is the genuinely new idea and is out of reach as they
+implemented it** — they edited `src/actor/ac_field_draw.c`. F1 and item 6 above
+are the reachable versions of the same idea.
+
+
+---
+
+# Older material, kept for the reasoning behind items now closed
 
 ## 3. What was fixed in session 1 (do not re-investigate)
 
