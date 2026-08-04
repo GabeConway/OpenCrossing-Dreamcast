@@ -140,6 +140,7 @@ src/data/model/obj_tree_shadow.c
 src/data/model/rom_train_out.c
 src/data/model/rst_win.c
 src/data/model/structure/palette/structure_pal_data.c
+src/data/model/tim_win.c
 src/data/model/tol_keitai_1.c
 src/data/npc/model/mdl/cbr_1.c
 src/data/npc/model/mdl/end_1.c

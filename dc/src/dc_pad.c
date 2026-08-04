@@ -206,6 +206,32 @@ static u16 dc_autostart_buttons(void) {
 #define DC_AUTOWALK_SEG 240u    /* calls per leg; ~8-20 s at 12-30 FPS */
 #endif
 
+/* ⚠️ WALK ONLY IN THE FIELD. Learned the hard way 2026-08-04: the first
+ * version of this knob started at a fixed PADRead call number, which lands
+ * somewhere in the middle of the intro. A human watching the run reported it
+ * "just looping over the name selection, press no, then entering a name, then
+ * pressing no" — the synthesised stick was driving the NAME-ENTRY KEYBOARD
+ * cursor, so the name came out as garbage, the confirm prompt was declined,
+ * and the run never left the intro. It happened to work on the run before,
+ * which is worse than failing every time.
+ *
+ * `sou_scene_mode` (game64.c_inc:504) is an ordinary non-static global u8 --
+ * `8c900888 B _sou_scene_mode` in the linked ELF -- so dc/ can read the live
+ * scene with no src/ edit and no interposition. It is the same variable the
+ * [SCENE_MODE] line prints (game64.c_inc:3758).
+ *
+ * Mode 9 is mFI_FIELD_FG + mEv_CheckFirstIntro() TRUE = SCENE_FG, the outdoor
+ * town (m_field_make.c:1292) -- the only place walking means anything and the
+ * only place the station roof can be walked under.
+ *
+ * DC_AUTOWALK_SCENE=255 restores the old unconditional behaviour, which is
+ * useful only if you WANT to fuzz menu screens. */
+#ifndef DC_AUTOWALK_SCENE
+#define DC_AUTOWALK_SCENE 9
+#endif
+
+extern u8 sou_scene_mode;
+
 static u32 s_autowalk_calls = 0;
 
 /* Eight compass directions, x then y, scaled by DC_STICK_MAGNITUDE/100.
@@ -222,9 +248,17 @@ static const s8 s_autowalk_dir[8][2] = {
 };
 
 static void dc_autowalk_stick(s8* px, s8* py) {
-    u32 n = s_autowalk_calls++;
+    u32 n;
     u32 since, leg, dir;
 
+    /* Scene gate FIRST, and it does not consume a call: the leg counter has to
+     * start when walking starts, or the first leg is however much of the intro
+     * happened to elapse. */
+#if (DC_AUTOWALK_SCENE) != 255
+    if (sou_scene_mode != (u8)(DC_AUTOWALK_SCENE)) return;
+#endif
+
+    n = s_autowalk_calls++;
     if (n < (u32)(DC_AUTOWALK)) return;
 
     since = n - (u32)(DC_AUTOWALK);
