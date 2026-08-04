@@ -69,6 +69,13 @@ const unsigned char* dc_pvr_tex_aprof(unsigned int handle);
 void dc_pvr_texture_init(void);
 void dc_pvr_texture_shutdown(void);
 
+/* Dump a linear RGB565 DC_SCREEN_WIDTH x DC_SCREEN_HEIGHT surface as the same
+ * FBIMG/FBROW base64 that tools/dcfb/fbimg_to_png.py already decodes. For
+ * surfaces the PVR does not own — i.e. the boot splash, which draws into
+ * vram_s before pvr_init() exists. A no-op unless the image was built with both
+ * DC_FB_PROBE and DC_FB_IMAGE. */
+void dc_pvr_fb_dump_surface(const unsigned short* fb);
+
 /* One-line census for the smoke log: uploads, bytes resident, evictions. */
 void dc_pvr_texture_report(void);
 

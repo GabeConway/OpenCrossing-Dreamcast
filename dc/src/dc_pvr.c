@@ -1913,9 +1913,30 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
  *
  * Kill switch: -DDC_PVR_NO_VTXMEMO. Counters: `vmemo=hit/total` in [PHASE]. */
 #ifndef DC_PVR_NO_VTXMEMO
-#define VMEMO_SLOTS 32
-static int     s_vmemo_src[VMEMO_SLOTS];   /* index into verts[], -1 = empty */
-static ClipVtx s_vmemo_val[VMEMO_SLOTS];
+/* SIZING, and why it is 128 rather than emu64's own 32.
+ *
+ * The first version used 32 slots on the reasoning that emu64's vertex cache is
+ * `Vtx vertices[32]`, so a batch can never reference more than 32 distinct
+ * sources. That bounds the WORKING SET correctly and says nothing about
+ * COLLISIONS: 32 keys into 32 direct-mapped slots collide constantly, and it
+ * measured a 42.5 % hit rate against a mesh whose theoretical ceiling — six
+ * triangles per shared vertex — is around 83 %.
+ *
+ * 128 slots is a 4x load factor. It costs 128 * (4 + 4 + 28) = 4,608 B of .bss
+ * against 32's 1,152.
+ *
+ * The per-batch invalidation is a GENERATION STAMP, not a memset, precisely
+ * because the table got bigger: clearing 128 entries per batch, ~96 batches a
+ * frame, would have spent more than the extra hits are worth. `s_vmemo_gen`
+ * wraps at 2^32, and a wrap can only ever produce a FALSE HIT if a stale entry
+ * survives 4 billion batches AND lands on the same slot AND its recorded source
+ * index still points at a byte-identical vertex — the vmemo_same() compare
+ * below is what makes that safe rather than merely unlikely. */
+#define VMEMO_SLOTS 128
+static int          s_vmemo_src[VMEMO_SLOTS];   /* index into verts[] */
+static unsigned int s_vmemo_tag[VMEMO_SLOTS];   /* the batch it belongs to */
+static unsigned int s_vmemo_gen = 0;
+static ClipVtx      s_vmemo_val[VMEMO_SLOTS];
 
 static inline unsigned int vmemo_hash(const DCGXVertex* v) {
     /* Position dominates: two vertices of one model almost never share it,
@@ -2262,6 +2283,27 @@ void dc_gx_backend_shutdown(void) {
 void dc_gx_backend_frame_begin(void) {
     if (!dc_pvr_ready) return;
 
+    /* RE-ENTRY GUARD. `pc_gx_begin_frame()` has TWO callers, and both fire every
+     * frame: dc_vi.c's retrace handler, and JW_BeginFrame
+     * (src/static/jsyswrap.cpp:326, under TARGET_PC). MEASURED in a batch log —
+     * 52 `BATCHLOG BEGIN` lines against 27 `BATCHLOG END` — so this function was
+     * running pvr_wait_ready() + pvr_scene_begin() twice per scene.
+     *
+     * Nothing visibly broke, because in every logged frame the two calls were
+     * adjacent with no batch between them. The hazard is that they need not be:
+     * VIWaitForRetrace() is also reached from padmgr.c:410, JKRFile.cpp:41,
+     * graph.c:267,321 and jsyswrap.cpp:233, and a second scene_begin AFTER
+     * geometry has been submitted resets s_hdr_valid, s_hdr_key and — the one
+     * that loses pixels — s_pt_n, discarding every buffered punch-through
+     * record. KOS's pvr_scene_begin() also clears lists_closed and sets
+     * list_reg_open = PVR_LIST_NONE under the open list.
+     *
+     * Returning early is exactly right: the scene the second caller wants is
+     * the one already open. Kill switch: -DDC_PVR_NO_FRAMEBEGIN_GUARD. */
+#ifndef DC_PVR_NO_FRAMEBEGIN_GUARD
+    if (s_scene_open) return;
+#endif
+
     pvr_wait_ready();
 #ifndef DC_PVR_NO_FOG
     /* Between pvr_wait_ready() and pvr_scene_begin() is the only point in the
@@ -2572,8 +2614,9 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
      * NOT the source vertex — the folded matrix, mv, nm, the light state, the
      * TEV constants, s_pt_route, tex->u_scale — is established above and is
      * constant from here to the end of this call, and changes between calls.
-     * 32 stores, once per batch, against ~30 vertices of savings. */
-    for (i = 0; i < VMEMO_SLOTS; i++) s_vmemo_src[i] = -1;
+     * One increment, because the table is 128 entries and clearing it per batch
+     * would cost more than the hits it buys. */
+    s_vmemo_gen++;
 #endif
 
     step = per_prim;
@@ -2589,7 +2632,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             unsigned int slot = vmemo_hash(v);
 
             dc_pvr_vmemo_total++;
-            if (s_vmemo_src[slot] >= 0 &&
+            if (s_vmemo_tag[slot] == s_vmemo_gen &&
                 vmemo_same(v, &verts[s_vmemo_src[slot]])) {
                 cv[k] = s_vmemo_val[slot];
                 dc_pvr_vmemo_hit++;
@@ -2819,6 +2862,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
              * override and after both TEV-constant overrides. Storing it any
              * earlier would memoise a half-built vertex. */
             s_vmemo_src[slot] = i + k;
+            s_vmemo_tag[slot] = s_vmemo_gen;
             s_vmemo_val[slot] = cv[k];
 #endif
         }
@@ -3215,8 +3259,19 @@ static void dc_pvr_fb_dump_image(const unsigned short* fb) {
 
     DC_LOGE("FBIMG END\n");
 }
+
+/* Dump an arbitrary linear RGB565 640x480 surface, for callers that have one
+ * and are not the PVR. The only one is dc_main.c's splash, which runs BEFORE
+ * pvr_init() and therefore owns vram_s outright — dc_pvr_fb_probe() cannot help
+ * it, because that reads PVR_FB_R_SOF1 and the display controller has not been
+ * reprogrammed yet. Without this the splash is the one thing in the port that
+ * could not be checked with a screenshot. */
+void dc_pvr_fb_dump_surface(const unsigned short* fb) {
+    dc_pvr_fb_dump_image(fb);
+}
 #else
 #define dc_pvr_fb_dump_image(fb) ((void)(fb))
+void dc_pvr_fb_dump_surface(const unsigned short* fb) { (void)fb; }
 #endif
 
 void dc_pvr_fb_probe(void) {
