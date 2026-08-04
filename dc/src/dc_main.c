@@ -301,6 +301,83 @@ void pc_platform_update_window_size(void) {
 /* ==========================================================================
  * Lifecycle
  * ========================================================================== */
+#if !defined(DC_HOST_STUB) && !defined(DC_NO_SPLASH)
+#include <dc/biosfont.h>
+#include <dc/video.h>
+
+/* The author's splash, shown between the Sega licence screen and the game.
+ *
+ * WHERE IT GOES, and why it is here and not in the renderer: at this point in
+ * dc_platform_init() the PVR has NOT been initialised — pvr_init_defaults()
+ * belongs to dc_gx.c's backend seam and runs much later — so vid_set_mode()
+ * has just given us a plain linear RGB565 framebuffer at vram_s. Drawing is
+ * therefore a memset and a bfont call, with no scene, no lists and no texture
+ * cache to disturb. Doing the same thing after the PVR is up would mean
+ * building a textured quad and a font atlas for two lines of text.
+ *
+ * Cost: zero RAM (bfont lives in the Dreamcast BIOS, not in our image) and
+ * DC_SPLASH_MS of boot time, skippable with any button.
+ *
+ * ⚠️ It must run BEFORE dc_gx_init(). The splash owns the framebuffer only
+ * until the PVR takes it over, and pvr_init() reprograms the display
+ * controller at its own buffers (kb/traps.md: "vram_s is not the displayed
+ * surface once pvr_init() has run").
+ *
+ * Kill switch: -DDC_NO_SPLASH. Duration: -DDC_SPLASH_MS=<n>. */
+#ifndef DC_SPLASH_MS
+#define DC_SPLASH_MS 2000
+#endif
+
+#define DC_SPLASH_TEXT "TechProGabe Presents..."
+
+static void dc_splash(void) {
+    /* BFONT_THIN_WIDTH is 12 and the string is ASCII, so the rendered width is
+     * exact — no measuring call needed. */
+    const int tw = (int)(sizeof(DC_SPLASH_TEXT) - 1) * BFONT_THIN_WIDTH;
+    const int x  = (DC_SCREEN_WIDTH  - tw) / 2;
+    const int y  = (DC_SCREEN_HEIGHT - BFONT_HEIGHT) / 2;
+    uint64_t t0;
+
+    /* Black field. vram_s is uint16_t* in RGB565 at this point. */
+    memset(vram_s, 0, (size_t)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT * 2);
+
+    bfont_set_foreground_color(0xFFFFFFFF);   /* white */
+    bfont_set_background_color(0x00000000);
+    bfont_draw_str_vram_fmt((uint32_t)(x < 0 ? 0 : x), (uint32_t)y,
+                            false, "%s", DC_SPLASH_TEXT);
+
+    /* Count what was actually written. kb/traps.md: "a framebuffer HASH is not
+     * a framebuffer TEST — count nonzero pixels"; the same applies to "did the
+     * splash draw". Zero here means bfont drew nothing and the screen is black,
+     * which is otherwise indistinguishable from a splash that worked and was
+     * simply never looked at. */
+    {
+        unsigned int lit = 0, i;
+        const unsigned int n = (unsigned int)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT;
+        for (i = 0; i < n; i++)
+            if (vram_s[i]) lit++;
+        DC_LOGE("[DC] splash: \"%s\" %u px lit of %u, %d ms\n",
+                DC_SPLASH_TEXT, lit, n, (int)DC_SPLASH_MS);
+    }
+
+    /* Hold it, but never make the player wait: any button skips. The pad is
+     * polled through maple, which KOS drives from the vblank IRQ, so this is a
+     * plain busy-wait with no scheduling requirement. */
+    t0 = timer_ms_gettime64();
+    while (timer_ms_gettime64() - t0 < (uint64_t)(DC_SPLASH_MS)) {
+        maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+        cont_state_t* st = dev ? (cont_state_t*)maple_dev_status(dev) : NULL;
+        if (st && st->buttons)
+            break;
+        thd_pass();
+    }
+
+    memset(vram_s, 0, (size_t)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT * 2);
+}
+#else
+static void dc_splash(void) { }
+#endif
+
 void dc_platform_init(void) {
     DC_LOGE("[DC] OpenCrossing-Dreamcast  build %s %s\n", __DATE__, __TIME__);
     DC_LOGE("[DC] image 0x%08X-0x%08X  target %dx%d @ %d fps\n",
@@ -319,6 +396,10 @@ void dc_platform_init(void) {
      * a plain framebuffer mode and nothing is drawn — which is exactly what
      * the M1 gate measures (boot + console, no pixels). */
     vid_set_mode(DM_640x480, PM_RGB565);
+
+    /* Between the Sega licence screen and the game. Must be before
+     * dc_gx_init(), which is where the PVR eventually takes the display. */
+    dc_splash();
 
     cont_btn_callback(0,
                       CONT_A | CONT_B | CONT_X | CONT_Y | CONT_START,
