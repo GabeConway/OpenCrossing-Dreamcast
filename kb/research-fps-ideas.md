@@ -66,17 +66,32 @@ cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3
 ```
 
 **773 of 2,867 commands do geometry work. The other 2,094 — 73 % — are RDP
-and RSP STATE.** At the measured 12.31 µs/cmd that is ~26 ms of an ~85 ms
-frame spent changing state. Every idea on this page below was written against
-a picture in which vertices were the cost.
+and RSP STATE.**
 
-Two immediate consequences:
+⚠️ **Do NOT price that at 12.31 µs/cmd.** I did, in the commit that landed this
+line, and it is wrong: 12.31 µs/cmd is a fit of `emu64_ms` against TOTAL `cmds`,
+and total `cmds` correlates with `vtx`, so the coefficient is dominated by the
+opcode that does the most work per command. The counter-arithmetic is stark:
+265 `G_VTX` commands carry ~6,951 vertices into `dc_gx` — about 26 vertices each
+— and at the ~6.9 µs/vertex of emu64 work already measured, **`G_VTX` alone
+accounts for ~48 ms, i.e. essentially the whole emu64 budget.** A 7-command N64
+texture-load idiom (`SETTIMG`, `SETTILE`, `RDPLOADSYNC`, `LOADBLOCK`,
+`RDPPIPESYNC`, `SETTILE`, `SETTILESIZE`) is mostly near-empty handler bodies on
+a deferred backend.
 
-- **F8 is reopened.** It was dismissed on a STATIC count (~1,400 sync commands
-  against 42k triangle commands in `src/data`). The RUNTIME mix does not agree
-  with that count, and F8's own text said "F0's histogram settles this for
-  free". It does not settle it — F0 says the state half is large; only the
-  per-opcode histogram (G1) says which state.
+So the honest reading of F0 is: **the command COUNT is state-dominated and the
+command COST may not be**, and no counter in this tree can tell those apart.
+That is precisely the question G1 exists to answer, and it is now the thing to
+run before any of F1/F8/G2/G3 is costed.
+
+Two consequences that hold regardless:
+
+- **F8 is reopened, but only as a QUESTION.** It was dismissed on a static count
+  (~1,400 sync commands against 42k triangle commands in `src/data`). The
+  runtime mix does not match that ratio. But per the caveat above, a large
+  *count* of near-free commands is worth nothing to strip, so F8 stays parked
+  until G1 prices the sync opcodes. F8's own text said "F0's histogram settles
+  this for free" — F0 does not settle it; G1 does.
 - **`cullvis=6`.** emu64's own display-list cull runs NINE times a frame and
   rejects three. The acre-level cull the game ships is barely doing anything,
   so F1's headroom is larger than "acre-level cull already runs" suggested.

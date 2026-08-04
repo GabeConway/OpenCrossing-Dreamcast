@@ -1,7 +1,39 @@
 # Session state — resume here
 
-Updated 2026-08-04. This file is **short on purpose**: only what is true *right
-now*, plus what to do next. Everything else is one hop away.
+Updated 2026-08-04 (session 2). This file is **short on purpose**: only what is
+true *right now*, plus what to do next. Everything else is one hop away.
+
+## ⭐ 2026-08-04 session 2 — three things changed, and one of them was a
+## misdiagnosis the project had been carrying for two sessions
+
+1. **"Missing and weird textures" is mostly MISSING GEOMETRY.** The keep list
+   covers 18 of 268 acres and 11 of 84 summer structures, and an acre `.c`
+   stubs its **vertex** array, not just its textures — so an unkept acre draws
+   its unstubbed display list against all-zero vertices, every triangle
+   collapses to the origin, and the acre renders **nothing**. And it cannot be
+   fixed by censusing harder: `mFM_DecideAcre` builds the town from the save's
+   random seed, so a census names the acres one run happened to visit.
+   `tools/dcstub/keeplist-town.txt` enumerates them from the tree instead
+   (664 entries; `.bss` 3,296,236 → 4,804,620, span 11,084,460 → 12,680,076,
+   margin 3,202,932 → ~1,607,316 on the stub image).
+2. **The harness could not walk.** `DC_AUTOSTART` presses buttons only, so
+   every unattended run reached the town and then stood still for 600 s. That
+   is why the station roof clip-through has never appeared in a captured frame.
+   `DC_AUTOWALK=<N>` synthesises a deterministic 8-direction stick walk;
+   verified on a 600 s run with progression intact.
+3. **The opcode mix is now printed, and it is state-dominated.** Per town
+   frame: `cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3`.
+   ⚠️ **Do not price the 2,094 state commands at 12.31 µs/cmd** — that
+   coefficient is a fit against TOTAL `cmds`, which correlates with `vtx`, and
+   265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each is ~48 ms, i.e. most of
+   the emu64 budget on its own. The command COUNT is state-dominated; the
+   command COST may not be. **G1** (`DC_EMU64_HIST=<N>`) is now in the tree to
+   settle exactly that, and nothing in F1/F8/G2/G3 should be costed before it
+   runs.
+
+Also: `bench_mem` finally builds and runs — and Flycast cannot answer it
+(read == write == 114.3 MB/s at every size, in both VRAM windows). It is a
+hardware task now, de-risked. `kb/research-ram-tiers.md` has the numbers.
 
 ## ⭐ 2026-08-04 — the headline, and it reframes the whole FPS problem
 

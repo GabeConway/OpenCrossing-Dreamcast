@@ -515,6 +515,39 @@ for those see `kb/closed.md`.
   matches nothing produces a build that looks fine and saves nothing, or worse,
   shrinks one of two consumers.
 
+## A stubbed acre loses its VERTICES, not its textures (2026-08-04)
+
+- **An unkept `src/data/field/bg/acre/*` file renders NOTHING, and it looks
+  like a texture bug.** The acre `.c` stubs its vertex array under
+  `TARGET_PC` — `grd_s_t_st1_2.c:15-16` is
+  `static Vtx grd_s_t_st1_2_v[0xF00 / sizeof(Vtx)]` — while the `Gfx` display
+  list is initialised data and is NOT stubbed. So the list executes normally
+  against all-zero vertices, every triangle collapses to the origin, and the
+  acre contributes no pixels. Same shape for `src/data/model/obj_s_*`. Two
+  sessions were spent on `kb/station-bugs.md` §1's ground-texture indirection
+  — which is a real bug and is fixed — while most of the town was missing for
+  this entirely different reason.
+- **A census can never produce a correct town keep list.** `mFM_DecideAcre`
+  builds the layout from the save's random seed, so `DC_ASSET_CENSUS` names the
+  acres that ONE run happened to visit and a keep list built from it is wrong
+  for the next run. `kb/station-bugs.md` §1 had already noticed the symptom
+  ("town layout randomises the station column, so keep all three") without
+  drawing the general conclusion. `tools/dcstub/keeplist-town.txt` enumerates
+  from the tree; `keeplist-opening.txt` stays the censused list for
+  title-screen and size work, and the wide list is a UNION with it.
+
+## An average cost per command is not the cost of any command (2026-08-04)
+
+- **`emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` (r = 0.954) does NOT license
+  pricing a SUBSET of commands at 12.31 µs.** That fit is against TOTAL `cmds`,
+  and total `cmds` correlates with `vtx`, so the coefficient is dominated by
+  whichever opcode does the most work per command. Applying it to the 2,094
+  state commands per town frame gives ~26 ms; the counter-arithmetic (265
+  `G_VTX` carrying ~6,951 vertices at the separately measured ~6.9 µs/vertex
+  ≈ 48 ms) says `G_VTX` alone is most of the budget. **I made exactly this
+  error in the commit that first printed the mix.** Per-opcode cost needs a
+  per-opcode instrument — that is what `DC_EMU64_HIST` is for.
+
 ## Agent hygiene
 
 - **Agents must not run git.** The main thread commits.
