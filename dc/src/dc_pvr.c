@@ -133,6 +133,12 @@ static unsigned int s_tris_out;
 static unsigned int s_tris_clipped;
 static unsigned int s_tris_dropped;
 static unsigned int s_prim_unsupported;
+#ifndef DC_PVR_NO_TEX1ALPHA
+/* Batches that took the second-texture alpha fold. Reported next to the other
+ * renderer counters so the feature says how often it fires rather than being
+ * assumed to. */
+static unsigned int s_tex1_batches;
+#endif
 
 #ifndef DC_PVR_NO_VTXMEMO
 /* Defined out here, not inside the DC_PVR_BACKEND block, so dc_vi.c's [PHASE]
@@ -2055,21 +2061,27 @@ static int texmtx_slot(int id) {
     return (id - GX_TEXMTX0) / 3;
 }
 
-static void apply_texgen(const DCGXVertex* v, float* u, float* v_out) {
+/* `gen` is the GX texcoord generator index. 0 is the one the PVR's single
+ * texture unit actually uses; 1 exists because a two-stage TEV binds a second
+ * texture through GX_TEXCOORD1 with its own matrix (emu64.c:2673-2676 loads
+ * GX_TEXMTX1 and points GX_TEXCOORD1 at it, sourced from the SAME GX_TG_TEX0
+ * vertex attribute), and the tex1-alpha fold below has to reproduce it on the
+ * CPU. */
+static void apply_texgen_n(const DCGXVertex* v, int gen, float* u, float* v_out) {
     int slot;
     const float (*tm)[4];
 
     *u = v->texcoord[0];
     *v_out = v->texcoord[1];
 
-    if (g_gx.num_tex_gens <= 0)
+    if (g_gx.num_tex_gens <= gen)
         return;
     /* Only GX_TG_TEX0-sourced 2x4/3x4 matrix texgens are handled. BUMP and
      * SRTG texgens, and POS/NRM sources, fall through to the raw texcoord —
      * wrong mapping, still visible. TODO(M3): kb/tev-map.md census. */
-    if (g_gx.tex_gen_src[0] != GX_TG_TEX0)
+    if (g_gx.tex_gen_src[gen] != GX_TG_TEX0)
         return;
-    slot = texmtx_slot(g_gx.tex_gen_mtx[0]);
+    slot = texmtx_slot(g_gx.tex_gen_mtx[gen]);
     if (slot < 0 || slot >= 10)
         return;
 
@@ -2077,6 +2089,99 @@ static void apply_texgen(const DCGXVertex* v, float* u, float* v_out) {
     *u     = tm[0][0] * v->texcoord[0] + tm[0][1] * v->texcoord[1] + tm[0][3];
     *v_out = tm[1][0] * v->texcoord[0] + tm[1][1] * v->texcoord[1] + tm[1][3];
 }
+
+static void apply_texgen(const DCGXVertex* v, float* u, float* v_out) {
+    apply_texgen_n(v, 0, u, v_out);
+}
+
+#ifndef DC_PVR_NO_TEX1ALPHA
+/* ==========================================================================
+ * The second texture's alpha
+ * ==========================================================================
+ * THE DEFECT. The PVR has one texture unit. When a TEV alpha combiner is
+ * TEXEL0.a * TEXEL1.a this backend binds texmap0 and silently drops the second
+ * factor, so an effect whose whole shape is the PRODUCT of two ramps collapses
+ * to whatever texmap0 contributes on its own.
+ *
+ * THE CASE THAT FORCED IT, decoded from the retail foresta.rel and then
+ * confirmed in a batch log. `rom_train_out_shineglass_modelT`
+ * (rom_train_out.c:114) is the light shaft through the train window:
+ *
+ *   combiner  colour = PRIMITIVE,  alpha = TEXEL0.a * TEXEL1.a * PRIM_LOD_FRAC
+ *   TEXEL0    rom_train_shine_tex, I4 64x8  — a pure HORIZONTAL ramp
+ *   TEXEL1    rom_train_glass_tex, I4 16x16 — a pure VERTICAL ramp
+ *
+ * Neither texture is a light shaft. The soft 2-D falloff IS the product, one
+ * 1-D ramp per texture unit. And all four of the shine quad's vertices carry
+ * the same s (168.0 texels, GX_CLAMP), so once texmap1 is dropped TEXEL0
+ * contributes a single constant over the whole quad. The batch log says
+ * exactly that:
+ *
+ *   BATCH ... 64x8 ... st=2 tm=0,1 t1=1 argb=88FFFFFF bbox=-144,-165..337,494
+ *
+ * flat white, one alpha (0x88) for every vertex, over a screen-sized wedge —
+ * which is what a human reported as "the light on Rover should be subtle, not
+ * this rectangle".
+ *
+ * THE FIX, and its honest limits. The second texture's alpha is sampled on the
+ * CPU per VERTEX, through texgen 1, out of the 8x8 map dc_pvr_texture.c builds
+ * at upload, and multiplied into the vertex alpha. MODULATEALPHA then
+ * multiplies by TEXEL0 in hardware, so the emitted alpha is
+ * vtx.a * T1.a(vertex) * T0.a(pixel) — the right product, but with the T1
+ * factor interpolated between vertices instead of sampled per pixel.
+ *
+ * That is exact for a linear ramp across a quad, which is what this idiom is
+ * always used for, and it is wrong for a second texture carrying high
+ * frequency detail. It is applied ONLY where texmap1 binds a genuinely
+ * different image from texmap0 — measured at 220 of 1231 two-stage batches;
+ * the other 1009 point both texmaps at the same tile for N64 LOD
+ * interpolation, which the PVR does in hardware and which is free to drop.
+ *
+ * Kill switch: -DDC_PVR_NO_TEX1ALPHA, which also removes the 32 KB of .bss the
+ * alpha maps cost. */
+static int tex1_alpha_active(const dc_pvr_tex_t* tex0) {
+    const DCGXTevStage* t1;
+
+    if (g_gx.num_tev_stages < 2) return 0;
+    if (!tex0 || !tex0->base) return 0;
+    /* A genuinely SECOND image, not the same tile bound twice. */
+    if (g_gx.tex_handle[1] == 0 || g_gx.tex_handle[1] == g_gx.tex_handle[0])
+        return 0;
+    t1 = &g_gx.tev_stages[1];
+    if (t1->tex_map == GX_TEXMAP_NULL) return 0;
+    /* GX's alpha op is d + (1-c)*a + c*b, so (ZERO, APREV, TEXA, ZERO) is
+     * exactly APREV * TEXEL1.a — the multiply we are missing. Nothing else is
+     * claimed; any other shape keeps today's behaviour. */
+    return t1->alpha_a == GX_CA_ZERO && t1->alpha_b == GX_CA_APREV &&
+           t1->alpha_c == GX_CA_TEXA && t1->alpha_d == GX_CA_ZERO;
+}
+
+/* Nearest-cell lookup into the 8x8 map. Nearest and not bilinear on purpose:
+ * this is already sampled at vertex rate and then linearly interpolated by the
+ * rasteriser, so a second interpolation inside one cell buys nothing that the
+ * hardware is not about to do anyway. `wrap` follows the GX wrap mode of
+ * texmap1 — clamping a ramp is the whole point of this idiom. */
+static unsigned int tex1_alpha_sample(const unsigned char* prof, int wrap_s,
+                                      int wrap_t, float u, float v) {
+    int iu, iv;
+
+    if (wrap_s == GX_REPEAT || wrap_s == GX_MIRROR) {
+        u = u - (float)(int)u;
+        if (u < 0.0f) u += 1.0f;
+    }
+    if (wrap_t == GX_REPEAT || wrap_t == GX_MIRROR) {
+        v = v - (float)(int)v;
+        if (v < 0.0f) v += 1.0f;
+    }
+    iu = (int)(u * (float)DC_PVR_APROF_DIM);
+    iv = (int)(v * (float)DC_PVR_APROF_DIM);
+    if (iu < 0) iu = 0;
+    if (iu >= DC_PVR_APROF_DIM) iu = DC_PVR_APROF_DIM - 1;
+    if (iv < 0) iv = 0;
+    if (iv >= DC_PVR_APROF_DIM) iv = DC_PVR_APROF_DIM - 1;
+    return prof[iv * DC_PVR_APROF_DIM + iu];
+}
+#endif /* !DC_PVR_NO_TEX1ALPHA */
 
 /* ==========================================================================
  * The seam
@@ -2287,6 +2392,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     const float (*pr)[4];
     const float (*nm)[3];
     const dc_pvr_tex_t* tex;
+#ifndef DC_PVR_NO_TEX1ALPHA
+    const unsigned char* tex1_prof = NULL;
+    int tex1_wrap_s = GX_CLAMP, tex1_wrap_t = GX_CLAMP;
+#endif
 #ifndef DC_PVR_NO_TEVCONST
     float tevconst[3];
     int   have_tevconst = 0;
@@ -2378,6 +2487,18 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 #endif
 
     ensure_header(tex);
+
+#ifndef DC_PVR_NO_TEX1ALPHA
+    /* Per batch: the TEV stages and both texture bindings are fixed inside one
+     * batch, so the predicate and the map pointer are resolved once. */
+    tex1_prof = tex1_alpha_active(tex) ? dc_pvr_tex_aprof(g_gx.tex_handle[1])
+                                       : NULL;
+    if (tex1_prof) {
+        tex1_wrap_s = g_gx.tex_obj_wrap_s[1];
+        tex1_wrap_t = g_gx.tex_obj_wrap_t[1];
+        s_tex1_batches++;
+    }
+#endif
 
 #ifndef DC_PVR_NO_TEVCONST
     /* Per-batch, not per-vertex: the TEV stage and its registers cannot change
@@ -2660,6 +2781,38 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             }
 #endif
 #endif
+#ifndef DC_PVR_NO_TEX1ALPHA
+            /* LAST of the alpha writers, deliberately. Every block above
+             * decides what the alpha WOULD be with one texture; this one
+             * applies the second texture's factor to whatever they produced,
+             * which is what the GX combiner chain does (stage 1 multiplies
+             * stage 0's result). Putting it earlier would let the TEV-constant
+             * alpha overwrite it.
+             *
+             * Skipped on punch-through batches for the same reason the
+             * TEV-constant alpha is: the PT comparator has already been given
+             * the texel alpha alone on purpose, and reintroducing a product in
+             * front of the 144 threshold re-deletes cutouts. */
+            if (tex1_prof
+#ifndef DC_PVR_NO_PUNCHTHRU
+                && !s_pt_route
+#endif
+               ) {
+                float u1, v1;
+                unsigned int a1, a0;
+                apply_texgen_n(v, 1, &u1, &v1);
+                a1 = tex1_alpha_sample(tex1_prof, tex1_wrap_s, tex1_wrap_t,
+                                       u1, v1);
+                a0 = (cv[k].argb >> 24) & 0xFFu;
+                /* (a * b + 127) / 255, the exact 8-bit product, as a multiply
+                 * and two shifts — the same form dc_q() uses in the texture
+                 * decoder and for the same reason: SH-4 at this call rate must
+                 * not take a libgcc divide. */
+                a0 = (a0 * a1 + 127u);
+                a0 = (a0 + (a0 >> 8)) >> 8;
+                cv[k].argb = (cv[k].argb & 0x00FFFFFFu) | (a0 << 24);
+            }
+#endif
 #ifndef DC_PVR_NO_VTXMEMO
             /* Published only here, at the very bottom of the k-loop, so the
              * cached ClipVtx is the FINAL one — after the PT vertex-alpha
@@ -2759,6 +2912,9 @@ void dc_pvr_report(void) {
             "dropped=%u unsupported_prims=%u\n",
             s_frames, s_batches, s_tris_in, s_tris_out, s_tris_clipped,
             s_tris_dropped, s_prim_unsupported);
+#ifndef DC_PVR_NO_TEX1ALPHA
+    DC_LOGE("[DC/PVR] tex1alpha batches=%u of %u\n", s_tex1_batches, s_batches);
+#endif
 #ifndef DC_PVR_NO_PUNCHTHRU
     /* Emitted next to [PERF] (dc_vi.c calls this straight after it, every 30
      * presented frames). ptdrop MUST be 0: any other value is geometry that

@@ -166,6 +166,12 @@ static void pvr_txr_load_ex(const void* s, pvr_ptr_t d, unsigned int w,
 #define DC_TEX_BINARY  1    /* alpha only ever 0 or 255      -> ARGB1555 */
 #define DC_TEX_GRADED  2    /* anything else                 -> ARGB4444 */
 
+/* Side of the per-texture alpha map used by the second-texture fold. See the
+ * `aprof` field below. Must stay a power of two. */
+#ifndef DC_TEX_APROF_DIM
+#define DC_TEX_APROF_DIM 8
+#endif
+
 /* ==========================================================================
  * Cache entry
  * ========================================================================== */
@@ -186,6 +192,21 @@ typedef struct {
     unsigned short gen;         /* bumped on release/evict -> stale handles  */
     unsigned short refs;        /* GXTexObjs sharing this upload             */
     unsigned char  live;
+#ifndef DC_PVR_NO_TEX1ALPHA
+    /* An 8x8 box-filtered map of this texture's ALPHA, in GX texel space (i.e.
+     * over the unpadded w x h, not the POT-padded upload). The PVR has one
+     * texture unit, so a TEV configuration whose alpha multiplies TEXEL0 by
+     * TEXEL1 loses the second factor entirely; dc_pvr.c samples this map on the
+     * CPU, per vertex, and folds it into the vertex alpha instead. See the
+     * tex1_alpha block there for why that is the right approximation and where
+     * it is not.
+     *
+     * 8x8 and not the real texels: the geometry that uses this idiom is quads,
+     * so the map is only ever read at 4 corners and the PVR interpolates
+     * between them. 64 B x DC_PVR_TEX_MAX_ENTRIES = 32,768 B of .bss, which is
+     * the whole cost of the feature and is why it has a kill switch. */
+    unsigned char  aprof[DC_TEX_APROF_DIM * DC_TEX_APROF_DIM];
+#endif
 } dc_tex_entry_t;
 
 static dc_tex_entry_t  s_tex[DC_PVR_TEX_MAX_ENTRIES];
@@ -991,6 +1012,18 @@ void dc_pvr_texture_report(void) {
 /* ==========================================================================
  * Public: lookup
  * ========================================================================== */
+#ifndef DC_PVR_NO_TEX1ALPHA
+/* The two dimensions are declared in two files; a mismatch would silently
+ * misread the map rather than fail to build. */
+typedef char dc_aprof_dim_agrees[(DC_TEX_APROF_DIM == DC_PVR_APROF_DIM) ? 1 : -1];
+
+const unsigned char* dc_pvr_tex_aprof(unsigned int handle) {
+    dc_tex_entry_t* e = resolve(handle);
+    if (!e) return NULL;
+    return e->aprof;
+}
+#endif
+
 const dc_pvr_tex_t* dc_pvr_tex_get(unsigned int handle) {
     dc_tex_entry_t* e = resolve(handle);
     if (!e) return NULL;
@@ -1184,6 +1217,40 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
                palette[0][0], palette[0][1], palette[0][2], palette[0][3],
                palette[1][0], palette[1][1], palette[1][2], palette[1][3],
                palette[2][0], palette[2][1], palette[2][2], palette[2][3]);
+    }
+#endif
+
+#ifndef DC_PVR_NO_TEX1ALPHA
+    /* Box-filter the decoded ALPHA into the 8x8 map, over the GX region only —
+     * the POT pad is transparent black and averaging it in would darken every
+     * edge cell of every NPOT texture. Reads the packed output rather than the
+     * GX source so it needs no per-format decoder of its own; s_class already
+     * says how alpha is packed. */
+    {
+        int cy, cx, sy, sx;
+        for (cy = 0; cy < DC_TEX_APROF_DIM; cy++) {
+            int y0 = cy * h / DC_TEX_APROF_DIM;
+            int y1 = (cy + 1) * h / DC_TEX_APROF_DIM;
+            if (y1 <= y0) y1 = y0 + 1;
+            for (cx = 0; cx < DC_TEX_APROF_DIM; cx++) {
+                int x0 = cx * w / DC_TEX_APROF_DIM;
+                int x1 = (cx + 1) * w / DC_TEX_APROF_DIM;
+                unsigned int acc = 0, n = 0;
+                if (x1 <= x0) x1 = x0 + 1;
+                for (sy = y0; sy < y1 && sy < h; sy++) {
+                    for (sx = x0; sx < x1 && sx < w; sx++) {
+                        unsigned short v = s_scratch[sy * s_pitch + sx];
+                        unsigned int a;
+                        if (s_class == DC_TEX_OPAQUE)      a = 255u;
+                        else if (s_class == DC_TEX_BINARY) a = (v & 0x8000u) ? 255u : 0u;
+                        else                               a = ((v >> 12) & 0xFu) * 17u;
+                        acc += a; n++;
+                    }
+                }
+                probe.aprof[cy * DC_TEX_APROF_DIM + cx] =
+                    (unsigned char)(n ? (acc / n) : 255u);
+            }
+        }
     }
 #endif
 

@@ -47,6 +47,23 @@ typedef struct {
 /* NULL for handle 0 or any handle that is not currently live. */
 const dc_pvr_tex_t* dc_pvr_tex_get(unsigned int handle);
 
+#ifndef DC_PVR_NO_TEX1ALPHA
+/* Side of the square alpha map returned by dc_pvr_tex_aprof(). Kept in step
+ * with DC_TEX_APROF_DIM in dc_pvr_texture.c by the static assert there. */
+#define DC_PVR_APROF_DIM 8
+
+/* An 8x8 box-filtered map of the texture's ALPHA over its GX (unpadded)
+ * extent, row-major, 0..255. NULL for a dead handle.
+ *
+ * WHY THIS EXISTS: the PVR has ONE texture unit, so a TEV alpha combiner of
+ * the form TEXEL0.a * TEXEL1.a silently loses the second factor — the effect
+ * collapses to whatever TEXEL0 contributes, which for a two-ramp effect is a
+ * flat constant. dc_pvr.c samples this map per vertex and folds it into the
+ * vertex alpha, which MODULATEALPHA then multiplies by TEXEL0 in hardware.
+ * That reconstructs the product at vertex rather than pixel rate. */
+const unsigned char* dc_pvr_tex_aprof(unsigned int handle);
+#endif
+
 /* Called from dc_gx_backend_init()/shutdown() in dc_pvr.c, in that order,
  * AFTER pvr_init() has succeeded (VRAM allocation needs the PVR up). */
 void dc_pvr_texture_init(void);
