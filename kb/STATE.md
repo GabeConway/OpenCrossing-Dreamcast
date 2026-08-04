@@ -6,16 +6,39 @@ true *right now*, plus what to do next. Everything else is one hop away.
 ## ⭐ 2026-08-04 session 2 — three things changed, and one of them was a
 ## misdiagnosis the project had been carrying for two sessions
 
-1. **"Missing and weird textures" is mostly MISSING GEOMETRY.** The keep list
-   covers 18 of 268 acres and 11 of 84 summer structures, and an acre `.c`
-   stubs its **vertex** array, not just its textures — so an unkept acre draws
-   its unstubbed display list against all-zero vertices, every triangle
-   collapses to the origin, and the acre renders **nothing**. And it cannot be
-   fixed by censusing harder: `mFM_DecideAcre` builds the town from the save's
-   random seed, so a census names the acres one run happened to visit.
-   `tools/dcstub/keeplist-town.txt` enumerates them from the tree instead
-   (664 entries; `.bss` 3,296,236 → 4,804,620, span 11,084,460 → 12,680,076,
-   margin 3,202,932 → ~1,607,316 on the stub image).
+1. **"Missing and weird textures" is mostly MISSING GEOMETRY — and the obvious
+   fix does not fit.** The keep list covers 18 of 268 acres and 11 of 84
+   summer structures, and an acre `.c` stubs its **vertex** array, not just its
+   textures — so an unkept acre draws its unstubbed display list against
+   all-zero vertices, every triangle collapses to the origin, and the acre
+   renders **nothing**. Censusing harder cannot fix it either
+   (`mFM_DecideAcre` builds the town from the save's seed).
+   `tools/dcstub/keeplist-town.txt` enumerates all of them from the tree —
+   **and the resulting image dies on the splash screen.** See §"the ~146 KB"
+   below. The list is checked in as a measurement artefact and an aspiration;
+   `keeplist-opening.txt` is what boots.
+
+### ⚠️ THE REAL HEADROOM IS ~146 KB, AND `MEMLEDGER FIT` SAYS `OK` ANYWAY
+
+The wide keep list built clean and reported
+`MEMLEDGER FIT image_span=12681100 additive_heap=2358752 margin=1606292 **OK**`
+— then died at `trademark_init` with
+`Out of memory. Requested sbrk_base 8d0be000, was 8cf5c000, diff 1449984`.
+
+`kb/heap-two-pools.md` exactly: **the margin the ledger prints IS libc's pool,
+and the ledger does not model libc's demand.** "OK" means the image and the
+fixed reserves fit, not that the program runs.
+
+```
+libc peak demand    ≈ 1,606,292 + 1,449,984 = 3,056,276
+margin at the opening keep list                3,202,932
+⇒ headroom for ANY .bss growth               ≈   146,656 B
+```
+
+So the working image has **~146 KB of slack, not 3.2 MB**, and that number —
+not `margin=` — is the one to plan `.bss` work against. Two ways to raise it:
+cut `DC_ARENA_BYTES` by the measured town arena high-water (unmeasured until
+now; a `DC_ARENA_PROBE` run is in flight), or S4.
 2. **The harness could not walk.** `DC_AUTOSTART` presses buttons only, so
    every unattended run reached the town and then stood still for 600 s. That
    is why the station roof clip-through has never appeared in a captured frame.

@@ -6,6 +6,43 @@ produced a run that got *less* far. Live measurements of what the pools
 actually hold are in `kb/state-log.md`; the ranked size levers are in
 `kb/levers.md`.
 
+## ⭐ 2026-08-04 — `MEMLEDGER FIT … OK` IS NOT A STATEMENT THAT THE GAME RUNS
+
+The wide town keep list (`tools/dcstub/keeplist-town.txt`) built clean and
+printed
+
+```
+MEMLEDGER FIT image_span=12681100 additive_heap=2358752 usable=16646144 margin=1606292 OK
+```
+
+and then **died on the splash screen** at `trademark_init` with
+
+```
+Out of memory. Requested sbrk_base 8d0be000, was 8cf5c000, diff 1449984
+```
+
+**`margin=` IS libc's pool.** The ledger models the image and the fixed
+reserves; it has no model of how much libc will ask for, so `OK` means "the
+static side fits" and nothing more. Anyone who grows `.bss` and sees `OK` has
+not yet learned anything about whether the build boots.
+
+The useful number falls straight out of the pair of runs:
+
+```
+libc peak demand   ≈ margin + shortfall = 1,606,292 + 1,449,984 = 3,056,276
+margin at the keep list that DOES boot                            3,202,932
+⇒ real headroom for any .bss growth                             ≈   146,656 B
+```
+
+**Plan `.bss` work against ~146 KB, not against `margin=`.** Raising it means
+cutting `DC_ARENA_BYTES` (only against a measured TOWN arena high-water — the
+256,192 B figure in `kb/STATE.md` is the title screen and does not license a
+shipping cut) or S4.
+
+Worth adding to `dc_mem_ledger.c`: a second line that reports libc's observed
+peak `sbrk` extent next to the margin, so the ledger stops reporting `OK` for
+images that cannot boot.
+
 ## ⚠️ THE HEAP IS TWO POOLS THAT COMPETE, AND THIS WAS BEING GOT BACKWARDS
 
 Everything between the end of `.bss` and `_arch_mem_top` (`0x8d000000`) is

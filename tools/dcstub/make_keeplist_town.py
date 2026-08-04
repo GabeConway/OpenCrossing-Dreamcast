@@ -39,12 +39,42 @@ the entire town ground will go black in December with the same signature as
 the bug kb/station-bugs.md §1 fixed. Add them here at the same time as
 INDIRECT_SOURCES gets its `mFM_grd_w_*` rows.
 
-COST
-----
-Real bytes, and the fit inequality is already over by ~4.7 MB, so this is only
-affordable because a DC_ASSET_STUB image has margin the shipping image will
-not. Read `MEMLEDGER FIT` on the build; if margin goes negative, the town
-image needs S4, not a bigger keep list.
+⚠️⚠️ COST — THE FULL LIST DOES NOT FIT TODAY. MEASURED 2026-08-04.
+------------------------------------------------------------------
+Built and run: `.bss` 3,296,236 -> 4,804,620, image span 11,084,460 ->
+12,681,100, and `MEMLEDGER FIT ... margin=1606292 **OK**`.
+
+**It said OK and the game died on the splash screen.**
+
+    Out of memory. Requested sbrk_base 8d0be000, was 8cf5c000, diff 1449984
+
+This is `kb/heap-two-pools.md` exactly: the margin the ledger reports IS libc's
+pool, and the ledger does not model libc's demand, so "OK" here means only
+"the image and the fixed reserves fit", not "the program runs". The real
+arithmetic:
+
+    libc peak demand   ~= 1,606,292 + 1,449,984  =  3,056,276
+    margin at the opening keep list                 3,202,932
+    ------------------------------------------------------------
+    headroom actually available for a bigger keep list ~= 146,656 B
+
+**~146 KB, not 1.6 MB.** So the wide list costs an order of magnitude more than
+there is room for, and no amount of trimming acre-by-acre closes that at the
+current `DC_ARENA_BYTES=1900000`.
+
+The two ways forward, in order:
+
+  1. **Cut the arena and hand the difference to libc.** `DC_ARENA_PROBE`
+     measured the game's own allocator using **256,192 B of a 1,412,704 B
+     zelda arena** inside the 1,900,000 knob -- but at the TITLE SCREEN only.
+     A loaded town is unmeasured, and that measurement is the gate. Do not cut
+     the shipping arena on the title figure.
+  2. **S4.** `kb/plan-stages.md` -- demand-load the asset destination arrays
+     instead of keeping them resident. This list is a stopgap for a stub
+     image; S4 is the answer for a real one.
+
+Until then this file is a MEASUREMENT ARTEFACT and an aspiration, not a build
+input. `keeplist-opening.txt` is what boots.
 
     python3 tools/dcstub/make_keeplist_town.py > tools/dcstub/keeplist-town.txt
 
