@@ -783,6 +783,41 @@ endif
 # source did not change would keep an object built against the other
 # sys_stacks.h — i.e. a 4,096 B memset into a 16 B array. Full rebuild is the
 # correct price.
+# =============================================================================
+# G1: per-opcode emu64 timing histogram (KILL SWITCH: DC_EMU64_HIST=0, default)
+# =============================================================================
+# The value is the SAMPLING PERIOD in presented frames: 0 = off, 1 = every
+# frame, 4 = one frame in four. Off by default, so a normal build is
+# byte-identical.
+#
+# WHY THIS EXISTS. The [EMU64] counters say 2094 of 2867 town commands -- 73 %
+# -- are neither vertex nor triangle nor display-list, i.e. they are pure RDP/
+# RSP state. At the measured 12.31 us/cmd that is ~26 ms of an ~85 ms frame,
+# and nothing in the tree can say WHICH opcodes. emu64's own command_info[]
+# has a free per-opcode CALL count but its time half is dead: both
+# EMU64_TIMED_SEGMENT_* macros expand to nothing without EMU64_DEBUG, and the
+# EMU64_DEBUG forms do not compile (`this->#stat` is a stray stringify) and
+# would divide time/time anyway (emu64.c:5940).
+#
+# WHY IT IS LEGAL (CLAUDE.md §1). src/ is neither edited nor compiled
+# differently. emu64's dispatch table (emu64.c:5702) is a non-const
+# file-static array in .data and there is no MMU write protection; the
+# instrument swaps in timing thunks at runtime and swaps the originals back.
+# The only BUILD change is that objcopy promotes one already-existing local
+# symbol to global so dc/ can name it. That is a symbol BINDING change: not
+# one byte of loaded image differs and no instruction is reselected. Layout,
+# not codegen.
+#
+# The mangled name is C++ (dc/Makefile puts emu64.c in CXXFROMC_SRC) plus the
+# sh-elf leading underscore: `_ZL11dl_func_tbl` in the source, `__ZL11dl_func_tbl`
+# in the object. Verified with sh-elf-nm on the shipped emu64.c.o.
+DC_EMU64_HIST ?= 0
+ifneq ($(DC_EMU64_HIST),0)
+DEFINES += -DDC_EMU64_HIST=$(DC_EMU64_HIST)
+EMU64_HIST_OBJ := $(OBJDIR)/src/static/libforest/emu64/emu64.c.o
+$(EMU64_HIST_OBJ): TU_POST = sh-elf-objcopy --globalize-symbol=__ZL11dl_func_tbl $@
+endif
+
 FLAGSTAMP := $(BUILD)/flags.stamp
 FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DECOMP_OPT=$(DECOMP_OPT) \
@@ -817,8 +852,9 @@ objs: $(OBJS)
 help:
 	@sed -n '2,30p' $(firstword $(MAKEFILE_LIST))
 
+TU_POST = true
 COMPILE = $(Q)mkdir -p $(@D) && $(TU_CC) $(TU_XLANG) $(COMMON) $(TU_DEFS) $(TU_LANG) $(TU_OPT) \
-	  -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	  -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@ && $(TU_POST)
 
 $(OBJDIR)/%.c.o: $(ROOT)/%.c
 	@echo "  CC  $*.c"

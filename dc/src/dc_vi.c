@@ -206,6 +206,16 @@ void VIWaitForRetrace(void) {
     }
 #endif
 
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+    /* Close FIRST, before anything else in this function runs: the display-list
+     * traversal that the histogram was measuring happened between the previous
+     * VIWaitForRetrace and this one, so this is the instant it ended. Closing
+     * later would charge the swap and the probes to whichever opcode ran last.
+     * The frameskip early-out below also passes through here, which is what
+     * keeps arm/disarm balanced on skipped ticks. */
+    dc_emu64_hist_frame_close();
+#endif
+
     /* Always poll input, even on logic-only ticks. */
     if (!dc_platform_poll_events()) {
         g_pc_running = 0;
@@ -370,6 +380,9 @@ void VIWaitForRetrace(void) {
                     pc_emu64_frame_vtx_cmds, pc_emu64_frame_tri_cmds,
                     pc_emu64_frame_dl_cmds,
                     pc_emu64_frame_cull_visible, pc_emu64_frame_cull_rejected);
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+            dc_emu64_hist_report();
+#endif
 #endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "
@@ -424,6 +437,17 @@ void VIWaitForRetrace(void) {
             dc_asset_census_report();
 #endif
         probe_tick++;
+    }
+#endif
+
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+    /* Arm LAST, so the 512-byte table swap and everything above it are outside
+     * the measured window. Counts PRESENTED frames locally for the reason in
+     * the probe block above — never gate a periodic probe on pc_frame_counter
+     * (kb/traps.md). */
+    {
+        static unsigned int hist_tick = 0;
+        dc_emu64_hist_frame_open(hist_tick++);
     }
 #endif
 

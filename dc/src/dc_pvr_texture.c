@@ -704,7 +704,30 @@ static void decode_gc_texture(const void* src, int w, int h, int fmt,
         case GX_TF_C4:     decode_CI4((const u8*)src, w, h, palette); break;
         case GX_TF_C8:     decode_CI8((const u8*)src, w, h, palette); break;
         case GX_TF_CMPR:   decode_CMPR((const u8*)src, w, h); break;
-        default: break;   /* scratch was cleared: unhandled = transparent */
+        default:
+            /* Scratch was cleared, so an unhandled format decodes to a fully
+             * transparent rectangle -- which is byte-for-byte what a MISSING
+             * asset produces (kb/traps.md: "on a DC_ASSET_STUB image, a
+             * missing asset looks exactly like a renderer bug"). Silence here
+             * therefore costs a debugging session every time it fires.
+             *
+             * Two formats can reach this arm per kb/texture-path.md §2:
+             * GX_TF_C14X2 (0xA), which emu64.c:314's dol_fmt emits for
+             * G_IM_FMT_CI at 16-bit size, and GX_TF_Z24X8 (JFWDisplay.cpp:416).
+             * One line per distinct format, not per upload -- a per-upload log
+             * on a boot path is the hardware time bomb kb/traps.md warns about.
+             */
+            {
+                static unsigned int seen_mask = 0u;
+                unsigned int bit = (fmt < 32) ? (1u << fmt) : 0x80000000u;
+                if (!(seen_mask & bit)) {
+                    seen_mask |= bit;
+                    DC_LOGE("[DC/TEX] UNHANDLED FORMAT 0x%02x (%dx%d) -> "
+                            "transparent; this reads as a missing asset\n",
+                            (unsigned)fmt, w, h);
+                }
+            }
+            break;
     }
 }
 

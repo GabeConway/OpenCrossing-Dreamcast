@@ -1653,11 +1653,31 @@ static void compile_header(const dc_pvr_tex_t* tex) {
     int cutout = alpha_test_active();
 #endif
 
-    if (tex && tex->base)
+    if (tex && tex->base) {
+        int filt = PVR_FILTER_BILINEAR;
+#ifdef DC_PVR_PT_NEAREST
+        /* The one-line test of kb/station-bugs.md §2 H2 — cutout-edge
+         * ghosting. The palettes involved have NO mid-alpha entry (that was
+         * read straight out of foresta.rel), but bilinear MANUFACTURES one at
+         * every boundary between a transparent and an opaque texel, and the
+         * punch-through comparator then straddles it at PT_ALPHA_REF. The
+         * station roof's scalloped trim is all boundary.
+         *
+         * `list` is already folded into header_key() through s_pt_route, so
+         * this needs no cache work. It is opt-in because it trades a frayed
+         * edge for an aliased one on every leaf and fence in town — a
+         * screenshot decision, not a counters decision.
+         *
+         * ⚠️ This is a TEST, not a fix for a confirmed cause: the roof
+         * clip-through has never been reproduced in a captured frame. That
+         * is what DC_AUTOWALK is for. */
+        if (list == PVR_LIST_PT_POLY) filt = PVR_FILTER_NONE;
+#endif
         pvr_poly_cxt_txr(&cxt, list, (int)tex->pvr_fmt, tex->w, tex->h,
-                         (pvr_ptr_t)tex->base, PVR_FILTER_BILINEAR);
-    else
+                         (pvr_ptr_t)tex->base, filt);
+    } else {
         pvr_poly_cxt_col(&cxt, list);
+    }
 
     cxt.gen.culling = cull_gx_to_pvr(g_gx.cull_mode);
 #ifndef DC_PVR_NO_FOG
@@ -2503,7 +2523,49 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
      * and must keep its texture. Kill switch: -DDC_PVR_NO_TEXNULL. */
     tex = dc_pvr_tex_get(g_gx.tex_handle[0]);
 #ifndef DC_PVR_NO_TEXNULL
+#ifdef DC_PVR_TEXNULL_STAGE0_ONLY
     if (g_gx.tev_stages[0].tex_map == GX_TEXMAP_NULL) tex = NULL;
+#else
+    /* ⚠️ 2026-08-04: this test used to read STAGE 0 ONLY, and that is wrong
+     * for a config that parks GX_TEXMAP_NULL on stage 0 and carries the
+     * texture on stage 1. Such a batch got tex = NULL and drew untextured.
+     *
+     * The blast radius was pinned by enumerating the PRODUCER rather than
+     * guessing from the TEV table. `GXSetTevOrder(GX_TEVSTAGE0,
+     * GX_TEXCOORD_NULL, GX_TEXMAP_NULL, ...)` has five sites in emu64; four
+     * (emu64.c:1949, :1968, :3000, :3006) are genuinely textureless, and
+     * exactly one — emu64.c:1771-1772, the combine_manual case for
+     * gsDPSetCombineLERP(PRIMITIVE, SHADE, PRIM_LOD_FRAC, SHADE, 0,0,0,TEXEL0,
+     * TEXEL1,0,COMBINED,0, 0,0,0,COMBINED) — puts the image on stage 1.
+     * That combiner has six display-list sites in all of src/, and every one
+     * of them is in src/data/model/obj_s_shop1.c. So this bug is precisely
+     * "Tom Nook's shop draws untextured". combine_auto can never produce the
+     * shape: it assigns GX_TEXMAP0 to stage 0 unconditionally (emu64.c:1265).
+     *
+     * The correct test is "does ANY active stage bind a texmap". The JSystem
+     * 2D path is unaffected because it sets GX_TEXMAP_NULL on ALL its stages.
+     * Both of shop1's stages resolve to GX_TEXMAP0, so tex_handle[0] is still
+     * the right handle to bind — there is no second handle to chase here.
+     *
+     * Kill switch: -DDC_PVR_TEXNULL_STAGE0_ONLY restores the old test
+     * verbatim; -DDC_PVR_NO_TEXNULL keeps its existing meaning (bind
+     * unconditionally, the pre-2026-08-02 behaviour). */
+    {
+        int ns = g_gx.num_tev_stages;
+        int si, any_map = 0;
+        /* Clamp to the ARRAY bound (16), not DC_GX_MAX_TEV_STAGES (3).
+         * That constant is the measured max across the 101 configs, i.e. an
+         * observation, and using an observation as an array bound is how a
+         * 17-stage config would silently read as textureless. */
+        if (ns <= 0) ns = 1;
+        if (ns > (int)(sizeof g_gx.tev_stages / sizeof g_gx.tev_stages[0]))
+            ns = (int)(sizeof g_gx.tev_stages / sizeof g_gx.tev_stages[0]);
+        for (si = 0; si < ns; si++) {
+            if (g_gx.tev_stages[si].tex_map != GX_TEXMAP_NULL) { any_map = 1; break; }
+        }
+        if (!any_map) tex = NULL;
+    }
+#endif
 #endif
 
 #ifndef DC_PVR_NO_PUNCHTHRU
@@ -2884,13 +2946,22 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 
 #ifdef DC_PVR_BATCH_LOG
     if (s_batch_log_now) {
-        DC_LOG("BATCH b=%u %s n=%d verts=%d tex=%d %dx%d fmt=0x%X a=%d "
+        /* `src=` is the SOURCE pointer the GX layer was handed, which is the
+         * same quantity DC_ASSET_CENSUS resolves to a symbol name
+         * (tools/dcstub/census_resolve.py). Without it a batch log line can
+         * be joined to a screen region but never to a source symbol, and
+         * every texture investigation so far has had to guess which batch is
+         * which from its bbox. `vram=` joins the same line to DC_TEX_LOG.
+         * Called out as a tooling gap in kb/station-bugs.md §2. */
+        DC_LOG("BATCH b=%u %s n=%d verts=%d tex=%d src=%p vram=%p %dx%d fmt=0x%X a=%d "
                "us=%.3f wrap=%d,%d bm=%d,%d,%d cull=%d zt=%d zf=%d zw=%d "
                "chans=%d argb=%08X ac=%d/%d,%d/%d cut=%d pt=%d cu=%d,%d tm=%d,%d "
                "st=%d t1=%d bbox=%.1f,%.1f..%.1f,%.1f z=%.5f..%.5f "
                "uv=%.2f,%.2f..%.2f,%.2f\n",
                s_batches, (per_prim == 4) ? "QUAD" : "TRI", count, s_bl_n,
                tex ? 1 : 0,
+               (void*)(uintptr_t)g_gx.tex_obj_src[0],
+               tex ? tex->base : (void*)0,
                tex ? (int)tex->w : 0, tex ? (int)tex->h : 0,
                tex ? (unsigned)tex->pvr_fmt : 0u,
                tex ? (int)tex->has_alpha : 0,

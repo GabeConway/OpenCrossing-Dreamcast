@@ -57,6 +57,32 @@ All verified in the tree, 2026-08-04.
 
 ## The ideas, ranked by (estimated win) / (risk x effort)
 
+### ✅ F0 — DONE 2026-08-04, and the answer changes the ranking below.
+
+`dc/src/dc_vi.c` now prints `[EMU64]` next to `[PHASE]`. The town, per frame:
+
+```
+cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3
+```
+
+**773 of 2,867 commands do geometry work. The other 2,094 — 73 % — are RDP
+and RSP STATE.** At the measured 12.31 µs/cmd that is ~26 ms of an ~85 ms
+frame spent changing state. Every idea on this page below was written against
+a picture in which vertices were the cost.
+
+Two immediate consequences:
+
+- **F8 is reopened.** It was dismissed on a STATIC count (~1,400 sync commands
+  against 42k triangle commands in `src/data`). The RUNTIME mix does not agree
+  with that count, and F8's own text said "F0's histogram settles this for
+  free". It does not settle it — F0 says the state half is large; only the
+  per-opcode histogram (G1) says which state.
+- **`cullvis=6`.** emu64's own display-list cull runs NINE times a frame and
+  rejects three. The acre-level cull the game ships is barely doing anything,
+  so F1's headroom is larger than "acre-level cull already runs" suggested.
+
+<details><summary>the original F0, for the reasoning</summary>
+
 ### F0. Print the counters that already exist. Do this first, unconditionally.
 
 `pc_emu64_frame_noop/vtx/tri/dl_cmds` and `pc_emu64_frame_cull_visible/rejected`
@@ -66,6 +92,8 @@ idea below needs the town's opcode mix and the current CULLDL hit rate, and both
 are already being counted for free.
 
 **Win: 0 ms. Risk: 0. Unlocks everything else.**
+
+</details>
 
 ### F1. Offline bbox-CULLDL injection into acre and model display lists
 
@@ -115,20 +143,44 @@ Cheapest experiment: hand-transform ONE town acre (`grd_s_c1_1`) plus one large
 object model in a scratch copy, run 600 s, read `cull_rejected` (F0) and the
 matched-frame `cmds`/`v` drop.
 
-### F2. XMTRX residency cache in `dc_mtx.c`
+### ⚠️ F2 — THE PREMISE WAS FALSE. Corrected and reimplemented 2026-08-04.
 
-**1-3 ms/frame. Low risk. dc/-only, and the knob already exists.**
+F2 said `dl_G_VTX` calls `PSMTXMultVec` twice per shared vertex **with the same
+matrix**, so a residency token turns the second call into one FTRV. Read the
+call site:
 
-`dl_G_VTX` calls `PSMTXMultVec` **twice per shared vertex** at load time
-(`emu64.c:4708-4712`) with the same matrix every call, and `dc_mtx.c`'s
-`DC_MTX_USE_XMTRX` path reloads and transposes per call — the file's own comment
-calls it a wash for exactly that reason. Add an "XMTRX owner" token: `mat_load`
-only when the incoming matrix pointer and generation differ; `dc_pvr.c`'s
-per-batch `mat_load` bumps the generation. Consecutive per-vertex calls then pay
-one FTRV each.
+```c
+emu64.c:4708   PSMTXMultVec(position_mtx,         &pos,    &pos);
+emu64.c:4710   PSMTXMultVec(this->model_view_mtx, &normal, &normal);
+```
 
-Failure mode: a missed generation bump transforms with a stale matrix —
-geometry snaps to the wrong place, very visible, caught by the screenshot gate.
+**Two different matrices, alternating once per vertex.** XMTRX is physically a
+single slot, so a residency cache misses on every call in the one loop that
+matters. F2 as specified is worth **zero**.
+
+What the call site *does* establish is that the single-vector entry points
+should never have been on the XMTRX path at all. For ONE vector the cost is
+entirely in getting the matrix in:
+
+| | |
+|---|---|
+| XMTRX | `transpose44` = 12 loads + 16 stores, `mat_load` = 8 double-`fmov` + the `frchg` pair, then 1 FTRV — **~50+ cycles** |
+| scalar | 12 loads, 9 `fmul`, 9 `fadd`, 3 stores, no memory round-trip, no bank switch — **~30-40 cycles** |
+
+`dc_mtx.c`'s own header already said this ("PSMTXMultVecArray: **this** is where
+XMTRX actually pays") and then loaded XMTRX per call anyway.
+
+**Implemented instead:** `PSMTXMultVec`/`PSMTXMultVecSR` take FTRV only when the
+matrix is provably still resident, and plain scalar otherwise. The miss path
+deliberately does **not** touch XMTRX, so a scalar miss cannot evict the matrix
+a bulk transform loaded. Residency is pointer + a full 12-word content compare
+(emu64 rewrites matrix-stack entries in place, so pointer equality alone is the
+documented stale-matrix failure), plus an explicit `dc_mtx_xmtrx_invalidate()`
+that `dc_pvr.c` calls after its per-batch `mat_load` — those two are the only
+XMTRX writers in the image. Kill switch `-DDC_MTX_NO_XMTRX_CACHE`.
+
+**Unmeasured as of this edit.** Rule 5: the win is whatever a matched-frame A/B
+says it is, not what the cycle table above says.
 
 ### F3. Memo generation counter instead of a per-batch flush
 
@@ -198,13 +250,22 @@ bounded stutter with a partially-drawn frame.
 ⚠️ Failure mode: submission order means the late lists (XLU, UI) vanish first,
 which is visually bad. Only viable with a budget well above p90.
 
-### F8. Offline no-op / sync stripping — probably not worth it
+### ⚠️ F8 — REOPENED 2026-08-04. The runtime mix does not match the static count.
 
 Static counts say `src/data` carries ~1,400 sync commands total (881 PipeSync,
 372 LoadSync, 139 TileSync) against 42k triangle commands, and
-`dl_G_RDPPIPESYNC` is already a near-empty body. **F0's histogram settles this
-for free** — only build the strip rule if the runtime mix disagrees with the
-static count.
+`dl_G_RDPPIPESYNC` is already a near-empty body — which is why this was ranked
+last.
+
+**F0 now says 73 % of the town's 2,867 commands per frame are state**, and
+`vtx + tri + dl = 773` accounts for all the geometry. A static ratio over
+`src/data` cannot predict the runtime mix, because the runtime mix is dominated
+by which display lists actually execute, not by how many exist. Whatever those
+2,094 commands are, they are ~26 ms of frame.
+
+This is now **the thing G1 exists to name.** Do not build a strip rule against
+the static count; build it against the histogram, and only for opcodes whose
+handler bodies are genuinely no-ops on a PVR backend.
 
 ---
 

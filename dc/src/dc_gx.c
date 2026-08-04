@@ -2281,6 +2281,13 @@ void GXLoadTexObj(void* obj, u32 id) {
     if (o[TEXOBJ_BACKEND_TEX] && !dc_pvr_tex_get(o[TEXOBJ_BACKEND_TEX]))
         o[TEXOBJ_BACKEND_TEX] = 0;
 
+    /* ABOVE the dedup early-out on purpose. The texture cache is keyed on
+     * texel CONTENT, so two GXTexObjs with different source pointers can share
+     * one backend handle and take the early return -- which would leave this
+     * mirror naming the wrong symbol. It is diagnostic-only and cannot affect
+     * the draw path, so keeping it unconditionally current is free. */
+    g_gx.tex_obj_src[id] = o[TEXOBJ_IMAGE_PTR];
+
     /* The wrap mode is part of the dedup key. GXInitTexObjWrapMode() can
      * change it on an object that is already bound, and the backend header is
      * compiled from it; without these two terms that change would be dropped

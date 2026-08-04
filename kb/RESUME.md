@@ -475,17 +475,42 @@ as `K0 + K1*RASC`. It runs only where the old shape declined, so every batch the
 old code handled keeps its exact result. Measured: no regression, and the window
 scenery visibly darkens — the ENV term arriving.
 
-**It is OFF because a screenshot says it REGRESSES.** With the fold on, the
-train station canopy renders as a **flat teal slab with no texture at all**,
-where the identical build without it shows correctly textured beams. Every
-counter passed. A flat *untextured* result does not fit "the vertex colour was
-replaced by a constant" — that would still be modulated by the texel — so the
-likely shape is `dc_pvr.c`'s `GX_TEXMAP_NULL` guard, which reads **stage 0
-only**: a config that binds `GX_TEXMAP_NULL` on stage 0 and carries the texture
-on stage 1 (`emu64.c:1764-1773` is exactly that, true output
-`T0 * lerp(RASC, C1, A0)`) gets `tex = NULL`, draws untextured, and the folded
-constant becomes the whole colour. **Fix that guard — "does ANY stage bind a
-texmap" — before touching the fold again.**
+**It is OFF because a screenshot said it REGRESSES** — the train station canopy
+rendered as a **flat teal slab with no texture at all** where the identical
+build without it showed correctly textured beams.
+
+⚠️ **The explanation this file used to give for that is WRONG, and it sent the
+next reader at the wrong guard. Corrected 2026-08-04.** It blamed `dc_pvr.c`'s
+`GX_TEXMAP_NULL` stage-0-only guard. Two independent traces say the fold cannot
+touch the canopy at all:
+
+- The canopy draws through `_texture_z_light_fog_prim_npc` →
+  `z_gsCPModeSet_Data[10]` = `gsDPSetCombineMode(G_CC_MODULATEIDECALA,
+  G_CC_MODULATEIDECALA_PRIM2)` (`m_rcp.c:113-122`). That goes through emu64's
+  **`combine_auto`**, which assigns `GX_TEXMAP0` to stage 0 unconditionally
+  (`emu64.c:1265`) — so the `GX_TEXMAP_NULL` guard never fires on it.
+- Its stage 0 becomes `(ZERO, TEXC, RASC, ZERO)`, and `tev_carg_affine`
+  declines `GX_CC_TEXC` (`dc_pvr.c:1153`, via `tev_creg_of` returning −1), so
+  `tev_fold_color` returns 0 for that batch.
+
+What *does* fire on the canopy is `alpha_env_texel_only()` — its alpha is
+exactly `(ZERO,ZERO,ZERO,TEXA)` then `(ZERO,ZERO,ZERO,APREV)`. That is the
+`-DDC_PVR_ALPHAENV` A/B, and `dc_pvr.c:1602-1610` already re-attributes that
+teal slab to two zeroed reply-box assets aliasing through `tex_content_hash` —
+a bug that has since been fixed. **So the fold's recorded regression is very
+likely contaminated and should be re-A/B'd on today's tree** (two builds, two
+600 s runs, one define apart, `ASSET MISSING = 0` on both sides).
+`kb/state-log.md:373` already disagreed with this file, saying of the fold
+"Measured: no regression, and the window scenery visibly darkens".
+
+The stage-0-only guard **was** a real bug, just not this one. Its blast radius
+was pinned by enumerating the producer: `GXSetTevOrder(GX_TEVSTAGE0,
+GX_TEXCOORD_NULL, GX_TEXMAP_NULL, …)` has five sites in emu64, four genuinely
+textureless, and exactly one — `emu64.c:1771-1772` — that carries the image on
+stage 1. That combiner has six display-list sites in all of `src/`, **every one
+in `src/data/model/obj_s_shop1.c`**. The bug was "Tom Nook's shop draws
+untextured". Fixed 2026-08-04: the guard now asks whether ANY active stage
+binds a texmap. `-DDC_PVR_TEXNULL_STAGE0_ONLY` restores the old test.
 
 It is also not yet exact even where it does fire.** For the P3 shapes whose second stage is `CPREV + TEXC*CPREV` — the band
 among them — GX computes `K*(1 + T0)` and this computes `K*T0`, i.e. about K too

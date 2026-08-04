@@ -638,6 +638,14 @@ void dc_platform_init(void) {
      * call. GXInit() itself arrives much later, from inside JFWSystem::init(),
      * and on this port it is nearly a no-op (there is no command FIFO). */
     dc_gx_init();
+
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+    /* G1. Only reads and copies emu64's dispatch table, which is initialised
+     * data — it is valid from load, well before emu64_init() runs — so this is
+     * safe anywhere after the console exists. It logs and disables itself if
+     * the table does not match the expected signature. */
+    dc_emu64_hist_init();
+#endif
 }
 
 void pc_platform_shutdown(void) {

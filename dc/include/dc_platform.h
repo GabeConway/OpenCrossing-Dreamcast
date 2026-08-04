@@ -393,6 +393,16 @@ extern u64 dc_gx_texload_time_us;
  * them. kb/research-fps-ideas.md F2. No-op when the cache is compiled out. */
 void dc_mtx_xmtrx_invalidate(void);
 
+/* G1 — per-opcode emu64 timing histogram (dc/src/dc_emu64_hist.c). Compiled
+ * to nothing unless DC_EMU64_HIST > 0, which is why the call sites are all
+ * inside #if. */
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+void dc_emu64_hist_init(void);
+void dc_emu64_hist_frame_open(unsigned int tick);
+void dc_emu64_hist_frame_close(void);
+void dc_emu64_hist_report(void);
+#endif
+
 /* --- Timing helper shared by dc_os.c / dc_vi.c / dc_mem_ledger.c ----------- */
 u64 dc_time_us(void);   /* free-running microseconds, safe before OSInit() */
 

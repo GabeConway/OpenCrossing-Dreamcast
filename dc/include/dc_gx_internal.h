@@ -193,6 +193,13 @@ typedef struct {
     int tex_obj_w[8];
     int tex_obj_h[8];
     int tex_obj_fmt[8];
+    /* The SOURCE image pointer of the bound GXTexObj, mirrored so a batch can
+     * be named. It is diagnostic only -- nothing in the draw path reads it --
+     * but it is the same quantity DC_ASSET_CENSUS records and
+     * tools/dcstub/census_resolve.py resolves to a symbol, so it is what turns
+     * a DC_PVR_BATCH_LOG line from "some 128x32" into "grd_s_t_st1_2_v+0x240".
+     * Every texture investigation so far has had to infer that from a bbox. */
+    unsigned int tex_obj_src[8];
     /* GX_CLAMP / GX_REPEAT / GX_MIRROR, mirrored out of the bound GXTexObj.
      * These belong to the BIND, not to the upload: the texture cache is keyed
      * on texel content, so one VRAM image is legitimately shared by objects
