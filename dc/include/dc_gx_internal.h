@@ -265,10 +265,13 @@ extern DCGXState g_gx;
 
 /* Kill switches (PLAN: "every optimization gets a kill switch"). Compile-time
  * on DC — there are no env vars. */
-extern int dc_gx_state_dedup;   /* DC_NO_STATE_DEDUP   */
-extern int dc_gx_strip_convert; /* DC_NO_STRIP_CONVERT */
-extern int dc_gx_batch_cull;    /* DC_NO_BATCH_CULL    */
-extern int dc_gx_draw_merge;    /* DC_NO_DRAW_MERGE    */
+/* `const` so the ~35 state setters that test dc_gx_state_dedup on their hot
+ * path fold the branch instead of reloading a global under
+ * -fno-strict-aliasing. Nothing writes them; the switch is the -D. */
+extern const int dc_gx_state_dedup;   /* DC_NO_STATE_DEDUP   */
+extern const int dc_gx_strip_convert; /* DC_NO_STRIP_CONVERT */
+extern const int dc_gx_batch_cull;    /* DC_NO_BATCH_CULL    */
+extern const int dc_gx_draw_merge;    /* DC_NO_DRAW_MERGE    */
 
 void dc_gx_flush_vertices(void);
 void dc_gx_flush_if_begin_complete(void);

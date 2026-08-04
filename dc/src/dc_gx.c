@@ -48,26 +48,36 @@ void GXSetTevIndirect(u32 stage, u32 ind_stage, u32 fmt, u32 bias_sel,
 DCGXState g_gx;
 
 /* Kill switches. Compile-time on DC (no env vars); PLAN requires every
- * optimization to have one so a regression can be bisected on hardware. */
+ * optimization to have one so a regression can be bisected on hardware.
+ *
+ * ⚠️ THEY ARE `const`, and that is load-bearing, not tidiness. These were plain
+ * `int` globals read by ~35 state setters on their hot path; `-fno-strict-
+ * aliasing` is on, so GCC had to RELOAD each one from memory before every
+ * compare and could not fold the branch. They are already decided at compile
+ * time by the #ifdefs below — nothing anywhere writes them (verified: the only
+ * references in the tree are these definitions, the declarations in
+ * dc_gx_internal.h, and the reads inside this file) — so making that explicit
+ * lets the branch fold away entirely. The kill switch is unchanged: it was
+ * always a -D, never a runtime knob. */
 #ifdef DC_NO_STATE_DEDUP
-int dc_gx_state_dedup = 0;
+const int dc_gx_state_dedup = 0;
 #else
-int dc_gx_state_dedup = 1;
+const int dc_gx_state_dedup = 1;
 #endif
 #ifdef DC_NO_STRIP_CONVERT
-int dc_gx_strip_convert = 0;
+const int dc_gx_strip_convert = 0;
 #else
-int dc_gx_strip_convert = 1;
+const int dc_gx_strip_convert = 1;
 #endif
 #ifdef DC_NO_BATCH_CULL
-int dc_gx_batch_cull = 0;
+const int dc_gx_batch_cull = 0;
 #else
-int dc_gx_batch_cull = 1;
+const int dc_gx_batch_cull = 1;
 #endif
 #ifdef DC_NO_DRAW_MERGE
-int dc_gx_draw_merge = 0;
+const int dc_gx_draw_merge = 0;
 #else
-int dc_gx_draw_merge = 1;
+const int dc_gx_draw_merge = 1;
 #endif
 
 /* Per-frame diagnostics. Names kept from the PC port: game code and the
@@ -829,7 +839,6 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
 void GXEnd(void) { dc_gx_commit_pending_and_flush(); }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
-    u8 cr, cg, cb, ca;
 #ifdef DC_PERF_GXAPI
     u64 t_api = dc_time_us();
     DC_GXAPI(s_api_pos);
@@ -838,18 +847,39 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     if (g_gx.vertex_pending)
         dc_gx_commit_vertex();
 
-    /* CARRY COLOR0 FORWARD. Everything else resets. */
-    cr = g_gx.current_vertex.color0[0];
-    cg = g_gx.current_vertex.color0[1];
-    cb = g_gx.current_vertex.color0[2];
-    ca = g_gx.current_vertex.color0[3];
+    /* CARRY COLOR0 FORWARD — by not touching it.
+     *
+     * This used to read the four colour bytes into locals and store them
+     * straight back, four instructions each way, 6,951 times a frame in the
+     * town. It was a provable no-op: dc_gx_commit_vertex() above only ever
+     * READS g_gx.current_vertex (the struct copy at :327, the s_conv_v0/v1
+     * saves at :340-341 and the three dst[] stores at :346-352), so nothing
+     * between the read and the write-back could change color0. The contract in
+     * the old comment — "everything else resets, colour carries" — is satisfied
+     * by resetting only the fields that reset.
+     *
+     * Kept as a comment rather than deleted silently because "why does colour
+     * survive a GXPosition when normal and texcoord do not" is a real question
+     * about this API, and the answer is emu64's §3.6 behaviour 2. */
+#ifdef DC_GX_NO_FASTPATH
+    {
+        u8 cr = g_gx.current_vertex.color0[0];
+        u8 cg = g_gx.current_vertex.color0[1];
+        u8 cb = g_gx.current_vertex.color0[2];
+        u8 ca = g_gx.current_vertex.color0[3];
+        g_gx.current_vertex.normal[0] = 0;
+        g_gx.current_vertex.normal[1] = 0;
+        g_gx.current_vertex.normal[2] = 0;
+        g_gx.current_vertex.color0[0] = cr;
+        g_gx.current_vertex.color0[1] = cg;
+        g_gx.current_vertex.color0[2] = cb;
+        g_gx.current_vertex.color0[3] = ca;
+    }
+#else
     g_gx.current_vertex.normal[0] = 0;
     g_gx.current_vertex.normal[1] = 0;
     g_gx.current_vertex.normal[2] = 0;
-    g_gx.current_vertex.color0[0] = cr;
-    g_gx.current_vertex.color0[1] = cg;
-    g_gx.current_vertex.color0[2] = cb;
-    g_gx.current_vertex.color0[3] = ca;
+#endif /* DC_GX_NO_FASTPATH */
 #ifdef DC_GX_FAT_VERTEX
     g_gx.current_vertex.color1[0] = 0;
     g_gx.current_vertex.color1[1] = 0;
@@ -894,11 +924,19 @@ void GXNormal3f32(f32 x, f32 y, f32 z) {
 #ifdef DC_PERF_GXAPI
     DC_GXAPI(s_api_nrm);
 #endif
-    /* Stored as s16 fixed point; SH-4 lighting consumes it that way. */
+    /* Stored as s16 fixed point; SH-4 lighting consumes it that way.
+     *
+     * ⚠️ A "one magnitude test instead of six clamps" fast path was written
+     * here and REVERTED: measured across 215 counter-matched windows it moved
+     * nothing (see the note on GXPosition3f32 above). The six clamps stay
+     * because they are the obvious code and they cost nothing measurable. */
     float sx = x * DC_GX_NRM_SCALE, sy = y * DC_GX_NRM_SCALE, sz = z * DC_GX_NRM_SCALE;
-    if (sx >  32767.0f) sx =  32767.0f; if (sx < -32768.0f) sx = -32768.0f;
-    if (sy >  32767.0f) sy =  32767.0f; if (sy < -32768.0f) sy = -32768.0f;
-    if (sz >  32767.0f) sz =  32767.0f; if (sz < -32768.0f) sz = -32768.0f;
+    if (sx >  32767.0f) sx =  32767.0f;
+    if (sx < -32768.0f) sx = -32768.0f;
+    if (sy >  32767.0f) sy =  32767.0f;
+    if (sy < -32768.0f) sy = -32768.0f;
+    if (sz >  32767.0f) sz =  32767.0f;
+    if (sz < -32768.0f) sz = -32768.0f;
     g_gx.current_vertex.normal[0] = (short)sx;
     g_gx.current_vertex.normal[1] = (short)sy;
     g_gx.current_vertex.normal[2] = (short)sz;
@@ -1085,7 +1123,18 @@ void GXLoadNrmMtxImm(const void* mtx, u32 id) {
     if (slot >= 10) return;
     src = (const float*)mtx;
     d = g_gx.nrm_mtx[slot];
-    /* Upper-left 3x3 of a 3x4 row-major Mtx (stride 4, not contiguous). */
+    /* Upper-left 3x3 of a 3x4 row-major Mtx (stride 4, not contiguous).
+     *
+     * ⚠️ Three 12-byte block moves, not nine scalar float compares and nine
+     * scalar stores. The rows ARE contiguous on both sides — d[i][0..2] is 12 B
+     * and src[0..2] / src[4..6] / src[8..10] are 12 B each — only the stride
+     * between them differs, so memcmp/memcpy are byte-for-byte identical here.
+     * Measured from the linked map, the scalar form compiled to 552 B / 276
+     * instructions, against 148 B / 74 for GXLoadPosMtxImm doing the SAME job
+     * on MORE data (a full 3x4) with memcmp/memcpy. 3.7x the cost for 75 % of
+     * the payload, on a function emu64 calls once per G_MTX command
+     * (emu64.c:4603). */
+#ifdef DC_GX_NO_FASTPATH
     if (dc_gx_state_dedup &&
         d[0][0] == src[0] && d[0][1] == src[1] && d[0][2] == src[2] &&
         d[1][0] == src[4] && d[1][1] == src[5] && d[1][2] == src[6] &&
@@ -1096,6 +1145,18 @@ void GXLoadNrmMtxImm(const void* mtx, u32 id) {
     d[0][0] = src[0]; d[0][1] = src[1]; d[0][2] = src[2];
     d[1][0] = src[4]; d[1][1] = src[5]; d[1][2] = src[6];
     d[2][0] = src[8]; d[2][1] = src[9]; d[2][2] = src[10];
+#else
+    if (dc_gx_state_dedup &&
+        memcmp(d[0], src + 0, sizeof(float) * 3) == 0 &&
+        memcmp(d[1], src + 4, sizeof(float) * 3) == 0 &&
+        memcmp(d[2], src + 8, sizeof(float) * 3) == 0)
+        return;
+    dc_gx_flush_if_begin_complete();
+    DIRTY(DC_GX_DIRTY_MODELVIEW);
+    memcpy(d[0], src + 0, sizeof(float) * 3);
+    memcpy(d[1], src + 4, sizeof(float) * 3);
+    memcpy(d[2], src + 8, sizeof(float) * 3);
+#endif
 }
 
 void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {

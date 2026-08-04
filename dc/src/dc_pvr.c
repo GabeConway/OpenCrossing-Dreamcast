@@ -3562,6 +3562,11 @@ void dc_pvr_fb_probe(void) {
 }
 #else
 void dc_pvr_fb_probe(void) { }
+/* Outside the `#if DC_FB_PROBE > 0` block on purpose: dc_main.c's splash calls
+ * this unconditionally, so a build with no framebuffer probe must still link.
+ * The inner `#if defined(DC_FB_PROBE) && defined(DC_FB_IMAGE)` further up only
+ * chooses between the real dump and a no-op WITHIN a probe build. */
+void dc_pvr_fb_dump_surface(const unsigned short* fb) { (void)fb; }
 #endif
 
 #else /* !DC_PVR_BACKEND — the original do-nothing seam, kept verbatim. */
@@ -3586,5 +3591,6 @@ void dc_pvr_report(void) {
     DC_LOGE("[DC/PVR] backend compiled out (DC_PVR_BACKEND=0)\n");
 }
 void dc_pvr_fb_probe(void) { }
+void dc_pvr_fb_dump_surface(const unsigned short* fb) { (void)fb; }
 
 #endif /* DC_PVR_BACKEND */
