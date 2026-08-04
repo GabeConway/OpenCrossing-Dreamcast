@@ -329,6 +329,53 @@ for those see `kb/closed.md`.
   experiments. With the fast console they are the same experiment again.
   ⚠️ Emulator only — a real coder's cable will not sync at 1.5 Mbps.
 
+## Disc and boot on real hardware (2026-08-03)
+
+- **The console is boot time, even with no cable attached.** KOS busy-waits on
+  the SCIF TX FIFO regardless. The per-asset `[DC/KEEP]` line printed 1,392
+  times = 86,357 B = **15.0 s of dead boot** at 57,600 baud, with nothing on
+  screen — the exact window in which a human cannot tell "loading" from "hung".
+  The whole log was 51.4 s. Same family as the `vprintf` trap above; the lesson
+  is that ANY per-item log on a boot path is a hardware time bomb.
+- **`pvr_init()` blanks the screen, and it used to run before the asset load.**
+  It reprograms the display controller at its own buffers, so everything after
+  it draws on black until the game's first frame. Splitting it out as
+  `dc_gx_backend_start()` and calling it after the load is what turns the gap
+  into a loading screen. The GX *state machine* still has to exist before the
+  game's first GX call — that is boot-order rule 4 — but `pvr_init()` does not.
+- **DMA is already in use for every disc read.** `fs_iso9660.c:279,829` pass
+  `dma = true`; `CDROM_READ_PIO`/`CDROM_READ_DMA` are deprecated compat
+  constants and `cdrom_read_sectors()` (no `_ex`) is not used by the VFS. Do not
+  spend a session "switching to DMA".
+- **KOS already does read-ahead, twice.** A 16 x 2048 B LRU sector cache per
+  stream (`fs_iso9660.c:211`) and a drive-level `cdrom_stream_start` to
+  end-of-file on any sector-aligned read (`:755-777`). The `3 x 128 KB` ring in
+  `dc_dvd.c`'s TODO would duplicate it for 393,216 B against a budget already
+  4.7 MB over. **What KOS cannot fix is request ORDER** — that is what
+  `DC_KEEP_SWEEP` addresses.
+- **An unaligned read costs two GD-ROM commands, not one.** A read that does not
+  start on a 2048-byte boundary makes KOS serve the leading fragment through its
+  single-sector cache, which itself calls `iso_abort_stream`. Every pager read of
+  `forest_*.arc` is unaligned by construction — the RARC `dataoff` values are
+  1120 and 1920, neither divisible by 2048.
+- **A two-pass traversal of the keep list SILENTLY DROPS ASSETS.** "Call
+  `dc_stub_keep_load()` once to count, once to record" looks obvious and is
+  wrong: some rewritten loaders keep the generator's load-once guard —
+  `src/furniture/ac_radio_test.c` has `static int radio_pal_loaded` — so the
+  second traversal skips them. Record on the single pass.
+- **`DC_CDI_PAD=1` does NOT push content to the outer edge.** Measured: padded
+  and unpadded images put the archives at identical LBAs with a constant
+  4-sector delta; all ~684 MB of padding is appended AFTER the filesystem, so
+  every game byte is on the innermost ~10 % either way. The old comment in
+  `dc/build-dc-docker.sh` claimed otherwise and has been corrected.
+- **`PADRead` samples once per LOGIC TICK, and the game's gates are EDGES.**
+  At Flycast's 22-30 FPS a human tap always straddles a sample; at hardware's
+  ~11 FPS (91 ms period) it can fall entirely between two and produce no edge.
+  `DC_PAD_NO_LATCH` turns off the 60 Hz accumulator that fixes this. Related,
+  and free: `chkButton(BUTTON_L)` auto-advances dialogue under `TARGET_PC`
+  (`m_msg_normal.c_inc:4`), so **holding the left trigger is a no-rebuild test
+  for whether input reaches the game at all.**
+
 ## Harness / emulator
 
 - **A short run is usually the HUMAN closing the emulator window, not a hang.**

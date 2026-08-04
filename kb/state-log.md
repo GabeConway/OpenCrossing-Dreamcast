@@ -10,6 +10,92 @@
 
 ---
 
+## 2026-08-03 (later) — boot time, input edges, and a splash
+
+All of this is aimed at the machine that now boots the game, where the disc is
+~500 KB/s with real seeks and Flycast's `FastGDRomLoad` hides every bit of it.
+
+### 15 seconds of boot were being spent printing
+
+`DC_LOG` fired once per kept asset — 1,392 of them, **86,357 B of console**.
+KOS busy-waits on the SCIF TX FIFO whether or not a cable is attached (the same
+mechanism that cost 8x the frame rate in `kb/traps.md`), so at 57,600 baud that
+is **15.0 s of dead boot with nothing on screen** — precisely the window in
+which a human cannot tell "loading" from "hung". The whole log was 51.4 s.
+Gated behind `-DDC_KEEP_TRACE`. Measured: console **296,122 → 214,511 B**,
+`[DC/KEEP]` lines **1,393 → 1**.
+
+### The keep list was read in source order, which is scattered
+
+From the real trace: 874,736 useful bytes over offsets 3,012,288..14,399,968 of
+a 15.6 MB file; **1,235 of 1,392 reads under 2048 B, 932 under 512 B**; 64
+backward jumps; **255 MB of seek distance for 874 KB of payload**. Only 559
+distinct sectors are wanted, in 112 runs. Modelling KOS's 16 x 2048 B sector
+cache against that order gives **~578 single-sector GD-ROM commands**.
+
+`DC_KEEP_SWEEP` records every request on one pass, sorts by
+`(rom_src, rom_off)`, and replays through a 16 KB window that always refills on
+a 2048-byte boundary. **Measured: 578 → 130 disc reads, 1,392 assets, 0
+failed.** Predicted 129.
+
+⚠️ **One pass, not two — a two-pass traversal silently drops assets.** Some
+rewritten loaders keep the generator's load-once guard
+(`src/furniture/ac_radio_test.c` has `static int radio_pal_loaded`), so a
+second traversal skips them.
+
+RAM is transient and freed before `OSInit` carves the arena: 40,960 B table +
+16,384 B window, reported by the sweep rather than guessed.
+
+### What was NOT built, and why
+
+- **DMA is already in use** at every disc call site (`fs_iso9660.c:279,829`).
+  The obvious "switch to DMA" win does not exist.
+- **KOS already does read-ahead twice** — a 16 x 2048 B sector cache and a
+  drive-level stream to end-of-file on any sector-aligned read. The
+  `3 x 128 KB` ring in `dc_dvd.c`'s TODO would duplicate it for 393,216 B
+  against a budget already 4.7 MB over. **Delete that TODO, do not implement
+  it.** What KOS cannot fix is request ORDER.
+- **Disc file order is already monotonic** for the boot access pattern, so
+  reordering buys one seek against ~578.
+- ⚠️ **`DC_CDI_PAD=1` does not push content to the outer edge** — measured
+  identical LBAs padded vs unpadded, all ~684 MB appended after the filesystem.
+  The comment claiming otherwise has been corrected.
+
+### The button latch — the strongest remaining explanation for the K.K. stop
+
+`PADRead` samples maple **once per logic tick**, and the game's gates are
+EDGES derived from a single-sample XOR. `src/padmgr.c:309-314` says the GC
+padmgr accumulated triggers between reads and that the PC port dropped it. At
+Flycast's 22-30 FPS a tap always straddles a sample; **at hardware's ~11 FPS the
+period is 91 ms and a tap can fall entirely between two**, producing no edge.
+A 60 Hz vblank handler now ORs every button into a sticky mask that `PADRead`
+consumes. Buttons only — the D-pad drives the C-stick, which is a level.
+
+**And the free hardware test, needing no rebuild:** `chkButton(BUTTON_L)`
+auto-advances dialogue under `TARGET_PC` (`m_msg_normal.c_inc:4`), and it is a
+HELD test. **Holding the left trigger at the K.K. scene decides whether input
+reaches the game at all.**
+
+Also relevant to reading that scene: the disc is *not* a sufficient explanation
+for a permanent stop — between `SCENE_MODE 0→3` and `3→4` the pager did only
+**15 reads / 1.1 MB**, ~5 s even pessimistically. And `strum_timer = 440` is
+**440 TICKS, not frames**: 7 s at 60 Hz but ~40 s at 11 FPS.
+
+### The splash, and why the screen was black afterwards
+
+Added "TechProGabe Presents..." between the Sega licence screen and the game —
+white bfont text, zero RAM (bfont is in the BIOS), any button skips, and it
+reports its own pixel count (`1206 px lit of 307200`) rather than asserting
+success, per the framebuffer rule already in `kb/traps.md`.
+
+The black gap after it was **`pvr_init()`**, which ran inside `dc_gx_init()`
+*before* the disc check and the asset load, and which reprograms the display
+controller at its own buffers. Split out as `dc_gx_backend_start()` and called
+after the assets are in; the splash is no longer cleared. `DC_SPLASH_MS` is now
+a MINIMUM on-screen time and the load happens under the text.
+
+---
+
 ## ⭐ 2026-08-03 — IT BOOTS ON REAL HARDWARE
 
 A padded CD-R burn of the `dev` build (`DC_ASSET_STUB=1`, checked-in opening
