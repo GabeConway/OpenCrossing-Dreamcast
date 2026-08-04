@@ -10,6 +10,63 @@
 #include "dc_platform.h"
 #include "dc_pvr.h"     /* dc_pvr_report(): the renderer half of the PERF line */
 
+/* ==========================================================================
+ * DC_AUDIO_HEAPLOG — the falsifier for "audiomemory can be shrunk further"
+ * ==========================================================================
+ * OFF BY DEFAULT, and it is a measurement, not a feature.
+ *
+ * WHAT IT IS FOR. tools/dcstub/make_src_shrink.py's S4 rule already takes
+ * `audiomemory` from 0x90000 to 0x76000 and its comment says DO NOT GO FURTHER,
+ * with 2,176 B of margin computed from a hand-enumerated consumer list. The
+ * next 400 KB of that heap is the single biggest untaken .bss lever left, and
+ * nobody may take it on arithmetic alone: `Nas_WaveDmaNew` (internal/system.c:431)
+ * `break`s out of its allocation loop on exhaustion and drops voices with NO
+ * diagnostic, so an over-shrunk heap is silent. This prints the heap's own
+ * bookkeeping instead of re-deriving it.
+ *
+ * HOW TO READ IT.
+ *   * `waveloads` well under 3 x `chans` means the wave-load table is not full
+ *     and the heap is NOT the binding constraint;
+ *   * any ALHeap whose used/len is near 1.0 IS at its floor — do not shrink
+ *     `audiomemory` while that holds;
+ *   * ⚠️ non-zero `emem` or `data` usage at DC_AUDIO=0 FALSIFIES the S8
+ *     argument in make_src_shrink.py's header. That argument says the whole
+ *     per-frame chain is severed with the pump, so nothing past init should
+ *     ever have allocated out of the external/data heaps. If they are non-zero,
+ *     something reaches the sequencer by a path this trace did not find, and
+ *     the S8 pool shrinks need re-deriving before they are trusted.
+ *
+ * WHY IT PRINTS UNCONDITIONALLY AT A FIXED TICK rather than waiting for a
+ * heap to look initialised: kb/traps.md, "a probe that reports a digest must
+ * report a population count next to it". A probe that stays silent when the
+ * numbers are zero is indistinguishable from a probe that was never compiled
+ * in, and zero here is a RESULT.
+ *
+ * It is gated on `s_logic_tick_count`, not `pc_frame_counter` — same file,
+ * kb/traps.md: the frameskip early-out makes pc_frame_counter jump by the skip
+ * factor and a `% N` test can stop landing on it entirely.
+ *
+ * ⚠️ This is the one place in dc/ that includes a decomp header.
+ * dc/src/dc_audio.c deliberately forward-declares `pc_audio_process_frame`
+ * rather than pull include/jaudio_NES in, and that judgement stands for shipping
+ * code. Here there is no alternative that is not worse: `AG` is a 34 KB struct
+ * whose fields this reads by name, and hand-copying its offsets (session_heap
+ * at 0x2A20, misc_heap at 0x2A5C, …) would produce a probe that silently reads
+ * the wrong words the moment audiostruct.h moves. Since the whole block is
+ * behind a flag that no shipping build sets, a header collision here can only
+ * ever break the build of someone who asked for the measurement.
+ */
+#ifdef DC_AUDIO_HEAPLOG
+#include "jaudio_NES/audiowork.h"
+/* Which logic tick to sample on. Must be after StartAudioThread()/Nas_InitAudio()
+ * and after the game has had a chance to ask for sound. 600 ticks is ~25 s at
+ * the town's measured rate — past the title screen, well inside a `--timeout 600`
+ * harness run. */
+#ifndef DC_AUDIO_HEAPLOG_TICK
+#define DC_AUDIO_HEAPLOG_TICK 600
+#endif
+#endif
+
 #define VI_TVMODE_NTSC_INT    0
 #define VI_TVMODE_NTSC_DS     1
 #define VI_TVMODE_PAL_INT     4
@@ -229,6 +286,73 @@ void VIWaitForRetrace(void) {
      * when the game is already struggling. Budgeted internally (DC_AUDIO=0
      * removes it entirely). */
     dc_audio_pump();
+
+#ifdef DC_AUDIO_HEAPLOG
+    /* ONE SHOT. See the block at the top of this file for what the numbers
+     * mean and which of them falsify what. Four lines, once, because SCIF is
+     * boot time on real hardware even with no cable attached (kb/traps.md). */
+    {
+        static int heaplog_done = 0;
+
+        if (!heaplog_done && s_logic_tick_count >= (DC_AUDIO_HEAPLOG_TICK)) {
+            /* ALHeap is { u8* base; u8* current; int length; s32 count;
+             * u8* last; } (include/jaudio_NES/audiostruct.h:74), so "used" is
+             * current - base and there is no separate high-water mark. A heap
+             * that was never set up reads 0/0, which is a reportable answer. */
+#define DC_AGH_USED(h) ((long)((h).current - (h).base))
+#define DC_AGH_LEN(h)  ((long)(h).length)
+            DC_LOGE("[DC/AUDIOHEAP] tick=%d  init=%ld/%ld  session=%ld/%ld  "
+                    "misc=%ld/%ld\n",
+                    s_logic_tick_count,
+                    DC_AGH_USED(AG.init_heap),    DC_AGH_LEN(AG.init_heap),
+                    DC_AGH_USED(AG.session_heap), DC_AGH_LEN(AG.session_heap),
+                    DC_AGH_USED(AG.misc_heap),    DC_AGH_LEN(AG.misc_heap));
+            /* emem/external/data are the FALSIFIERS: at DC_AUDIO=0 the trace
+             * in make_src_shrink.py's header says nothing past init allocates
+             * from them, so anything non-zero here means that trace is wrong. */
+            DC_LOGE("[DC/AUDIOHEAP] emem=%ld/%ld  external=%ld/%ld  "
+                    "data=%ld/%ld  szdata=%ld/%ld  szauto=%ld/%ld\n",
+                    DC_AGH_USED(AG.emem_heap),     DC_AGH_LEN(AG.emem_heap),
+                    DC_AGH_USED(AG.external_heap), DC_AGH_LEN(AG.external_heap),
+                    DC_AGH_USED(AG.data_heap),     DC_AGH_LEN(AG.data_heap),
+                    DC_AGH_USED(AG.sz_data_heap),  DC_AGH_LEN(AG.sz_data_heap),
+                    DC_AGH_USED(AG.sz_auto_heap),  DC_AGH_LEN(AG.sz_auto_heap));
+            /* ⚠️ AG.cache_heap is NOT an ALHeap — it is DataHeapstrc
+             * { size_t data_size; size_t auto_size; } (audiostruct.h:746), i.e.
+             * the CONFIGURED cache sizes with no used/len pair to report. It is
+             * printed as configuration, and the heaps it configures are
+             * data/szdata/szauto on the line above. */
+            DC_LOGE("[DC/AUDIOHEAP] cache_cfg data=%lu auto=%lu  "
+                    "misc_cfg=%lu cache_cfg=%lu  heap=%ld B\n",
+                    (unsigned long)AG.cache_heap.data_size,
+                    (unsigned long)AG.cache_heap.auto_size,
+                    (unsigned long)AG.audio_heap_info.misc_heap_size,
+                    (unsigned long)AG.audio_heap_info.cache_heap_size,
+                    (long)AG.audio_heap_size);
+            /* THE headline. `3 * num_channels` is the wave-load table's own
+             * ceiling; waveloads far below it means the heap is not what is
+             * limiting voices, so S4's "DO NOT GO FURTHER" can be revisited
+             * with a real experiment rather than an argument. */
+            /* DC_AUDIO is echoed because every number above is only
+             * interpretable against it, and the two lines end up in the same
+             * console log as a hundred others. dc/Makefile passes -DDC_AUDIO=1
+             * only in the ON case, so `defined()` is the test, not the value. */
+            DC_LOGE("[DC/AUDIOHEAP] waveloads=%lu of 3*chans=%ld  "
+                    "(count=%lu)  DC_AUDIO=%d\n",
+                    (unsigned long)AG.num_waveloads,
+                    (long)(3 * AG.num_channels),
+                    (unsigned long)AG.waveload_count,
+#if defined(DC_AUDIO) && DC_AUDIO
+                    1);
+#else
+                    0);
+#endif
+#undef DC_AGH_USED
+#undef DC_AGH_LEN
+            heaplog_done = 1;
+        }
+    }
+#endif
 
     if (vi_pre_callback) vi_pre_callback(retrace_count);
 

@@ -28,6 +28,10 @@
 #                    0 is a byte-identical revert. Needs the tree from
 #                    tools/dcstub/make_src_shrink.py; dc/build-dc.sh runs it.
 #   DC_ASSET_STUB=0  throwaway boot-bringup build with [1]-sized asset arrays
+#   DC_AUDIO=0       sound. DEFAULT OFF — it costs ~45 % of the frame rate
+#                    (dc/src/dc_audio.c). Also selects the S8 half of the
+#                    shrink tree, so it MUST match the --audio= that
+#                    tools/dcstub/make_src_shrink.py was run with.
 #   V=1              echo full compiler command lines
 # =============================================================================
 
@@ -404,6 +408,77 @@ endif
 
 ifneq ($(DC_ASSET_CENSUS),)
 DEFINES += -DDC_ASSET_CENSUS=$(DC_ASSET_CENSUS)
+endif
+
+# =============================================================================
+# DC_AUDIO — sound, and the second thing it now switches
+# =============================================================================
+# DEFAULT 0. It was already a knob, but only as an #ifndef inside
+# dc/src/dc_audio.c, reachable solely through DC_XDEFS. It is promoted to a
+# first-class variable here because it no longer affects one TU: it also
+# selects which jaudio pools tools/dcstub/make_src_shrink.py is allowed to
+# shrink (rules S8a-d, 401,216 B of .bss).
+#
+# WHY OFF. Measured over matched 600 s runs differing only by this flag:
+# FPS p50 23.5 -> 13.0. One jaudio DAC frame costs ~19.8 ms of SH-4 and yields
+# ~35 ms of audio, so synthesis needs ~57 % of the machine to stay level with
+# playback. The full argument, and why no DC_AUDIO_BUDGET_US setting rescues
+# it, is the comment block at dc/src/dc_audio.c:44.
+#
+# ⚠️ THE TWO HALVES MUST AGREE. dc/build/shrinksrc is generated HOST-side and
+# survives both `make` and a flag flip; flags.stamp forces a rebuild when this
+# changes but cannot regenerate that tree. So a stale --audio=0 tree plus
+# DC_AUDIO=1 would compile an 8-track sequencer and 8 mixer channels into a
+# build that thinks it has 256 of each. The generated TUs carry an #error for
+# exactly this case — do not "fix" that by deleting the guard; re-run the
+# generator (dc/build-dc.sh does it automatically).
+# DC_AUDIO_SCENES — WHICH scenes pay for sound.
+#
+# 45 % is a TOWN number. The town draws ~6,951 vertices/frame and never exceeds
+# 14.9 FPS; the K.K. / player-select scene draws 888 and sits AT the 30 FPS cap
+# with cycles to spare. One global switch made the cheap scene pay the
+# expensive scene's price, and a user noticed the result: K.K.'s scene opens
+# with `strum_timer = 440` (ac_npc_p_sel_schedule.c_inc:71), 7.3 s in which he
+# plays a song the game requests every tick and we render as silence.
+#
+#   DC_AUDIO_SCENES=3            bash dc/build-dc.sh   # K.K. sings, town silent
+#   DC_AUDIO=1                   bash dc/build-dc.sh   # every scene (old meaning)
+#
+# Scene modes: 0 title (also the .bss zero value, i.e. "not chosen yet"),
+# 3 K.K./player-select, 4 train intro, 9 outdoor town, 18 name entry.
+# `all`/`*` everywhere, `none`/empty nowhere. Rationale and the transition
+# design are in dc/src/dc_audio.c.
+#
+# THIS BLOCK MUST STAY ABOVE `DC_AUDIO ?= 0`. It uses ?= so that naming scenes
+# implies sound, while an explicit DC_AUDIO=0 in the environment still wins
+# (make treats an environment variable as already-defined, so ?= is a no-op
+# against it) — and so the shrink-tree keying below sees the final value.
+#
+# ⚠️ A build with sound also wants DC_XDEFS='-DDC_ARAM_AUDIO_DROP=0', or jaudio
+# synthesises from zeroed instrument samples ([NEOS_OUT] peak=0).
+DC_AUDIO_SCENES ?=
+ifneq ($(DC_AUDIO_SCENES),)
+DC_AUDIO ?= 1
+DEFINES += -DDC_AUDIO_SCENES='"$(DC_AUDIO_SCENES)"'
+endif
+
+DC_AUDIO ?= 0
+ifeq ($(DC_AUDIO),1)
+DEFINES += -DDC_AUDIO=1
+endif
+
+# DC_AUDIO_HEAPLOG=1 — one-shot dump of the jaudio heaps' own bookkeeping
+# (dc/src/dc_vi.c). Absent by default. This is the gate on shrinking
+# `audiomemory` past make_src_shrink.py's S4: Nas_WaveDmaNew drops voices
+# silently on exhaustion, so the heap has to be measured, not argued about.
+# DC_AUDIO_HEAPLOG_TICK=<N> moves the sample point (default 600 logic ticks).
+# ⚠️ This is the only dc/ TU that pulls in an include/jaudio_NES header; it does
+# so only when this flag is set.
+ifneq ($(DC_AUDIO_HEAPLOG),)
+DEFINES += -DDC_AUDIO_HEAPLOG=$(DC_AUDIO_HEAPLOG)
+endif
+ifneq ($(DC_AUDIO_HEAPLOG_TICK),)
+DEFINES += -DDC_AUDIO_HEAPLOG_TICK=$(DC_AUDIO_HEAPLOG_TICK)
 endif
 
 # DC_AUTOSTART=<N> — synthesise controller input from PADRead call N onward
@@ -818,8 +893,15 @@ EMU64_HIST_OBJ := $(OBJDIR)/src/static/libforest/emu64/emu64.c.o
 $(EMU64_HIST_OBJ): TU_POST = sh-elf-objcopy --globalize-symbol=__ZL11dl_func_tbl $@
 endif
 
+# DC_AUDIO is listed EXPLICITLY even though DEFINES already carries
+# -DDC_AUDIO=1 in the on case. DEFINES alone would still distinguish the two
+# builds, but the stamp is also the human-readable record of what a build dir
+# holds, and DC_AUDIO now decides which of two DIFFERENT scratch trees the
+# objects were compiled against. Spelling it out is what makes a mismatched
+# dc/build/shrinksrc diagnosable from the stamp instead of from a link error.
 FLAGSTAMP := $(BUILD)/flags.stamp
 FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
+             DC_AUDIO=$(DC_AUDIO) \
              DECOMP_OPT=$(DECOMP_OPT) \
              DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
 

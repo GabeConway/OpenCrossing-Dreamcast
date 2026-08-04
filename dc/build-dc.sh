@@ -7,6 +7,9 @@
 #     DC_TARGET=objs bash dc/build-dc.sh  # compile only, no link (M1 signal)
 #     DC_SRC_SHRINK=0 bash dc/build-dc.sh # kill switch for the .bss shrink pass
 #                                         # (default 1; 0 is a byte-identical revert)
+#     DC_AUDIO=1    bash dc/build-dc.sh   # sound ON (default 0; costs ~45 % FPS,
+#                                         # and gives back 401,216 B of .bss —
+#                                         # see the DC_AUDIO block in dc/Makefile)
 #     DC_CDI_PAD=1  bash dc/build-dc.sh   # padded 740 MB CDI for CD-R burns
 #     JOBS=8        bash dc/build-dc.sh
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
@@ -55,9 +58,31 @@ fi
 # It hard-errors if any of its anchored rules stops matching the vendored
 # source. That is deliberate — a silently-not-applied rewrite would produce a
 # build that looks correct and saves nothing. Do not paper over it here.
+#
+# --audio is NOT optional and NOT a default: rules S8a-d shrink jaudio pools
+# that are only dead while DC_AUDIO=0, so the tree and the build must agree.
+# Passing it here is what keeps them in step, because the tree is generated
+# before the container starts and outlives any single `make`. The generated TUs
+# also carry an #error for the mismatch — this line is the belt, that is the
+# braces, and both are wanted: the #error only fires on a tree someone built by
+# hand or left behind after editing dc/Makefile's default.
+# DC_AUDIO_SCENES implies sound, and the SHELL has to derive that, not just
+# dc/Makefile. Both the shrink tool below and the -e forward further down
+# expand ${DC_AUDIO:-0}, so leaving it unset here would push DC_AUDIO=0 into the
+# container -- and make treats an environment variable as already-defined, so
+# the Makefile's `DC_AUDIO ?= 1` inside its DC_AUDIO_SCENES block would be a
+# no-op. `DC_AUDIO_SCENES=3 bash dc/build-dc.sh` would then build a silent
+# image AND an S8-shrunk jaudio tree that disagrees with it.
+if [ -n "${DC_AUDIO_SCENES:-}" ] && [ -z "${DC_AUDIO+x}" ]; then
+    DC_AUDIO=1
+    export DC_AUDIO
+    echo "-- DC_AUDIO_SCENES='${DC_AUDIO_SCENES}' implies DC_AUDIO=1"
+fi
+
 if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
-    echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc"
-    python3 "$REPO/tools/dcstub/make_src_shrink.py"
+    echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc" \
+         "(DC_AUDIO=${DC_AUDIO:-0})"
+    python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}"
 fi
 
 ENVARGS=(
@@ -66,6 +91,13 @@ ENVARGS=(
     -e DC_CDI_PAD="${DC_CDI_PAD:-0}"
     -e DC_ASSET_STUB="${DC_ASSET_STUB:-0}"
     -e DC_SRC_SHRINK="${DC_SRC_SHRINK:-1}"
+    # Explicit :-0 rather than the forward-only form below: DC_AUDIO has a real
+    # default on both sides and they must be the same one, so the make ?= must
+    # never be the thing that decides it.
+    -e DC_AUDIO="${DC_AUDIO:-0}"
+    # Forwarded ONLY when set, unlike DC_AUDIO above: dc/Makefile derives
+    # DC_AUDIO from DC_AUDIO_SCENES with ?=, and an empty -e would make the
+    # variable "defined" inside the container and defeat that.
     -e DC_DIAG="${DC_DIAG:-0}"
     -e DC_ARENA_BYTES="${DC_ARENA_BYTES:-}"
     -e DC_ARAM_WINDOW="${DC_ARAM_WINDOW:-}"
@@ -79,10 +111,13 @@ ENVARGS=(
     -e DC_AUTOSTART_PERIOD="${DC_AUTOSTART_PERIOD:-}"
     -e DC_CONSOLE_LIMIT="${DC_CONSOLE_LIMIT:-}"
     -e DC_TEX_LOG="${DC_TEX_LOG:-}"
+    -e DC_AUDIO_HEAPLOG="${DC_AUDIO_HEAPLOG:-}"
+    -e DC_AUDIO_HEAPLOG_TICK="${DC_AUDIO_HEAPLOG_TICK:-}"
     -e DC_PVR_BATCH_LOG="${DC_PVR_BATCH_LOG:-}"
     -e DC_SCIF_FAST="${DC_SCIF_FAST:-}"
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
+[ -n "${DC_AUDIO_SCENES+x}" ] && ENVARGS+=(-e DC_AUDIO_SCENES="$DC_AUDIO_SCENES")
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default
 # (e.g. DECOMP_OPT would become empty and KOS_CFLAGS' own -O2 would win).

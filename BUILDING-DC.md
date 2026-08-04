@@ -117,8 +117,12 @@ colima (4 cores), `-j4`:
 | `DC_PVR_BATCH_LOG` | unset | `<N>` → dump every renderer batch's state on every Nth frame. Set it to the **same** N as `DC_FB_PROBE` so the lines describe the captured frame. Fields: `ac=` alpha compare asked for, `cut=` treated as a cutout, `cu=` colour/alpha update, `tm=` stage 0/1 texmap (`255` = `GX_TEXMAP_NULL`), `st=` TEV stage count, `t1=` whether texmap1 binds a *different* image, plus screen bbox, z and uv ranges |
 | `DC_ARAM_TBL_PROBE` | unset (0) | `1` → log every 64-byte ARAM read. That size is uniquely `mMsg_Get_BodyParam`'s resource-TABLE fetch (`m_msg_main.c_inc:284,289`), and MESSAGE (works) and STRING/SELECT (broken) both use it, so one run gives the control and the failure side by side. Decision table is in the comment at the probe |
 | `DC_ARAM_AUDIO_DROP` | `1` | `0` → stop discarding jaudio's ARAM half, so `audiorom.img` becomes disc-backed and synthesis has real samples. **Unproven and risky** — jaudio streams ~8.5 MB *before* `JW_Init2` mounts `forest_1st.arc`, so it can exhaust the extent table and make archive content anonymous. A/B the `[DC/ARAM] LRU` line: `LOST=0`, `ext` under the cap, `mapped=` unchanged |
-| `DC_AUDIO` | `1` | `0` → no output device, no synthesis pump. Audio is ON by default but currently produces silence (see `kb/RESUME.md` item 8) |
-| `DC_AUDIO_BUDGET_US` | `4000` | per-frame ceiling on jaudio synthesis; on exhaustion the pump drops an audio frame rather than stalling the game loop |
+| `DC_AUDIO` | `0` | `1` → open the AICA output device and run the jaudio synthesis pump. **Audio works and costs ~45 % of the frame rate** (FPS p50 23.5 off / 13.0 on, matched 600 s runs), which is why it is off. See **Audio: the scene gate** below before setting it |
+| `DC_AUDIO_SCENES` | unset (= `all` when `DC_AUDIO=1`) | which `sou_scene_mode` values run synthesis, e.g. `3`, `0,3,18`, `all`, `none`. **Setting it implies `DC_AUDIO=1`.** This is the knob you want — see below |
+| `DC_AUDIO_BUDGET_US` | `0` (off) | ⚠️ **opt-in, and measured WORSE.** The per-frame predictive ceiling on synthesis. The three matched runs are 23.5 (off) / 13.0 (audio, no budget) / **10.9 (audio + budget, and it reached a shallower scene: 4 vs 18)**. It loses because the loop must override the budget when the ring is starving, and at ~19.8 ms/DAC frame the ring starves essentially always, so the override becomes the normal path. Kept only to reproduce that run. Reach it with `DC_XDEFS` |
+| `DC_AUDIO_MAX_FRAMES` | `2` | hard cap on jaudio DAC frames per pump — an integer bound with no measurement and no override, so unlike the budget it cannot feed back on itself. It binds only on the first pump after the scene gate arms, where an empty ring would otherwise ask for three frames (~59 ms) in one call. `DC_XDEFS` |
+| `DC_AUDIO_SCENE_SETTLE` | `2` | consecutive pumps a new gate answer must survive before it is acted on. `0` disables the debounce. `DC_XDEFS` |
+| `DC_AUDIO_FADE_STEP` | `1` | output-gain ramp in Q8 steps per stereo frame on each gate transition; `1` ≈ 8 ms at 32 kHz. Raise to fade faster, at the cost of an audible edge. `DC_XDEFS` |
 | `DC_AUDIO_HEADROOM` | `2048` | samples kept free at the top of the ring. ⚠️ Do **not** gate the pump on "ring less than half full" — a stalled consumer then leaves it half full forever and synthesis never runs (measured deadlock, `synth_frames=0`) |
 | `DC_KEEP_SWEEP` | `1` | `0` → load the `DC_STUB_KEEP` assets in source order, one `fs_seek`+`fs_read` each (the pre-2026-08-03 behaviour). On `1` the requests are recorded on one pass, sorted by `(rom_src, rom_off)` and replayed through a sector-aligned window: **578 → 130 disc reads** for 1,392 assets. Hardware-only win — Flycast's `FastGDRomLoad` hides it, so A/B the `reads=` count in the `[DC/KEEP] sweep:` line, not the clock |
 | `DC_KEEP_SWEEP_WIN` | `16384` | sweep window bytes. Modelled: 8 KB → 193 reads, 16 KB → 129, 32 KB → 89, for +1.6/+2.1/+2.9 MB read. 16 KB is the knee. Transient RAM, freed before the arena is carved |
@@ -129,6 +133,70 @@ colima (4 cores), `-j4`:
 | `DC_SCIF_FAST` | unset | `1` → raise the console from KOS's 57,600 baud to **1,562,500** (~5.8 KB/s → ~150 KB/s), the rate the harness selftest has used since M0. ⚠️ **Emulator only** — a real coder's cable will not sync at 1.5 Mbps and a hardware build with this set has no console and no crash dump. What it buys: a `DC_FB_IMAGE` screenshot drops from ~35 s to ~1.4 s, so a screenshot run stops being a different experiment from a progression run |
 | `DC_XDEFS` | unset | raw extra `-D` flags, appended last. How the renderer kill switches are reached — see below |
 | `V` | unset | `V=1` echoes full compiler command lines |
+
+### Audio: the scene gate
+
+**The cost of sound is not the same in every scene, but until now the switch
+was.** One jaudio DAC frame is ~19.8 ms of SH-4 for ~35 ms of audio, so
+synthesis needs ~57 % of the machine to stay level. Measured 2026-08-04:
+
+| scene | `sou_scene_mode` | vertices/frame | FPS, audio off |
+|---|---|---|---|
+| K.K. / player-select | 3 | 888 | 29.9 — **at the frame cap**, `gx=4.1 ms` |
+| outdoor town | 9 | ~6,951 | 14.9, and never higher, `gx≈13 ms` |
+
+The town cannot afford audio. The K.K. scene has headroom, and it is the scene
+where the silence is most obviously wrong: `ac_npc_p_sel_schedule.c_inc:71`
+opens it with `p_sel->strum_timer = 440` — **7.3 s of K.K. strumming a guitar**
+with `[TRG_VOL] slot=0 id=0x044D vol=1.000` firing every tick, rendered silent.
+It reads as "silent loading". It is not loading.
+
+```bash
+# sound in the K.K. scene only, silent everywhere else
+DC_AUDIO_SCENES=3 DC_XDEFS='-DDC_ARAM_AUDIO_DROP=0' bash dc/build-dc.sh
+```
+
+Modes: `0` title (**also the `.bss` zero value — "no scene chosen yet"**, so
+listing 0 arms audio from the first pump), `3` K.K./player-select, `4` train
+intro, `9` outdoor town, `18` name entry. Separators may be `,`, `:` or space.
+`all`/`*` is everywhere (what `DC_AUDIO=1` has always meant); `none` or an empty
+list means the SPU device is never even opened, which is the runtime equivalent
+of `DC_AUDIO=0`.
+
+**⚠️ Also pass `-DDC_ARAM_AUDIO_DROP=0`.** Otherwise the ARAM pager throws
+`audiorom.img` away and jaudio synthesises from zeroed samples — the run is
+silent, at full CPU cost, and every audio counter still looks healthy.
+
+**What it does and does not do.** The gate skips **synthesis**; it never stops
+the stream. `snd_stream` keeps one AICA channel keyed on with a looping buffer,
+so "stop feeding it" is not silence — it is the last ~128 ms looping forever.
+The pump therefore keeps polling in a disarmed scene, the callback zero-fills an
+empty ring, and the channel plays digital silence at a cost of two G2 accesses
+and an 8 KB `memset`. Stopping and restarting the stream per scene change was
+rejected because both halves travel the SH-4→ARM command queue, and that queue
+is only serviced because `dc_aica_clock_kick()` is hand-driving `AICA_MEM_CLOCK`
+past a Timer-A FIQ that never fires; a dropped start would leave the console
+silent for the rest of the run with no path back.
+
+**Why this is not the `DC_AUDIO_BUDGET_US` mistake repeated.** The budget
+decided from ring fill, its decision changed ring fill, and its anti-gap
+override closed the loop — it scored *worse* than no budget at all. The gate's
+input is `sou_scene_mode`, which nothing in the audio path can influence and
+which the game writes only at scene construction. The answer is therefore
+constant for a whole scene, cannot oscillate, and has **no override**: a
+disarmed scene stays disarmed even while the ring starves, because a starving
+ring in a disarmed scene is the intended state.
+
+**Reading a run.** `[DC/AUDIO] gate scene=… armed=… arms=… disarms=… gain=…`
+every 600 pumps, plus one line per transition. `arms=0` with a `[SCENE_MODE]`
+edge into a listed scene means the gate never fired; check the mask on the
+`[DC/AUDIO] scene gate:` line printed at `AIInit`.
+
+**Unmeasured.** The K.K.-scene FPS *with* audio armed has not been run. The
+scene is at the 30 FPS cap today, and one DAC frame per game frame is ~19.8 ms
+of a ~33 ms budget, so expect it to drop off the cap — somewhere in the 20s, not
+the 14.9 the town pays. A/B it with `run_report.py --vs` and read `arms=`,
+`fps_p50` and `deepest_scene` together.
 
 ### Renderer kill switches (`DC_XDEFS`)
 

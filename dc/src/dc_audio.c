@@ -72,17 +72,67 @@ static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
  * costs roughly 45 % of the frame rate.** Everything needed for it is in the
  * tree and working; kb/audio-cpu-cost.md is where the per-voice budget belongs.
  *
- * DC_AUDIO_BUDGET_US caps how long one pump may spend in synthesis. */
+ * ==========================================================================
+ * ...BUT THE 45 % IS A TOWN NUMBER, AND ONE SWITCH MADE EVERY SCENE PAY IT
+ * ==========================================================================
+ * MEASURED 2026-08-04, same build, two scenes:
+ *
+ *   scene                          verts/frame   FPS            gx=
+ *   K.K. / player-select (mode 3)      888       29.9 (capped)  4.1 ms
+ *   town (mode 9)                    ~6,951      14.9, never up  ~13 ms
+ *
+ * The K.K. scene sits AT THE FRAME CAP with cycles to spare; the town has
+ * none. A single compile-time switch forced the cheap scene to buy the
+ * expensive scene's price, so it was set to 0 and the game went silent
+ * everywhere — including the one place a human noticed:
+ *
+ *   ac_npc_p_sel_schedule.c_inc:71 opens the player-select scene with
+ *   `p_sel->strum_timer = 440`. At 60 logic Hz that is **7.3 seconds** of K.K.
+ *   strumming a guitar, with `[TRG_VOL] slot=0 id=0x044D vol=1.000` firing
+ *   every tick, and we render silence. It was reported as "silent loading,
+ *   that pause is very odd". It is not loading. It is a song we do not play.
+ *
+ * DC_AUDIO_SCENES makes the switch per-scene. See the block above
+ * dc_audio_gate_update() for why a SCENE gate is a fundamentally different
+ * object from the per-frame time budget that already failed. */
 #ifndef DC_AUDIO
 #define DC_AUDIO 0
 #endif
-/* How long ONE pump may spend in jaudio synthesis. This is now a real cap (see
- * the predictive loop in dc_audio_pump), so it is a direct FPS-vs-audio dial:
- * measured cost is ~25.7 ms per DAC frame, and the town frame is ~43 ms, so
- * 12,000 us buys roughly half a DAC frame per pump on average and keeps audio
- * from owning the machine. Raise it for smoother sound and fewer FPS. */
+
+/* ==========================================================================
+ * DC_AUDIO_BUDGET_US NOW DEFAULTS TO 0 (OFF), AND THAT IS A CORRECTION
+ * ==========================================================================
+ * Re-read the three matched 600 s runs in kb/RESUME.md §3:
+ *
+ *   audio off                            FPS p50 23.5   deepest scene 18
+ *   audio on, no budget                  FPS p50 13.0   deepest scene 18
+ *   audio on + the predictive budget     FPS p50 10.9   deepest scene 4
+ *
+ * The 13.0 row is the FREE-RUNNING pump — headroom-stopped only. The 10.9 row
+ * is this budget. It shipped as the default anyway, so `-DDC_AUDIO=1` has been
+ * building the measured-WORSE of the two configurations. Defaulting it to 0
+ * restores the 13.0 configuration; >0 re-arms the predictive loop as an A/B
+ * knob and nothing else.
+ *
+ * WHY IT LOSES, since it is not obvious: the loop must override the budget
+ * when the ring is starving (a late sample beats a gap), and at ~19.8 ms per
+ * DAC frame the ring starves essentially always, so the override IS the normal
+ * path — the budget adds a timer read and an EWMA to a decision it never gets
+ * to make, and holds the ring pinned at DC_AUDIO_MIN_FILL where every hiccup
+ * is an underrun. It is a control loop whose input (ring fill) is a function of
+ * its own output. That feedback is the failure; see dc_audio_gate_update(). */
 #ifndef DC_AUDIO_BUDGET_US
-#define DC_AUDIO_BUDGET_US 12000
+#define DC_AUDIO_BUDGET_US 0
+#endif
+/* THE HARD CAP THAT REPLACES THE BUDGET: at most this many jaudio DAC frames
+ * per pump. Unlike the budget it takes no measurement, has no override, and
+ * therefore cannot enter a feedback loop — it is a straight integer bound on
+ * the worst-case pump. One frame is ~19.8 ms of SH-4 for ~35 ms of audio, so 2
+ * bounds a pump at ~40 ms; it only ever binds on the FIRST pump after the gate
+ * arms, when the ring is empty and the headroom stop would otherwise ask for
+ * three frames (~59 ms) in one call and drop a visible frame on scene entry. */
+#ifndef DC_AUDIO_MAX_FRAMES
+#define DC_AUDIO_MAX_FRAMES 2
 #endif
 /* Below this many samples in the ring, the budget is ignored and a frame is
  * synthesised anyway: a late sample beats a gap. One jaudio DAC frame is
@@ -97,6 +147,59 @@ static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
 #define DC_AUDIO_HEADROOM 2048
 #endif
 
+/* ==========================================================================
+ * DC_AUDIO_SCENES — WHICH SCENES PAY FOR SOUND
+ * ==========================================================================
+ * A comma/colon/space separated list of `sou_scene_mode` values, e.g.
+ *
+ *   DC_AUDIO_SCENES=3        the K.K. / player-select scene only
+ *   DC_AUDIO_SCENES=0,3,18   + title and name entry
+ *   DC_AUDIO_SCENES=all      every scene (what -DDC_AUDIO=1 has always meant)
+ *   DC_AUDIO_SCENES=none     nowhere; the output device is never even opened
+ *
+ * The default is "all", so a plain -DDC_AUDIO=1 build is unchanged, and DC_AUDIO
+ * still defaults to 0, so a default build is unchanged. Both halves of today's
+ * behaviour survive untouched; you have to ask for the new one.
+ *
+ * Parsed ONCE, in AIInit, into a 32-bit mask. Runtime cost of the gate is a
+ * shift and a test against a byte the game already maintains. Modes run 0..18
+ * (the largest mBGMPsComp_scene_mode() argument in all of src/ is 18), so 32
+ * bits is the whole space with room to spare; anything >= 32 in the list is
+ * rejected loudly rather than silently wrapping into someone else's bit.
+ *
+ * KILL SWITCHES, in order of bluntness:
+ *   -DDC_AUDIO=0                     the whole subsystem compiles out (default)
+ *   -DDC_AUDIO_SCENES=none           linked, but no device and no synthesis
+ *   -DDC_AUDIO_SCENES=all            the pre-gate behaviour, verbatim
+ *   -DDC_AUDIO_SCENE_SETTLE=0        no debounce on the gate
+ */
+#ifndef DC_AUDIO_SCENES
+#define DC_AUDIO_SCENES "all"
+#endif
+
+/* Consecutive pumps a new answer must survive before the gate acts on it.
+ *
+ * sou_scene_mode is written only by Na_SceneMode (game64.c_inc:509) at scene
+ * construction, so it is already constant for the life of a scene and this
+ * should never fire. It is two pumps of insurance against a transition that
+ * writes the variable more than once on its way to the value it settles on —
+ * which m_field_make.c:1292-1362 makes plausible, since the mode is chosen by a
+ * chain of ifs and several arms call mBGMPsComp_scene_mode() with different
+ * values. Two pumps is ~70 ms in the town, ~33 ms in K.K.: below noticing,
+ * above one frame of transient. 0 disables it. */
+#ifndef DC_AUDIO_SCENE_SETTLE
+#define DC_AUDIO_SCENE_SETTLE 2u
+#endif
+
+/* Output-gain ramp, in Q8 steps per stereo frame, applied in the stream
+ * callback when the gate flips. 1 step per frame is 256 frames = ~8 ms at
+ * 32 kHz / ~11.6 ms at 22.05 kHz — enough to turn a waveform step into a ramp,
+ * short enough that no note is audibly clipped. See the ramp comment in
+ * dc_audio_stream_cb. */
+#ifndef DC_AUDIO_FADE_STEP
+#define DC_AUDIO_FADE_STEP 1
+#endif
+
 #if DC_AUDIO && !defined(DC_HOST_STUB)
 static snd_stream_hnd_t s_hnd = SND_STREAM_INVALID;
 #else
@@ -107,6 +210,21 @@ static u32 s_pump_calls = 0, s_pump_frames = 0;
 static u32 s_pump_budget_hits = 0, s_pump_usec = 0;
 static u32 s_poll_fail = 0;
 static u32 s_synth_avg_us = 0;   /* EWMA of one pc_audio_process_frame() */
+
+/* THE OUTPUT GAIN IS OWNED BY THE CALLBACK, THE TARGET BY THE PUMP, and that
+ * split is the whole thread-safety argument. The pump writes s_gain_tgt and
+ * nothing else; the callback writes s_gain_q8 and ring_read_pos and nothing
+ * else. Single-producer/single-consumer on every word, so the ramp is correct
+ * whether or not KOS ever runs the callback off our thread (today it does not —
+ * snd_stream_poll() calls it synchronously from dc_audio_pump).
+ *
+ * BOTH START AT ZERO, i.e. muted, and only the scene gate ever raises the
+ * target. That makes the fail-safe direction silence: if the gate never arms —
+ * DC_AUDIO_SCENES=none, or a scene that is not in the list, or a gate that
+ * somehow never runs — the callback emits zeros rather than whatever happens to
+ * be in the ring. */
+static volatile s16 s_gain_q8  = 0;     /* current gain, Q8: 256 = unity */
+static volatile s16 s_gain_tgt = 0;     /* what the callback ramps toward */
 
 #if DC_AUDIO && !defined(DC_HOST_STUB)
 /* THE AICA PLAY POSITION, because every other counter is ambiguous.
@@ -253,6 +371,153 @@ static void dc_aica_clock_kick(void) {
     }
 }
 #endif /* DC_AICA_CLOCK_KICK */
+
+/* ==========================================================================
+ * THE SCENE GATE — and why it is not the per-frame budget wearing a hat
+ * ==========================================================================
+ * The budget (DC_AUDIO_BUDGET_US, above) failed for a structural reason, not a
+ * tuning one, and any replacement has to differ structurally or it will fail
+ * the same way. The budget was a CONTROL LOOP WHOSE INPUT IT CONTROLLED: it
+ * decided from ring fill, its decision changed ring fill, and its own
+ * anti-gap override (synthesise anyway when fill < MIN_FILL) turned the loop
+ * positive. Below a certain machine speed there is no stable point, so it
+ * re-decided every pump and settled on "synthesise", which is why the budgeted
+ * run scored WORSE than the unbudgeted one (10.9 vs 13.0 FPS) and reached a
+ * shallower scene (4 vs 18).
+ *
+ * This gate's input is EXOGENOUS. `sou_scene_mode` (game64.c_inc:504) is the
+ * game's own scene state, written only by Na_SceneMode (:509) at scene
+ * construction. Nothing this file does can change it. So:
+ *
+ *   - the answer is constant for the entire life of a scene,
+ *   - it cannot oscillate, because nothing in the audio path feeds back into it,
+ *   - and there is no override, anywhere: a disarmed scene stays disarmed even
+ *     if the ring is starving, because a starving ring in a disarmed scene is
+ *     not a fault, it is the point.
+ *
+ * That is the whole difference. "Skip work when we are running out of time" is
+ * the shape that failed; "in THIS scene we have measured that we can afford it,
+ * and in that one we have measured that we cannot" is a decision made once,
+ * from evidence that exists before the frame starts.
+ *
+ * ⚠️ sou_scene_mode is a zero-initialised u8 in .bss, so mode 0 is
+ * indistinguishable from "Na_SceneMode has never been called". Listing 0 in
+ * DC_AUDIO_SCENES therefore arms audio from the very first pump, before the
+ * game has chosen a scene at all. That is harmless — pc_audio_process_frame()
+ * returns immediately until pc_audio_initialized (audiothread.c:93) — but it is
+ * the reason 0 is not in any recommended list.
+ *
+ * dc/ reads the symbol directly: `8c900888 B _sou_scene_mode` in the linked
+ * ELF, an ordinary non-static global, so this needs no src/ edit (CLAUDE.md §1)
+ * and no interposition. dc_pad.c's DC_AUTOWALK_SCENE gate reads it the same way.
+ * ========================================================================== */
+extern u8 sou_scene_mode;
+
+#define DC_AUDIO_SCENE_ALL 0xFFFFFFFFu
+
+/* DC_AUDIO_SCENES IS A STRING, AND THIS MAKES THAT A BUILD ERROR RATHER THAN A
+ * WILD POINTER. `DC_XDEFS='-DDC_AUDIO_SCENES=3'` — the quoting anyone would
+ * type first — expands to the integer 3, which C is happy to pass to a
+ * `const char*` parameter with nothing worse than a warning, and then the
+ * parser dereferences address 3 during AIInit. Initialising a char array from
+ * it is an ERROR for every non-string form, so the mistake cannot reach a
+ * console. dc/Makefile's DC_AUDIO_SCENES knob adds the quotes for you; through
+ * DC_XDEFS you must write -DDC_AUDIO_SCENES='"3"' yourself. */
+static const char s_scene_list[] = DC_AUDIO_SCENES;
+
+static u32 s_scene_mask = 0;          /* parsed from DC_AUDIO_SCENES in AIInit */
+static u8  s_armed = 0;               /* is synthesis running right now?       */
+static u8  s_settle_want = 0;         /* the answer being debounced            */
+static u32 s_settle_n = 0;
+static u32 s_gate_arms = 0, s_gate_disarms = 0;
+
+/* Parse once, at AIInit. Separators are anything that is not a digit, so
+ * "0,3,18", "0:3:18" and "0 3 18" all work; the ':' form matches DC_STUB_KEEP.
+ * Out-of-range entries are reported rather than wrapped — 1u<<33 is UB on SH-4
+ * and would otherwise arm some unrelated scene. */
+static u32 dc_audio_parse_scenes(const char* s) {
+    u32 mask = 0;
+
+    if (s == NULL) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '\0') return 0;                       /* "" == none */
+    if (*s == '*') return DC_AUDIO_SCENE_ALL;
+    if (*s == 'a' || *s == 'A') return DC_AUDIO_SCENE_ALL;   /* "all" */
+    if (*s == 'n' || *s == 'N') return 0;                    /* "none" */
+
+    while (*s) {
+        if (*s >= '0' && *s <= '9') {
+            u32 v = 0;
+            while (*s >= '0' && *s <= '9') { v = v * 10u + (u32)(*s - '0'); s++; }
+            if (v < 32u) {
+                mask |= 1u << v;
+            } else {
+                DC_LOGE("[DC/AUDIO] DC_AUDIO_SCENES: scene %u out of range "
+                        "(0..31) — ignored\n", (unsigned)v);
+            }
+        } else {
+            s++;                                    /* separator */
+        }
+    }
+    return mask;
+}
+
+static int dc_audio_scene_wants(void) {
+    u32 m = (u32)sou_scene_mode;
+    if (m >= 32u) return 0;
+    return (int)((s_scene_mask >> m) & 1u);
+}
+
+/* Runs once per pump, before any synthesis. Returns the CURRENT arm state.
+ *
+ * The debounce (DC_AUDIO_SCENE_SETTLE) is the only per-pump state here, and it
+ * is deliberately not a hysteresis on cost or fill — it is a hysteresis on the
+ * scene NUMBER, so it cannot become the feedback loop described above. */
+static int dc_audio_gate_update(void) {
+    int want = dc_audio_scene_wants();
+
+    if ((u8)want == s_armed) {          /* nothing to decide */
+        s_settle_n = 0;
+        return (int)s_armed;
+    }
+    if ((u8)want != s_settle_want) {    /* a new answer: restart the debounce */
+        s_settle_want = (u8)want;
+        s_settle_n = 0;
+    }
+    if (++s_settle_n < (u32)(DC_AUDIO_SCENE_SETTLE))
+        return (int)s_armed;
+
+    s_armed = (u8)want;
+    s_settle_n = 0;
+
+    if (s_armed) {
+        /* DROP THE RESIDUAL BEFORE THE FIRST SYNTHESIS. The ring has been
+         * draining at gain 0 for the whole silent scene, so rp == wp already in
+         * every realistic case and this is belt-and-braces for a disarm/arm pair
+         * shorter than one drain. It is the one place the pump touches
+         * ring_read_pos; the worst case if KOS ever moves the callback onto its
+         * own thread is that one callback's worth of ALREADY-MUTED samples is
+         * skipped, which is inaudible by construction.
+         *
+         * It must happen here and not via a flag consumed by the callback: the
+         * callback next runs at the snd_stream_poll() at the BOTTOM of this
+         * pump, i.e. after the synthesis below has already pushed the new
+         * samples, and a flush there would throw those away instead. */
+        ring_read_pos = ring_write_pos;
+        s_gain_tgt = 256;               /* fade in; see the ramp in the callback */
+        s_gate_arms++;
+        DC_LOGE("[DC/AUDIO] scene %u: ARMED (synthesis on, ~19.8 ms/DAC frame)\n",
+                (unsigned)sou_scene_mode);
+    } else {
+        /* No stop, no teardown — only the target moves. The stream stays up and
+         * the pump keeps polling; see the comment at the top of dc_audio_pump. */
+        s_gain_tgt = 0;
+        s_gate_disarms++;
+        DC_LOGE("[DC/AUDIO] scene %u: DISARMED (synthesis off, stream stays up)\n",
+                (unsigned)sou_scene_mode);
+    }
+    return (int)s_armed;
+}
 #endif
 typedef void (*AIDMACallback)(void);
 static AIDMACallback ai_dma_callback = NULL;
@@ -335,8 +600,54 @@ static void* dc_audio_stream_cb(int hnd, int req, int* done) {
     copy = (avail < total) ? avail : total;
     copy &= ~1;
 
-    for (i = 0; i < copy; i++)
-        out[i] = ring_buffer[(rp + i) & RING_BUF_MASK];
+    /* ==================================================================
+     * THE GAIN RAMP — the last point before the SPU, which is why it is here
+     * ==================================================================
+     * The scene gate flips synthesis on and off mid-run, and a hard cut on
+     * either edge is a step in the waveform, i.e. a click, on every scene
+     * change. Fading the RING instead would be too late: snd_stream has
+     * already copied up to DC_AUDIO_STREAM_BYTES of it into SPU RAM, and
+     * those samples are out of reach. This callback is the last place the
+     * SH-4 owns the bytes, so the ramp lives here and covers everything not
+     * already committed to the AICA.
+     *
+     * Three paths, cheapest first, because this runs per sample:
+     *   unity    — the steady armed case: the original copy, untouched.
+     *   muted    — the steady disarmed case: no read of the ring at all, just
+     *              a memset, but rp still advances so the residual drains.
+     *   ramping  — only for DC_AUDIO_FADE_STEP-sized transitions, ~8 ms each.
+     *
+     * ⚠️ BEST-EFFORT ON THE DISARM EDGE. If the ring is empty when the gate
+     * disarms — and the ring is empty most of the time, which is the whole
+     * measurement in kb/RESUME.md §3 — there is nothing left to fade and the
+     * SPU plays out its last buffer at full volume before it hears silence.
+     * The fix for that is snd_stream_stop(), which this file deliberately does
+     * not call; see dc_audio_pump. */
+    {
+        int g = (int)s_gain_q8;
+        const int tgt = (int)s_gain_tgt;
+
+        if (g == 256 && tgt == 256) {
+            for (i = 0; i < copy; i++)
+                out[i] = ring_buffer[(rp + i) & RING_BUF_MASK];
+        } else if (g == 0 && tgt == 0) {
+            memset(out, 0, (size_t)copy * sizeof(s16));
+        } else {
+            const int step = (DC_AUDIO_FADE_STEP) > 0 ? (DC_AUDIO_FADE_STEP) : 1;
+            for (i = 0; i < copy; i += 2) {          /* one step per stereo frame */
+                if (g < tgt)      { g += step; if (g > tgt) g = tgt; }
+                else if (g > tgt) { g -= step; if (g < tgt) g = tgt; }
+                out[i]     = (s16)(((int)ring_buffer[(rp + i)     & RING_BUF_MASK] * g) >> 8);
+                out[i + 1] = (s16)(((int)ring_buffer[(rp + i + 1) & RING_BUF_MASK] * g) >> 8);
+            }
+            /* Nothing to ramp THROUGH: the ring was empty this call, so both
+             * ends of the fade are silence and there is no step to smooth.
+             * Snap, or the gain never reaches its target on a starving ring and
+             * the two fast paths above are never taken again. */
+            if (copy == 0) g = tgt;
+            s_gain_q8 = (s16)g;
+        }
+    }
     if (copy < total)
         memset(&out[copy], 0, (size_t)(total - copy) * sizeof(s16));
 
@@ -366,6 +677,22 @@ void AIInit(u8* stack) {
      *     get_data(hnd, needed_bytes, &got_bytes) — despite the `smp_req` name
      *     the unit is BYTES, both in and out.
      * dc_audio_stream_cb already matched that contract exactly. */
+
+    /* THE SCENE LIST IS PARSED BEFORE THE DEVICE IS OPENED, because an empty
+     * list has to cost nothing. DC_AUDIO_SCENES=none must be indistinguishable
+     * from DC_AUDIO=0 at runtime — no SPU driver, no 2x8192 B of SPU RAM, no
+     * per-frame poll — or "turn it off" would not be a real kill switch. */
+    s_scene_mask = dc_audio_parse_scenes(s_scene_list);
+    if (s_scene_mask == 0u) {
+        DC_LOGE("[DC/AUDIO] DC_AUDIO_SCENES=\"%s\" selects no scene — "
+                "device not opened, synthesis never runs\n", s_scene_list);
+        audio_open = 1;
+        return;
+    }
+    DC_LOGE("[DC/AUDIO] scene gate: DC_AUDIO_SCENES=\"%s\" mask=%08X settle=%u\n",
+            s_scene_list, (unsigned)s_scene_mask,
+            (unsigned)(DC_AUDIO_SCENE_SETTLE));
+
     if (snd_stream_init_ex(2, DC_AUDIO_STREAM_BYTES) < 0) {
         DC_LOGE("[DC/AUDIO] snd_stream_init FAILED — silent run\n");
     } else {
@@ -493,19 +820,71 @@ void pc_audio_start_producer_thread(void) {
  * BUDGETED, not free-running. The town already runs at ~9 FPS, so synthesis is
  * capped per frame and simply drops an audio frame when it runs out — the game
  * loop must never stall on audio. DC_AUDIO_BUDGET_US tunes it, DC_AUDIO=0
- * removes the whole thing. */
+ * removes the whole thing.
+ *
+ * ==========================================================================
+ * THE GATE SKIPS SYNTHESIS ONLY. THE STREAM IS NEVER STOPPED. WHY:
+ * ==========================================================================
+ * 1. **"Stop pumping" is not silence, it is a buzz.** snd_stream keeps ONE AICA
+ *    channel keyed on with a LOOPING sample and rewrites the buffer underneath
+ *    it (snd_stream.c's play/write positions). Stop feeding it and it does not
+ *    go quiet — it loops the last DC_AUDIO_STREAM_BYTES forever, ~128 ms of the
+ *    same fragment, which is a far worse artefact than the silence we are
+ *    replacing. So the poll MUST keep running; the callback then zero-fills an
+ *    empty ring and the channel plays digital silence.
+ *
+ * 2. **snd_stream_stop()/start() per scene change is the alternative, and it is
+ *    the one that can wedge.** Both go through the SH-4 -> ARM command queue,
+ *    and that queue is only serviced because dc_aica_clock_kick() above is
+ *    hand-driving AICA_MEM_CLOCK from the SH-4 — the ARM7's Timer-A FIQ is
+ *    never delivered, so its main loop is spinning in timer_wait(10) except
+ *    when we release it. A stop/start pair therefore depends on the wedge
+ *    workaround being armed at exactly the right instant, twice per scene
+ *    change; a dropped start leaves the channel keyed off for the rest of the
+ *    run with no path back, and a dropped stop leaves it looping. A pop, a
+ *    stuck note or a re-wedged ARM7 on every scene change would be worse than
+ *    silence, which is the bar this had to clear.
+ *
+ * 3. **It costs essentially nothing to keep running.** The non-synthesis half
+ *    of this function is two G2 accesses (the clock kick) plus
+ *    snd_stream_poll(), which early-returns unless the AICA has drained half a
+ *    buffer and otherwise copies at most 8 KB. Against 19.8 ms per DAC frame,
+ *    gating synthesis alone captures effectively the entire saving.
+ *
+ * 4. **jaudio does not need a clean stop, because this pump has never been a
+ *    clean caller.** pc_audio_process_frame() (audiothread.c:92) drains
+ *    `intcount` DSP subframes and calls Jac_UpdateDAC; it is already invoked at
+ *    whatever irregular rate the game loop happens to run at, from 30 Hz down
+ *    to 9 Hz in the town, and it holds no state that expires. Disarming makes
+ *    the gap longer, not different in kind. The one visible consequence is that
+ *    the sequencer stops ticking, so the SE slot table stops freeing itself
+ *    ([TRG_SE] NO FREE — Nap_ReadSubPort returns -1 while the group is
+ *    disabled, game64.c_inc:1026 tests !p5) — which is exactly today's
+ *    DC_AUDIO=0 behaviour in every scene, so a disarmed scene is no worse off
+ *    than the shipping default. */
 void dc_audio_pump(void) {
 #if DC_AUDIO && !defined(DC_HOST_STUB)
     u64 t0;
     int frames = 0;
+    int armed;
 
     if (!audio_open) return;
+    /* DC_AUDIO_SCENES selected nothing: AIInit never opened a device, so there
+     * is no stream to poll and no ARM7 to keep alive. Cost of a linked-in but
+     * unselected audio subsystem is this compare. */
+    if (s_scene_mask == 0u) return;
 
 #if DC_AICA_CLOCK_KICK
     /* Before anything else: if the ARM7 is wedged, nothing downstream of it can
      * make progress, and every counter in this file reads as a ring bug. */
     dc_aica_clock_kick();
 #endif
+
+    /* THE SCENE DECISION, once per pump, before any work is committed. It is
+     * cheap enough to re-ask every pump (a shift and a test) and re-asking is
+     * what makes the transition prompt, but the ANSWER is a property of the
+     * scene, not of the frame — see dc_audio_gate_update(). */
+    armed = dc_audio_gate_update();
 
     t0 = dc_time_us();
     /* Fill toward the TOP of the ring, not the middle.
@@ -519,7 +898,11 @@ void dc_audio_pump(void) {
      * sound: ticking the sequencer is what lets the SE slot table free itself
      * (game64.c_inc:1026 tests !p5, and Nap_ReadSubPort returns -1 while the
      * group is disabled). */
-    /* THE BUDGET IS PREDICTIVE, and it has to be.
+    /* THE BUDGET IS PREDICTIVE, and it has to be — HISTORICAL, and left here
+     * because it is the record of why the budget is now off by default
+     * (DC_AUDIO_BUDGET_US = 0). What bounds this loop today is the ring
+     * headroom and DC_AUDIO_MAX_FRAMES; what bounds it across a RUN is the
+     * scene gate. Everything below is still true of the opt-in path.
      *
      * MEASURED 2026-08-04, the run that made audio audible for the first time:
      * `synth_frames=600 budget_hits=600 us/600=15437894`, i.e. ONE jaudio frame
@@ -538,13 +921,27 @@ void dc_audio_pump(void) {
      * The one exception is starvation — if the ring is nearly empty, a late
      * frame beats a silent one, so it runs anyway and the budget is exceeded
      * knowingly rather than accidentally. */
-    for (;;) {
+    while (armed) {
         int have = pc_audio_get_buffer_fill();
-        u32 el, c0, cost;
+        u32 c0, cost;
+#if (DC_AUDIO_BUDGET_US) > 0
+        u32 el;
+#endif
 
         if (have >= (int)(RING_BUF_SAMPLES - DC_AUDIO_HEADROOM))
             break;                       /* the ring is full enough */
 
+        /* The hard cap: no measurement, no override, no feedback. It binds
+         * only on the first pump after an arm, where the empty ring would
+         * otherwise ask for three DAC frames (~59 ms) in one call. */
+        if (frames >= (int)(DC_AUDIO_MAX_FRAMES))
+            break;
+
+        /* The predictive budget, now OPT-IN (default 0 = off). Kept because it
+         * is the only knob that can reproduce the 10.9 FPS run, not because it
+         * is a good idea — read the comment at DC_AUDIO_BUDGET_US before
+         * setting it. */
+#if (DC_AUDIO_BUDGET_US) > 0
         el = (u32)(dc_time_us() - t0);
         if (s_synth_avg_us != 0u &&
             el + s_synth_avg_us > (u32)DC_AUDIO_BUDGET_US &&
@@ -552,6 +949,7 @@ void dc_audio_pump(void) {
             s_pump_budget_hits++;
             break;
         }
+#endif
 
         c0 = (u32)dc_time_us();
         pc_audio_process_frame();
@@ -574,6 +972,13 @@ void dc_audio_pump(void) {
     if (++s_pump_calls >= 600u) {
         DC_LOGE("[DC/AUDIO] synth_us=%u (one jaudio DAC frame; the FPS cost of "
                 "sound)\n", (unsigned)s_synth_avg_us);
+        /* The gate's own line, kept separate so a log reader can answer "was
+         * this window paying for audio at all?" before reading any of the
+         * counters below, which mean different things on each side of it. */
+        DC_LOGE("[DC/AUDIO] gate scene=%u armed=%u arms=%u disarms=%u gain=%d\n",
+                (unsigned)sou_scene_mode, (unsigned)s_armed,
+                (unsigned)s_gate_arms, (unsigned)s_gate_disarms,
+                (int)s_gain_q8);
         DC_LOGE("[DC/AUDIO] pump calls=%u synth_frames=%u budget_hits=%u "
                 "cb=%u pulled=%u fill=%d pollfail=%u us/600=%u "
                 "aicadrv=%08X aicaclk=%u kick=%u aicapos=%u,%u,%u,%u\n",

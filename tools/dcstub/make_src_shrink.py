@@ -84,6 +84,26 @@ S5  sys_stacks 16,384->48                                        -16,336
     `memset(padmgrStack, 0xEB, PADMGR_STACK_SIZE)` and the three
     `stack + SIZE` expressions consistent with the new sizes.
 
+S9  jaudio DMA staging buffers          UNCONDITIONAL           -49,152
+    Both halves are the same shape: a fixed-size staging buffer whose one
+    consumer clamps its burst to the SAME macro, so shrinking the buffer only
+    makes the loop iterate more.  Correct at DC_AUDIO=1 as well, which is why
+    this pair is not keyed on the audio flag.
+    S9a heapctrl.c DMABUFFER_SIZE 0x10000->0x1000.  MEASURED SAVING: ZERO —
+        `.bss.dmabuffer` is ALREADY dropped by --gc-sections (dc/build/
+        gcdrop.txt), because its only reachable user Jac_GarbageCollection_St
+        is dropped too.  Kept anyway; see the rule.
+    S9b dvdthread.c dvd_buf 0x10000->0x4000 + __WriteBufferSize(...,2,0x8000)
+        -> (...,2,0x2000).  -49,152.  BOTH OR NEITHER.
+
+S8  jaudio pools, ONLY when --audio=0                          -401,216
+    seq 275,456->8,608 · FREE_SEQP_QUEUE 1,024->32 · CHANNEL 81,920->2,560 ·
+    CALLSTACK 32,768->4,096 · pc_task_buf 25,600->256
+    These are the sequencer's track pool, the logical-channel pool, the DVD
+    task-frame ring and the RSP command buffer.  They are live and must not be
+    touched when sound is on.  With DC_AUDIO=0 the per-frame chain that fills
+    them is severed at its root — see THE S8 ARGUMENT below.
+
 S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
     `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
     of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
@@ -95,22 +115,64 @@ S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
     The member becomes a `const u8*` into a shared RLE stream.  See the rule
     for the encoding, the round-trip check, and why no header is shadowed.
 
-NOT DONE — the fifth candidate was checked and REFUTED
-------------------------------------------------------
-`CALLSTACK[0x8000]` and `pc_task_buf[2][1600]` are NOT dead scaffolding.
-`CALLSTACK` is a live 128-slot x 256 B pool of task frames
-(`dvdthread.c:45 GetCallStack()`), written by `DVDT_AddTask`/`AddTaskHigh` for
-real ARAM loads and drained by `pc_dvd_process_all_tasks()`
-(`neosthread.c:86`).  `pc_task_buf` is the live audio command buffer:
-`CreateAudioTask(pc_task_buf[cur], ...)` fills it and `RspStart2` consumes it
-every frame (`neosthread.c:35-39`).  Shrinking either corrupts audio silently.
+THE S8 ARGUMENT — why these pools are dead at DC_AUDIO=0, and only then
+-----------------------------------------------------------------------
+⚠️ An earlier revision of this file said `CALLSTACK[0x8000]` and
+`pc_task_buf[2][1600]` "are NOT dead scaffolding … shrinking either corrupts
+audio silently".  That is STILL TRUE with sound on, and it is why every S8 rule
+is keyed on `--audio=0` and why each rewritten TU carries an `#error` guard.
+What that note missed is that `DC_AUDIO=0` does not merely mute the output — it
+compiles out the only thing that drives the whole engine.
+
+The chain, re-verified at file:line 2026-08-04:
+
+  * `dc_audio_pump()` (`dc/src/dc_audio.c:497`) has its ENTIRE body inside
+    `#if DC_AUDIO && !defined(DC_HOST_STUB)`.  At DC_AUDIO=0 it is an empty
+    function.
+  * that body holds the port's only call to `pc_audio_process_frame()`
+    (`:557`).  The other caller in the tree, `pc/src/pc_audio.c:43`, is the SDL
+    producer thread and is not in the DC build.
+  * `pc_audio_process_frame()` (`audiothread.c:92`) is the only caller of
+    `Jac_UpdateDAC()` outside the GameCube `#else` block (`audiothread.c:108`
+    vs `:215`).
+  * `Jac_UpdateDAC()` (`aictrl.c:285`) is the only caller of `Jac_VframeWork()`
+    (`aictrl.c:299`), which is what ticks the sequencer, and the only path to
+    `MixCpu` -> `CpubufProcess(MIX)` -> `CpubufProcess(FRAME_END)` ->
+    `Neos_Update()` (`cpubuf.c:49`, its only call site) ->
+    `CreateAudioTask(pc_task_buf[cur], …)` (`neosthread.c:35`).
+
+So with sound off: no sequencer tick, no note-on, no `CreateAudioTask`.  What
+DOES still run is INITIALISATION — `StartAudioThread()` is called
+unconditionally (`verysimple.c:10`) and sets these pools up.  That is exactly
+why the pools are shrunk rather than deleted: `Jaq_Reset`, `InitGlobalChannel`
+and `jac_dvdproc_init` still execute and still walk them, and they walk them
+with the SAME macro that sizes them.
+
+The residual behaviour, stated plainly rather than hidden: game logic can still
+ASK for a sequence (`Jaq_SetSeqData` -> `GetNewTrack`), and with the tick dead
+nothing ever hands a track back, so the pool drains and stays drained.  Every
+allocation site checks — `GetNewTrack` returns NULL and both callers test it
+(`seqsetup.c:369`, `:509`), `FixAllocChannel` breaks out of its loop on a dry
+free list (`driverinterface.c:210`), `BackTrack` refuses to overfill
+(`seqsetup.c:77`) — so a drained pool is a silent no-op, not a corruption.  At
+256 entries the leak was simply slower.  The audio subsystem at DC_AUDIO=0 is
+already non-functional in exactly this way (see the `[TRG_SE] NO FREE` note in
+`dc/src/dc_audio.c:487`); S8 does not create that condition, it declines to pay
+390 KB of `.bss` for it.
 
 USAGE
 -----
-    python3 tools/dcstub/make_src_shrink.py [--out DIR] [--dry-run] [--quiet]
+    python3 tools/dcstub/make_src_shrink.py [--out DIR] [--audio 0|1]
+                                            [--dry-run] [--quiet]
 
 Default --out is dc/build/shrinksrc.  Files are written only when their content
 actually changes, so re-running does not invalidate objects.
+
+`--audio` MUST match the build's `DC_AUDIO`.  `dc/build-dc.sh` forwards it, and
+every S8-rewritten TU carries an `#error` that fires if a tree generated with
+`--audio=0` is compiled with `-DDC_AUDIO=1` — without it, a stale
+`dc/build/shrinksrc` plus `DC_AUDIO=1` ships an 8-track sequencer and 8 mixer
+channels with no diagnostic at all.
 """
 
 import argparse
@@ -780,6 +842,255 @@ def _s7_rules():
 
 RULES += _s7_rules()
 
+
+# ---------------------------------------------------------------------------
+# S9 / S8 — the jaudio_NES staging buffers and pools.
+# ---------------------------------------------------------------------------
+# These are built by a FUNCTION rather than spelled into RULES, because one of
+# them (dvdthread.c) carries an unconditional half and a conditional half and
+# `RULES` is keyed by path with ONE output file per entry. Two entries for the
+# same path would silently write the file twice and keep whichever ran last.
+
+# The stale-tree guard. dc/build/shrinksrc survives `make` and survives a flag
+# flip; `dc/build/flags.stamp` forces a REBUILD when DC_AUDIO changes but it
+# cannot regenerate the scratch tree, and the Makefile compiles whatever tree is
+# on disk. So the tree has to say what it was generated for, in a form the
+# compiler refuses to ignore.
+#
+# `defined(DC_AUDIO) && DC_AUDIO` and not plain `DC_AUDIO`: dc/Makefile only
+# passes -DDC_AUDIO=1 when sound is on and passes nothing at all when it is off,
+# so the undefined case must be the quiet one.
+def AUDIO_OFF_GUARD(what):
+    return (
+        "/* " + "-" * 68 + "\n"
+        " * DC_SRC_SHRINK S8 — THIS COPY WAS GENERATED FOR DC_AUDIO=0.\n"
+        " * " + what + "\n"
+        " * The pool is only safe at this size because the per-frame chain that\n"
+        " * fills it is compiled out with the pump (dc/src/dc_audio.c:497). Turn\n"
+        " * sound back on and it is a live buffer again, so refuse to build.\n"
+        " * " + "-" * 68 + " */\n"
+        "#if defined(DC_AUDIO) && DC_AUDIO\n"
+        "#error \"DC_SRC_SHRINK S8: dc/build/shrinksrc was generated with "
+        "--audio=0, but this build defines DC_AUDIO=1. Re-run "
+        "tools/dcstub/make_src_shrink.py --audio=1 (or rm -rf dc/build/shrinksrc) "
+        "before building with sound.\"\n"
+        "#endif")
+
+
+def _audio_rules(audio):
+    """S9 (always) + S8 (only when audio is off). Returns RULES-shaped entries."""
+
+    # -- S9a: heapctrl.c DMABUFFER_SIZE ------------------------------------
+    # SWAP; heapctrl.c is compiled directly so -I cannot reach it, and the macro
+    # is file-local (grep: three uses, all in this file — :10 the array, :43 and
+    # :74 the two burst clamps) with no #undef anywhere in the tree.
+    #
+    # Both users have the shape `burst = total >= DMABUFFER_SIZE ?
+    # DMABUFFER_SIZE : total`, so the buffer and the clamp move together and the
+    # loop simply runs 16x more often. :74's staging area is JAC_ARAM_DMA_BUFFER_TOP
+    # in ARAM, not `dmabuffer` at all — it only borrows the constant — so a
+    # smaller burst there is strictly less ARAM touched.
+    #
+    # ⚠️ MEASURED SAVING: ZERO, and that is the honest number. dc/build/gcdrop.txt
+    # carries `removing unused section '.bss.dmabuffer'` and
+    # `removing unused section '.text.Jac_GarbageCollection_St'` — the array's
+    # only reachable user is that collector, whose own single caller
+    # (aramcall.c:87) is unreferenced, so --gc-sections already deletes all
+    # 65,536 B. `sh-elf-nm` on the linked ELF has no `_dmabuffer`. The rule stays
+    # for one reason: a --no-gc-sections debug link (or any future reference to
+    # the collector) puts the buffer straight back, and 4 KB is the right size
+    # for it on a 16 MB machine either way. It is NOT counted in EXPECTED.
+    out = [
+        ("src/static/jaudio_NES/internal/heapctrl.c", "swap", [
+            (1, r"^#define DMABUFFER_SIZE \(0x10000\)$",
+             "/* DC_SRC_SHRINK S9a: 65,536 -> 4,096 B. Both consumers clamp their\n"
+             " * burst to this same macro (:43, :74), so the only effect is 16x more\n"
+             " * iterations of two loops that, on Dreamcast, run zero times: the ARQ\n"
+             " * garbage collector this buffer serves is already dropped by\n"
+             " * --gc-sections. Worth 0 B today; worth 61,440 B the moment anything\n"
+             " * references Jac_GarbageCollection_St again. */\n"
+             "#define DMABUFFER_SIZE (0x1000)"),
+        ]),
+    ]
+
+    # -- S9b + S8c: dvdthread.c ---------------------------------------------
+    # ONE entry, two rewrites of different lifetimes. SWAP: dvdthread.c is
+    # compiled directly.
+    #
+    # S9b (unconditional) — dvd_buf is the ADVD_BUFFER backing store, and the
+    # ONLY thing that ever sizes it is the __WriteBufferSize call on the very
+    # next line: 2 buffers x 0x8000 = exactly 0x10000. Its one reader,
+    # DVDT_LoadtoARAM_Main, reads `min(remaining, buffersize)` per pass
+    # (:176-185), so halving the pair twice just quadruples the pass count.
+    # The align-up branch at :177 can round a short tail up to at most
+    # `buffersize` itself (buffersize is 32-aligned), so it still cannot leave
+    # the buffer.
+    #
+    # THE PAIR IS ATOMIC. Shrinking the array alone is the exact kb/traps.md
+    # "full-size pass over a shrunken destination" shape that cost a debug cycle
+    # under DC_ASSET_STUB: buffersize would stay 0x8000, ADVD_BUFFER[1] would
+    # point 0x8000 into a 0x4000 array, and every read would land in whatever
+    # .bss follows.
+    #
+    # Note the GC `#else` block has its own `__WriteBufferSize(buf, 2, 0x8000);`
+    # at :372 — different first argument, so the anchor below cannot reach it,
+    # and it is not compiled anyway.
+    #
+    # FOOTPRINT NOTE, not a correctness one: today this costs no extra disc I/O
+    # at all. `pc_dvd_process_all_tasks()` is called exactly once in the whole
+    # program (neosthread.c:86) and the one task queued by then is a
+    # DVDT_LoadtoARAM of "/audiorom.img", which nothing stages onto the disc —
+    # Jac_DVDOpen fails and __DoError returns before a single read. If audiorom
+    # is ever staged, this quadruples the number of GD-ROM reads for it; both
+    # sizes stay 2048-aligned, so the kb/traps.md two-command penalty for an
+    # unaligned read does not apply.
+    dvd = [
+        (1, r"^    static u8 dvd_buf\[0x10000\];$",
+         "    /* DC_SRC_SHRINK S9b: 65,536 -> 16,384 B. This pair is ATOMIC — the\n"
+         "     * next line is the ONLY thing that tells the reader how big each of\n"
+         "     * the two buffers is, and DVDT_LoadtoARAM_Main reads exactly\n"
+         "     * `buffersize` bytes per pass. Shrink one without the other and\n"
+         "     * ADVD_BUFFER[1] points past the end of the array. */\n"
+         "    static u8 dvd_buf[0x4000];"),
+        (1, r"^    __WriteBufferSize\(dvd_buf, 2, 0x8000\);$",
+         "    __WriteBufferSize(dvd_buf, 2, 0x2000); " + MARK),
+    ]
+
+    if not audio:
+        # -- S8c: CALLSTACK + its modulus ----------------------------------
+        # 128 slots x 256 B of DVD task frames, of which the program uses ONE:
+        # `mq_init` is still 0 when Jac_InitARAM queues its transfers, so
+        # DVDT_AddTaskHigh returns 0 without touching CALLSTACK; jac_dvdproc_init
+        # then sets mq_init, pc_neos_init_sync queues one task, and
+        # pc_dvd_process_all_tasks drains it. That is the only drain in the
+        # program, so everything queued afterwards is never executed and its
+        # frame contents never read. 16 slots is 16x the observed peak.
+        #
+        # THE PAIR IS ATOMIC for the same reason as S9b: GetCallStack indexes
+        # `CALLSTACK[cur_q * 0x100]` and the modulus is what keeps cur_q inside
+        # the array. 0x1000 / 0x100 = 0x10. A frame is 4 + 0x58 = 92 B, well
+        # inside the 256 B slot, so the slot SIZE is untouched.
+        #
+        # ⚠️ THE DECLARATION IS ANCHORED TOGETHER WITH `static u32 cur_q = 0;`
+        # ON PURPOSE. `static u8 CALLSTACK[0x8000];` appears TWICE in this file,
+        # byte-identically — :29 in the TARGET_PC block and :259 in the
+        # GameCube `#else`. The GC copy is followed by a blank line and
+        # `static u32 mq_init;`, and its own `cur_q` is uninitialised
+        # (`static u32 cur_q;` at :267), so the two-line anchor matches exactly
+        # one of them. A bare one-line pattern would match both and the
+        # must_match count would not notice, because it would be 2 either way.
+        dvd += [
+            (1, r'^#include "jaudio_NES/dvdthread.h"$',
+             '#include "jaudio_NES/dvdthread.h"\n\n'
+             + AUDIO_OFF_GUARD("CALLSTACK is 16 task frames here, not 128.")),
+            (1,
+             r"^static u8 CALLSTACK\[0x8000\];\n"
+             r"static u32 cur_q = 0;$",
+             "/* DC_SRC_SHRINK S8c: 32,768 -> 4,096 B = 16 frames of 256 B. The\n"
+             " * modulus in GetCallStack() below moves with it (0x1000/0x100 =\n"
+             " * 0x10); they are one change, not two. Only ONE frame is ever live:\n"
+             " * pc_dvd_process_all_tasks() runs exactly once (neosthread.c:86) and\n"
+             " * drains the single task queued before it. */\n"
+             "static u8 CALLSTACK[0x1000];\n"
+             "static u32 cur_q = 0;"),
+            (1, r"^    cur_q = \(cur_q \+ 1\) % 0x80;$",
+             "    cur_q = (cur_q + 1) % 0x10; " + MARK),
+        ]
+
+    out.append(("src/static/jaudio_NES/internal/dvdthread.c", "swap", dvd))
+
+    if audio:
+        return out
+
+    # -- S8a: seqsetup.c, the sequencer track pool --------------------------
+    # 256 x 1,076 B of seqp_ plus a 256-entry free queue. SWAP; both macros and
+    # both arrays are file-local statics (grep: SEQ_SIZE and FREE_SEQP_QUEUE_SIZE
+    # appear nowhere else in src/ or include/).
+    #
+    # THEY MUST STAY EQUAL. Jaq_Reset fills `FREE_SEQP_QUEUE[i] = &seq[i]` for
+    # i < SEQ_SIZE and then sets `SEQ_REMAIN = FREE_SEQP_QUEUE_SIZE`
+    # (seqsetup.c:37-46). Make the queue longer than the pool and SEQ_REMAIN
+    # claims free tracks that were never written, so GetNewTrack hands out
+    # uninitialised pointers. Make it shorter and Jaq_Reset writes past its end.
+    # One number, spelled twice, in the vendored source.
+    #
+    # ROOTSEQ_SIZE and ROOT_OUTER_SIZE are DELIBERATELY LEFT AT 16. rootseq is
+    # 64 B and ROOT_OUTER is 1,024 B — nothing worth having — and `handle` is an
+    # index into rootseq that Jaq_HandleToSeq (:162) dereferences unchecked.
+    out.append(("src/static/jaudio_NES/internal/seqsetup.c", "swap", [
+        (1, r'^#include "jaudio_NES/seqsetup.h"$',
+         '#include "jaudio_NES/seqsetup.h"\n\n'
+         + AUDIO_OFF_GUARD("seq[] is 8 tracks here, not 256.")),
+        (1, r"^#define SEQ_SIZE             \(256\)$",
+         "/* DC_SRC_SHRINK S8a: 256 -> 8 tracks (275,456 -> 8,608 B of seqp_).\n"
+         " * SEQ_SIZE and FREE_SEQP_QUEUE_SIZE ARE THE SAME NUMBER and Jaq_Reset\n"
+         " * below depends on it: it fills the queue with SEQ_SIZE entries and then\n"
+         " * declares FREE_SEQP_QUEUE_SIZE of them free. Change one alone and\n"
+         " * GetNewTrack() starts returning pointers that were never written.\n"
+         " * ROOTSEQ_SIZE / ROOT_OUTER_SIZE stay at 16: they are 64 B and 1,024 B,\n"
+         " * and a root handle indexes rootseq[] without a bounds check (:162). */\n"
+         "#define SEQ_SIZE             (8)"),
+        # NB: no `+ MARK` here — MARK is itself a /* … */ and nesting it inside
+        # a trailing comment produces `/* … /* DC_SRC_SHRINK */ */`, whose stray
+        # closing token is a syntax error, not a warning.
+        (1, r"^#define FREE_SEQP_QUEUE_SIZE \(256\)$",
+         "#define FREE_SEQP_QUEUE_SIZE (8)   "
+         "/* == SEQ_SIZE, always. DC_SRC_SHRINK S8a */"),
+    ]))
+
+    # -- S8b: driverinterface.c, the logical-channel pool --------------------
+    # 256 x 320 B of jc_. SWAP; CHANNEL_SIZE is file-local and every use scales
+    # with it — :13 the array, :497 the init loop that seeds the global free
+    # list, :503 `global_channel->chanCount = CHANNEL_SIZE`, and :743
+    # KillBrokenLogicalChannels' sweep. There is no separate hard-coded 256
+    # anywhere: the channel COUNT and the array LENGTH are the one macro.
+    #
+    # Nothing under-runs when the pool is small. FixAllocChannel (:203) walks
+    # `while (num < size)` but breaks the moment List_GetChannel returns NULL and
+    # only accounts for the `num` it actually got, so chanCount cannot go
+    # negative; its two callers are Init_1shot and a note-on path, both of which
+    # tolerate getting fewer channels than they asked for.
+    out.append(("src/static/jaudio_NES/internal/driverinterface.c", "swap", [
+        (1, r'^#include "jaudio_NES/driverinterface.h"$',
+         '#include "jaudio_NES/driverinterface.h"\n\n'
+         + AUDIO_OFF_GUARD("CHANNEL[] is 8 logical channels here, not 256.")),
+        (1, r"^#define CHANNEL_SIZE \(0x100\)$",
+         "/* DC_SRC_SHRINK S8b: 256 -> 8 logical channels (81,920 -> 2,560 B).\n"
+         " * Every use scales with the macro — the array (:13), InitGlobalChannel's\n"
+         " * seeding loop and its chanCount (:497, :503), and\n"
+         " * KillBrokenLogicalChannels' sweep (:743) — so there is no second,\n"
+         " * hard-coded 256 left behind. FixAllocChannel breaks on an empty free\n"
+         " * list and counts only what it got, so a short pool degrades to fewer\n"
+         " * voices rather than to a negative chanCount. */\n"
+         "#define CHANNEL_SIZE (0x8)"),
+    ]))
+
+    # -- S8d: neosthread.c, the RSP command buffer ---------------------------
+    # pc_task_buf[2][1600] of Acmd (8 B) = 25,600 B. SWAP.
+    #
+    # Its ONLY writer is CreateAudioTask(pc_task_buf[cur], …) at :35, inside
+    # Neos_Update, whose only call site in the tree is cpubuf.c:49 — reached only
+    # from CpubufProcess(FRAME_END), i.e. only from the Jac_VframeWork tick. With
+    # the pump compiled out that call never happens, so the buffer is written
+    # exactly never and 16 entries is 16 more than are needed.
+    #
+    # The macro also sizes the GameCube `task_buf[2][1600]` at :163, inside the
+    # `#else`. It shrinks too and is not compiled; harmless either way.
+    out.append(("src/static/jaudio_NES/internal/neosthread.c", "swap", [
+        (1, r'^#include "jaudio_NES/neosthread.h"$',
+         '#include "jaudio_NES/neosthread.h"\n\n'
+         + AUDIO_OFF_GUARD("pc_task_buf holds 16 Acmds here, not 1,600.")),
+        (1, r"^#define NEOSTHREAD_ACMD_BUF_NUM 1600$",
+         "/* DC_SRC_SHRINK S8d: 1,600 -> 16 Acmds (2 x 1600 x 8 = 25,600 -> 256 B).\n"
+         " * The buffer's only writer is CreateAudioTask() at :35, in Neos_Update,\n"
+         " * whose only caller is cpubuf.c:49 on the CpubufProcess(FRAME_END) path —\n"
+         " * i.e. only from the Jac_VframeWork tick, which DC_AUDIO=0 removes. */\n"
+         "#define NEOSTHREAD_ACMD_BUF_NUM 16"),
+    ]))
+
+    return out
+
+
 # Expected .bss delta, from `sh-elf-nm -S` on the clean non-stub ELF. Printed so
 # a build that saves the wrong amount is obvious at a glance.
 EXPECTED = [
@@ -795,6 +1106,23 @@ EXPECTED = [
     ("graphStack",            8192,    16),
     ("padmgrStack",           4096,    16),
     ("irqmgrStack",           4096,    16),
+    # S9b. Unconditional — correct with sound on too.
+    ("dvd_buf",              65536, 16384),
+    # S9a (dmabuffer, 65536 -> 4096) is deliberately ABSENT: --gc-sections
+    # already deletes the whole section, so the honest linked-image delta is 0.
+    # See the rule.
+]
+
+# S8 — only present when the tree is generated with --audio=0. Same source as
+# EXPECTED above (`sh-elf-nm -S` on the clean non-stub ELF); sizes divide
+# exactly, which is how sizeof(seqp_) == 1076 and sizeof(jc_) == 320 were
+# confirmed rather than assumed.
+EXPECTED_AUDIO_OFF = [
+    ("seq",                 275456,  8608),   # 256 -> 8 x 1076
+    ("FREE_SEQP_QUEUE",       1024,    32),   # 256 -> 8 x 4
+    ("CHANNEL",              81920,  2560),   # 256 -> 8 x 320
+    ("CALLSTACK",            32768,  4096),   # 128 -> 16 x 256
+    ("pc_task_buf",          25600,   256),   # 2 x 1600 -> 2 x 16 x 8
 ]
 
 # S6 is .rodata + a hair of .text, not .bss, so it is reported separately.
@@ -832,9 +1160,18 @@ def apply_rules(text, rel, rules):
 def main():
     ap = argparse.ArgumentParser(description="Build the DC_SRC_SHRINK tree.")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--audio", type=int, default=0, choices=(0, 1),
+                    help="the build's DC_AUDIO. 0 (the default, matching "
+                         "dc/Makefile) enables the S8 jaudio pool shrinks; 1 "
+                         "leaves those pools at full size. The generated TUs "
+                         "#error if this disagrees with the build.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+
+    audio = bool(args.audio)
+    rules_all = RULES + _audio_rules(audio)
+    expected = EXPECTED + ([] if audio else EXPECTED_AUDIO_OFF)
 
     out_root = Path(args.out).resolve()
 
@@ -853,7 +1190,21 @@ def main():
     shadow_rel = []
     edits = 0
 
-    for rel, kind, rules in RULES:
+    # One output file per path, so a path claimed twice would be written twice
+    # and only the last write would survive — silently dropping a whole rule.
+    # dvdthread.c is the live instance (S9b + S8c), which is why _audio_rules()
+    # merges those into a single entry; this is the check that keeps it merged.
+    seen = {}
+    for rel, _kind, _r in rules_all:
+        if rel in seen:
+            raise SystemExit(
+                "make_src_shrink: %s appears in TWO rule entries. dc/Makefile\n"
+                "  compiles one scratch copy per TU, so the second write would\n"
+                "  overwrite the first and one rewrite would vanish with no\n"
+                "  error. Merge them into a single entry." % rel)
+        seen[rel] = 1
+
+    for rel, kind, rules in rules_all:
         src = REPO / rel
         if not src.exists():
             raise SystemExit("make_src_shrink: missing source %s" % src)
@@ -891,10 +1242,15 @@ def main():
         (out_root / "shrink.list").write_text("\n".join(sorted(swap_rel)) + "\n")
 
     if not args.quiet:
-        before = sum(b for _, b, _ in EXPECTED)
-        after = sum(a for _, _, a in EXPECTED)
+        before = sum(b for _, b, _ in expected)
+        after = sum(a for _, _, a in expected)
         print("== DC_SRC_SHRINK tree ==")
         print("  out            : {}".format(out_root))
+        print("  DC_AUDIO       : {}   [{}]".format(
+            args.audio,
+            "S8 jaudio pools SHRUNK — this tree must not be built with "
+            "DC_AUDIO=1 (the TUs #error)" if not audio
+            else "S8 skipped; jaudio pools left at full size"))
         print("  TU swaps       : {}".format(len(swap_rel)))
         for r in sorted(swap_rel):
             print("                   {}".format(r))
@@ -906,6 +1262,14 @@ def main():
             print("  written        : {}  (unchanged {})".format(written, unchanged))
         print("  expected .bss  : {:,} -> {:,}  ({:+,} B)".format(
             before, after, after - before))
+        # Called out separately because it is the half that a DC_AUDIO=1 build
+        # gives straight back, and because S9a's honest contribution is zero.
+        s9b = sum(a - b for n, b, a in EXPECTED if n == "dvd_buf")
+        s8 = sum(a - b for _, b, a in EXPECTED_AUDIO_OFF) if not audio else 0
+        print("                   of which S9 {:+,} B (unconditional; S9a's"
+              " dmabuffer is already".format(s9b))
+        print("                   gc-sectioned away, so it counts 0) and S8"
+              " {:+,} B [DC_AUDIO={}]".format(s8, args.audio))
         rb = sum(b for _, b, _ in EXPECTED_RODATA)
         ra = sum(a for _, _, a in EXPECTED_RODATA)
         print("  expected .rodata: {:,} -> {:,}  ({:+,} B)   [S6, pc_assets.c]".format(
