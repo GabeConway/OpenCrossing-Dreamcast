@@ -596,3 +596,26 @@ src/data/submenu/map/kan_tizu2.c
 # ---- the persistent date/time HUD ----
 src/data/model/clk_win.c
 src/data/model/clk_jikan.c
+
+# ---- Tom Nook and the raccoon service NPCs (tuk/rc*), 59,296 B ----
+# Human-confirmed 2026-08-04: Nook rendered as a BLACK SPIKY MESS -- the
+# signature of a stubbed Vtx array, every triangle spiking to the origin.
+# He is the NPC the intro talks to most, so he is worth his bytes even
+# though the other 60 villager models are still stubbed (392 KB more,
+# and villagers are randomised per town exactly like acres).
+src/data/npc/model/mdl/rcc_1.c
+src/data/npc/model/mdl/rcd_1.c
+src/data/npc/model/mdl/rcf_1.c
+src/data/npc/model/mdl/rcn_1.c
+src/data/npc/model/mdl/rcs_1.c
+src/data/npc/model/mdl/tuk_1.c
+src/data/npc/model/tex/rcc_1.c
+src/data/npc/model/tex/rcd_1.c
+src/data/npc/model/tex/rcf_1.c
+src/data/npc/model/tex/rcn_1.c
+src/data/npc/model/tex/rcs_1.c
+src/data/npc/model/tex/tuk_1.c
+
+# ---- the houses Nook walks you to, 155,392 B ----
+src/data/model/obj_s_house1.c
+src/data/model/obj_s_myhome1.c
