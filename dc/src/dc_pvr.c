@@ -2602,6 +2602,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
      * KOS's entry.s saves and restores BOTH floating-point banks
      * (kernel/entry.s, the `frchg` pair around eight `fmov drN,@-r0`). */
     mat_load((const matrix_t*)comb);
+    /* We have just taken XMTRX away from dc_mtx.c's residency cache
+     * (kb/research-fps-ideas.md F2). It has no other way to know: it keys on
+     * the source matrix pointer and contents, neither of which changed. */
+    dc_mtx_xmtrx_invalidate();
 #endif
 
 #if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)

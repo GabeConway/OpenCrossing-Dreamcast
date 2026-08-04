@@ -167,6 +167,82 @@ static u16 dc_autostart_buttons(void) {
 }
 #endif /* DC_AUTOSTART */
 
+/* --------------------------------------------------------------------------
+ * DC_AUTOWALK=<N> — synthesise ANALOG STICK movement from PADRead call N.
+ *
+ * DC_AUTOSTART presses buttons, which is enough to reach the town and then
+ * leaves the player standing on the spot for the rest of the run. That is a
+ * real hole in the test rig, and it has already cost a bug: the station roof
+ * clip-through (kb/station-bugs.md §2) is human-reported twice and has NEVER
+ * appeared in a captured frame, because "walk a character under the roof" is
+ * exactly what an unattended run cannot do. The three ranked hypotheses there
+ * are all decided by one batch-log + screenshot frame taken while standing
+ * under the canopy, and there is no way to take that frame today.
+ *
+ * It is also the cheapest broadening of the screenshot gate available: a run
+ * that walks sees acres, ground textures, water, buildings and NPCs at many
+ * camera angles, where a stationary run re-photographs one composition for
+ * 600 s. Regression screenshots are only as good as the scenes they visit.
+ *
+ * The pattern is a deterministic 8-direction walk, held DC_AUTOWALK_SEG calls
+ * per leg, cycling through the compass. Deterministic matters: two runs of the
+ * same build must visit the same places, or a screenshot pair is not a pair.
+ * It is NOT random and must never become random.
+ *
+ * Magnitude is DC_STICK_MAGNITUDE, the same 80 the base port used for its
+ * digital-to-analog synthesis, so walk speed matches a real stick push and the
+ * game's own run/walk threshold sees what it expects.
+ *
+ * Interaction with DC_AUTOSTART: none, deliberately. Buttons and stick are
+ * separate fields and the game reads them independently; pressing A while
+ * walking is what a human does anyway. The stick is a LEVEL, so unlike the
+ * button latch there is nothing to accumulate.
+ *
+ * Absent by default, so a normal build is byte-identical (kill switch by
+ * construction), and it is a HARNESS knob — never compile it into a release.
+ * -------------------------------------------------------------------------- */
+#ifdef DC_AUTOWALK
+#ifndef DC_AUTOWALK_SEG
+#define DC_AUTOWALK_SEG 240u    /* calls per leg; ~8-20 s at 12-30 FPS */
+#endif
+
+static u32 s_autowalk_calls = 0;
+
+/* Eight compass directions, x then y, scaled by DC_STICK_MAGNITUDE/100.
+ * GameCube convention: Y is UP-positive (see the stick block in PADRead). */
+static const s8 s_autowalk_dir[8][2] = {
+    {   0,  100 },   /* N  */
+    {  71,   71 },   /* NE */
+    { 100,    0 },   /* E  */
+    {  71,  -71 },   /* SE */
+    {   0, -100 },   /* S  */
+    { -71,  -71 },   /* SW */
+    {-100,    0 },   /* W  */
+    { -71,   71 },   /* NW */
+};
+
+static void dc_autowalk_stick(s8* px, s8* py) {
+    u32 n = s_autowalk_calls++;
+    u32 since, leg, dir;
+
+    if (n < (u32)(DC_AUTOWALK)) return;
+
+    since = n - (u32)(DC_AUTOWALK);
+    leg   = since / DC_AUTOWALK_SEG;
+    dir   = leg & 7u;
+
+    if ((since % DC_AUTOWALK_SEG) == 0u) {
+        static const char* const names[8] =
+            { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+        DC_LOGE("[DC/PAD] autowalk leg %u: %s (call %u)\n",
+                (unsigned)leg, names[dir], (unsigned)n);
+    }
+
+    *px = (s8)((int)s_autowalk_dir[dir][0] * DC_STICK_MAGNITUDE / 100);
+    *py = (s8)((int)s_autowalk_dir[dir][1] * DC_STICK_MAGNITUDE / 100);
+}
+#endif /* DC_AUTOWALK */
+
 BOOL PADInit(void) {
 #ifndef DC_HOST_STUB
     maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -202,6 +278,12 @@ u32 PADRead(PADStatus* status) {
      * early return below, which is what a bare Flycast run takes. */
     buttons |= dc_autostart_buttons();
 #endif
+#ifdef DC_AUTOWALK
+    /* Same placement rule as autostart: counted once per PADRead on EVERY
+     * path, including the no-controller early return that a bare Flycast run
+     * takes. A real stick below overwrites this when one is plugged in. */
+    dc_autowalk_stick(&stickX, &stickY);
+#endif
 
 #ifndef DC_HOST_STUB
     {
@@ -215,6 +297,8 @@ u32 PADRead(PADStatus* status) {
              * is true when a DC controller is hot-unplugged mid-scene. */
             s_pad_present = 0;
             status[0].button = buttons;   /* DC_AUTOSTART, or 0 */
+            status[0].stickX = stickX;    /* DC_AUTOWALK, or 0 */
+            status[0].stickY = stickY;
             status[0].err = PAD_ERR_NONE;
             return PAD_CHAN0_BIT;
         }
@@ -252,8 +336,22 @@ u32 PADRead(PADStatus* status) {
         /* --- analog stick ---
          * KOS reports joyx/joyy as signed -128..127 with Y DOWN-positive;
          * GameCube wants Y UP-positive. */
+#ifdef DC_AUTOWALK
+        /* A real stick always wins; the synthesised walk only fills in while
+         * it is at rest. Without this the knob would be dead on any host that
+         * presents a controller — Flycast does when one is configured — and
+         * the run would look identical to a run without it, which is the
+         * worst failure mode a test knob can have. The deadzone is generous
+         * because a resting analog stick does not read exactly zero. */
+        if (st->joyx > -16 && st->joyx < 16 &&
+            st->joyy > -16 && st->joyy < 16) {
+            /* keep the autowalk values already in stickX/stickY */
+        } else
+#endif
+        {
         stickX = (s8)st->joyx;
         stickY = (s8)(-(int)st->joyy > 127 ? 127 : -(int)st->joyy);
+        }
 
         /* --- D-pad -> C-stick substitute (camera) ---
          * NOT latched: the C-stick is a LEVEL, and a latched direction would

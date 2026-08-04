@@ -25,6 +25,9 @@
 #include <string.h>
 #include <stdint.h>
 
+/* Console rate. Emulator-only; see the note in main(). */
+#define BENCH_BAUD  1562500
+
 #define REPS        8                   /* trials per case; we report the best */
 #define VRAM_PROBE  0x00600000          /* offset into the 64-bit texture area  */
 #define AICA_PROBE  0x00100000          /* 1 MB into sound RAM, clear of the    */
@@ -403,6 +406,26 @@ static void bench_baseline(void) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
+    /* The harness run contract (harness/dc/_runner.py:46,67, and
+     * harness/dc/selftest/selftest.c:134-139,175 as the worked example).
+     * Without these three lines smoke.sh reports FAIL on a perfect run,
+     * because its PASS gate is the end marker, not the exit code.
+     *
+     * HARNESS_BAUD matches selftest's: 1,562,500 makes 66 result lines cost
+     * milliseconds instead of seconds. ⚠️ Emulator only — a real coder's
+     * cable will not sync at 1.5 Mbps (kb/traps.md), so a HARDWARE run of
+     * this benchmark must be rebuilt at 57,600. That matters here more than
+     * anywhere else in the project: Flycast does not model VRAM access
+     * latency or Holly bus contention, so the MB/s column from an emulator
+     * run is an artefact of the host and the number this benchmark exists to
+     * produce can only come off the console. */
+    scif_set_parameters(BENCH_BAUD, 1);
+    scif_init();
+    dbgio_dev_select("scif");
+
+    printf("OC-DC-HARNESS-BEGIN\n");
+    printf("MARK:BOOT_OK\n");
+
     timer_setup();
 
     vid_set_mode(DM_640x480, PM_RGB565);
@@ -429,5 +452,6 @@ int main(int argc, char **argv) {
     bench_aica();
 
     printf("\n=== bench_mem2 done ===\n");
+    printf("OC-DC-HARNESS-END rc=0\n");
     return 0;
 }

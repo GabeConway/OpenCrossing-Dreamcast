@@ -126,7 +126,89 @@ static void dc_mtx_transpose44(const MtxP src, dc_mtx44 dst) {
     dst[2][0] = src[0][2]; dst[2][1] = src[1][2]; dst[2][2] = src[2][2]; dst[2][3] = 0.0f;
     dst[3][0] = src[0][3]; dst[3][1] = src[1][3]; dst[3][2] = src[2][3]; dst[3][3] = 1.0f;
 }
+
+/* ==========================================================================
+ * XMTRX RESIDENCY (kb/research-fps-ideas.md F2)
+ * ==========================================================================
+ * emu64's dl_G_VTX calls PSMTXMultVec TWICE PER SHARED VERTEX
+ * (emu64.c:4708-4712) with the same matrix pointer every call, and every one
+ * of those calls used to rebuild the 4x4 transpose in memory and re-run
+ * mat_load's eight `fmov @r4+, xdN`. That is ~28 memory operations to restore
+ * a register bank that already held exactly the right sixteen floats.
+ *
+ * A residency token skips the reload when XMTRX provably still holds this
+ * matrix. "Provably" is doing real work in that sentence, and there are two
+ * distinct ways to be wrong, so the guard has two halves:
+ *
+ *   1. SOMEONE ELSE LOADED XMTRX. It is one global register bank and
+ *      dc_pvr.c loads its own folded projection*modelview once per batch
+ *      (dc_pvr.c:2604). Pointer/content equality cannot see that, so every
+ *      other writer in the image must call dc_mtx_xmtrx_invalidate(). There
+ *      are exactly two XMTRX writers -- this file and that one.
+ *
+ *   2. THE SAME POINTER NOW HOLDS DIFFERENT NUMBERS. emu64 owns a matrix
+ *      stack and rewrites entries in place, so pointer equality alone is the
+ *      documented failure mode for this idea: geometry transformed by a stale
+ *      matrix snaps to the wrong place. Hence the full 12-word content
+ *      compare. It costs 12 integer compares on a hit -- still far less than
+ *      the transpose and the load it replaces -- and it makes the cache
+ *      correct by construction rather than by an invalidation audit.
+ *
+ * The tag deliberately does NOT distinguish PSMTXMultVec from
+ * PSMTXMultVecSR: both load transpose44(m) and differ only in the `w` they
+ * pass to FTRV, which is a register argument, not part of the matrix.
+ * PSMTXConcat loads the OTHER form (expand44, untransposed), so it carries a
+ * different kind and the two can never alias.
+ *
+ * Kill switch: -DDC_MTX_NO_XMTRX_CACHE restores an unconditional reload.
+ */
+#ifndef DC_MTX_NO_XMTRX_CACHE
+#define DC_MTX_XMTRX_CACHE 1
+#else
+#define DC_MTX_XMTRX_CACHE 0
+#endif
+
+#define DC_XM_KIND_NONE       0
+#define DC_XM_KIND_TRANSPOSE  1   /* transpose44(m) — the MultVec family */
+#define DC_XM_KIND_EXPAND     2   /* expand44(b)    — PSMTXConcat        */
+
+#if DC_MTX_XMTRX_CACHE
+static const void *s_xm_src  = NULL;
+static int         s_xm_kind = DC_XM_KIND_NONE;
+static u32         s_xm_copy[12];
+
+static int dc_xm_resident(const MtxP m, int kind) {
+    const u32 *a;
+    int i;
+    if (s_xm_kind != kind || s_xm_src != (const void *)m)
+        return 0;
+    a = (const u32 *)(const void *)&m[0][0];
+    for (i = 0; i < 12; i++)
+        if (a[i] != s_xm_copy[i])
+            return 0;
+    return 1;
+}
+
+static void dc_xm_claim(const MtxP m, int kind) {
+    const u32 *a = (const u32 *)(const void *)&m[0][0];
+    int i;
+    s_xm_src  = (const void *)m;
+    s_xm_kind = kind;
+    for (i = 0; i < 12; i++)
+        s_xm_copy[i] = a[i];
+}
+#endif /* DC_MTX_XMTRX_CACHE */
 #endif /* DC_MTX_USE_XMTRX */
+
+/* Always defined, so dc_pvr.c can call it without knowing which switches are
+ * set. Under -DDC_MTX_NO_XMTRX_CACHE or the scalar path it is a no-op and
+ * -O2 deletes the call. */
+void dc_mtx_xmtrx_invalidate(void) {
+#if DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
+    s_xm_src  = NULL;
+    s_xm_kind = DC_XM_KIND_NONE;
+#endif
+}
 
 /* ==========================================================================
  * Dolphin PS* matrix functions (3x4 row-major, column-vector convention)
@@ -158,8 +240,16 @@ void PSMTXConcat(const MtxP a, const MtxP b, MtxP result) {
     /* Row i of the answer is (row i of a, as a 4-vector) * b. `b` goes into
      * XMTRX UNTRANSPOSED — see the header comment. Both operands are copied
      * out before `result` is written, so a/b may alias result. */
+#if DC_MTX_XMTRX_CACHE
+    if (!dc_xm_resident(b, DC_XM_KIND_EXPAND)) {
+        dc_mtx_expand44(b, mb);
+        mat_load((const matrix_t*)&mb);
+        dc_xm_claim(b, DC_XM_KIND_EXPAND);
+    }
+#else
     dc_mtx_expand44(b, mb);
     mat_load((const matrix_t*)&mb);
+#endif
 
     for (i = 0; i < 3; i++) {
         float x = a[i][0], y = a[i][1], z = a[i][2], w = a[i][3];
@@ -210,8 +300,53 @@ void PSMTXInverse(const MtxP src, MtxP inv) {
     memcpy(inv, tmp, 12 * sizeof(f32));
 }
 
+/* ⚠️ CORRECTION to kb/research-fps-ideas.md F2, 2026-08-04.
+ *
+ * F2 was written as "dl_G_VTX calls PSMTXMultVec twice per shared vertex with
+ * the SAME matrix every call, so a residency token turns the second call into
+ * one FTRV". Read the call site and that premise is false:
+ *
+ *     emu64.c:4708   PSMTXMultVec(position_mtx,         pos,    pos);
+ *     emu64.c:4710   PSMTXMultVec(this->model_view_mtx, normal, normal);
+ *
+ * TWO DIFFERENT MATRICES, alternating once per vertex. A single-slot residency
+ * cache — and XMTRX is physically a single slot — therefore misses on EVERY
+ * call in the loop that matters. F2 as specified is worth zero here.
+ *
+ * What the call site does say is that the single-vector entry points should
+ * never have been on the XMTRX path at all. One FTRV is cheap; getting the
+ * matrix into XMTRX is not, and for one vector it is the whole cost:
+ *
+ *   XMTRX : transpose44 = 12 loads + 16 stores, mat_load = 8 double-fmov
+ *           plus the frchg pair, then 1 FTRV.        ~50+ cycles
+ *   scalar: 12 loads, 9 fmul, 9 fadd, 3 stores, no
+ *           memory round-trip and no bank switch.    ~30-40 cycles
+ *
+ * The file's own header already said this — "PSMTXMultVecArray: this is where
+ * XMTRX actually pays" — and then loaded XMTRX per call anyway.
+ *
+ * So the shape here is: FTRV when the matrix provably still IS resident (which
+ * PSMTXMultVecArray and PSMTXConcat do arrange, for their own callers), and
+ * otherwise plain scalar. The miss path deliberately does NOT touch XMTRX,
+ * which is what makes it safe to interleave with a bulk transform: a scalar
+ * miss cannot evict somebody else's resident matrix.
+ *
+ * Kill switch: -DDC_MTX_NO_XMTRX_CACHE restores the unconditional reload. */
 void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
-#if DC_MTX_USE_XMTRX
+#if DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
+    if (dc_xm_resident(m, DC_XM_KIND_TRANSPOSE)) {
+        float x = src->x, y = src->y, z = src->z, w = 1.0f;
+        mat_trans_nodiv(x, y, z, w);
+        dst->x = x; dst->y = y; dst->z = z;
+        return;
+    }
+    {
+        f32 x = m[0][0]*src->x + m[0][1]*src->y + m[0][2]*src->z + m[0][3];
+        f32 y = m[1][0]*src->x + m[1][1]*src->y + m[1][2]*src->z + m[1][3];
+        f32 z = m[2][0]*src->x + m[2][1]*src->y + m[2][2]*src->z + m[2][3];
+        dst->x = x; dst->y = y; dst->z = z;
+    }
+#elif DC_MTX_USE_XMTRX
     dc_mtx44 mt;
     float x = src->x, y = src->y, z = src->z, w = 1.0f;
 
@@ -229,7 +364,20 @@ void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
 
 /* Scale/Rotate only — the translation column is skipped. Same XMTRX, w = 0. */
 void PSMTXMultVecSR(const MtxP m, const Vec* src, Vec* dst) {
-#if DC_MTX_USE_XMTRX
+#if DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
+    if (dc_xm_resident(m, DC_XM_KIND_TRANSPOSE)) {
+        float x = src->x, y = src->y, z = src->z, w = 0.0f;
+        mat_trans_nodiv(x, y, z, w);
+        dst->x = x; dst->y = y; dst->z = z;
+        return;
+    }
+    {
+        f32 x = m[0][0]*src->x + m[0][1]*src->y + m[0][2]*src->z;
+        f32 y = m[1][0]*src->x + m[1][1]*src->y + m[1][2]*src->z;
+        f32 z = m[2][0]*src->x + m[2][1]*src->y + m[2][2]*src->z;
+        dst->x = x; dst->y = y; dst->z = z;
+    }
+#elif DC_MTX_USE_XMTRX
     dc_mtx44 mt;
     float x = src->x, y = src->y, z = src->z, w = 0.0f;
 
@@ -256,8 +404,16 @@ void PSMTXMultVecArray(const MtxP m, const Vec* srcBase, Vec* dstBase, u32 count
 #if DC_MTX_USE_XMTRX
     dc_mtx44 mt;
 
+#if DC_MTX_XMTRX_CACHE
+    if (!dc_xm_resident(m, DC_XM_KIND_TRANSPOSE)) {
+        dc_mtx_transpose44(m, mt);
+        mat_load((const matrix_t*)&mt);
+        dc_xm_claim(m, DC_XM_KIND_TRANSPOSE);
+    }
+#else
     dc_mtx_transpose44(m, mt);
     mat_load((const matrix_t*)&mt);
+#endif
 
     for (i = 0; i < count; i++) {
         float x = srcBase[i].x, y = srcBase[i].y, z = srcBase[i].z, w = 1.0f;

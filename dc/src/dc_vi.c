@@ -353,6 +353,23 @@ void VIWaitForRetrace(void) {
                 s_ph_cull_us = s_ph_xform_us = 0;
                 s_ph_nskip = s_ph_verts = s_ph_vlit = s_ph_vsrc = 0;
             }
+
+            /* The opcode mix and emu64's OWN display-list cull, both of which
+             * emu64 has been maintaining for free since the PC port
+             * (emu64.c:5824-5834 and :5309-5315) and which nothing printed.
+             * `cmds` alone cannot tell a vertex-bound frame from a
+             * state-change-bound one, and `cullrej` is the current hit rate of
+             * the G_CULLDL path that kb/research-fps-ideas.md F1 proposes to
+             * inject more of -- a baseline for that idea costs this line.
+             * Per FRAME, not per window: these are reset by emu64 every
+             * emu64_taskstart_r, so the value here is the last frame of the
+             * window, not a mean. */
+            DC_LOGE("[EMU64] cmds=%d noop=%d vtx=%d tri=%d dl=%d | "
+                    "cullvis=%d cullrej=%d\n",
+                    pc_emu64_frame_cmds, pc_emu64_frame_noop_cmds,
+                    pc_emu64_frame_vtx_cmds, pc_emu64_frame_tri_cmds,
+                    pc_emu64_frame_dl_cmds,
+                    pc_emu64_frame_cull_visible, pc_emu64_frame_cull_rejected);
 #endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "

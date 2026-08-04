@@ -387,6 +387,12 @@ void pc_gx_tlut_set_native_le(unsigned int idx);
 extern u64 dc_gx_flush_time_us;
 extern u64 dc_gx_texload_time_us;
 
+/* XMTRX is one global register bank with exactly two writers in this image:
+ * dc_mtx.c's PSMTX* fast paths, which cache residency across calls, and
+ * dc_pvr.c's per-batch folded matrix, which must announce that it clobbered
+ * them. kb/research-fps-ideas.md F2. No-op when the cache is compiled out. */
+void dc_mtx_xmtrx_invalidate(void);
+
 /* --- Timing helper shared by dc_os.c / dc_vi.c / dc_mem_ledger.c ----------- */
 u64 dc_time_us(void);   /* free-running microseconds, safe before OSInit() */
 
