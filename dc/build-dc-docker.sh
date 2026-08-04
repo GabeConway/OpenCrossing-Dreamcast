@@ -83,8 +83,19 @@ sh-elf-size "$ELF" || true
 # kb/design-toolchain.md §5.2, VERIFIED measurement:
 #   mkdcdisc     -e elf -o out.cdi  ->  740,083,145 B, 15.6 s
 #   mkdcdisc -N  -e elf -o out.cdi  ->    1,783,337 B,  0.021 s
-# a 415x size / 740x time difference. The padding is deliberate: it pushes
-# content toward the outer tracks, which is what a real CD-R wants (PLAN §5).
+# a 415x size / 740x time difference.
+#
+# ⚠️ CORRECTED 2026-08-03. This comment used to say "the padding is deliberate:
+# it pushes content toward the outer tracks, which is what a real CD-R wants".
+# **That is false, and it was measured false.** In the 740,090,153 B padded CDI
+# the two RARC magics sit at file offsets 48,918,408 and 49,892,520; the same
+# files in the unpadded image compute to 48,927,752 and 49,901,864 — identical
+# LBAs, a constant 4-sector prefix delta. All ~684 MB of padding is appended
+# AFTER the filesystem, so every game byte lives on the INNERMOST ~10 % of the
+# burned disc either way. Padding buys disc geometry realism for timing runs
+# (the drive spins where a real pressed disc would), not outer-edge placement.
+# Getting content onto the outer tracks would need a large dummy file placed
+# FIRST via mkdcdisc's -S/--sort-file.
 #
 # So: -N by default (the Flycast iteration loop — 740 MB per iteration is
 # untenable), and the padded form only when DC_CDI_PAD=1, i.e. for CD-R burns
