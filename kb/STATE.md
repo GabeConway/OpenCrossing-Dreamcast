@@ -101,15 +101,42 @@ table (legal by the letter, near the spirit of the `-O0` directive, worth
 
 ## Where the port is
 
-### ⭐ 2026-08-03 — IT BOOTS ON REAL HARDWARE, and stops at the K.K. scene
+### ⭐ 2026-08-04 — HARDWARE LOADING IS AT PARITY WITH THE EMULATOR
+
+Human report on the `AC-DC-20260804` burn (committed `dev` @ `2fcaa80`,
+`DC_CDI_PAD=1`, no `DC_SCIF_FAST`, no autostart): **"loading times have
+significantly improved on the hardware… I would say it's at parity with
+emulator."**
+
+That **closes the second of the three 2026-08-03 hardware candidates below**.
+"The CD-R is simply slow, because the ARAM pager reads at ~500 KB/s with real
+seeks while every emulator run has `FastGDRomLoad=yes`" is no longer a live
+explanation for anything. What is now known: an emulator timing result about
+*loading* transfers to hardware, so the harness is a fair proxy for disc work
+and the read-ahead question can stop being hedged.
+
+⚠️ **This does NOT mean the frame rate transfers.** Flycast models no cache and
+the town is CPU-bound (`kb/research-fps-ideas.md` F5); the only hardware FPS
+figure in the project is still "~11 FPS in the town", and `DC_EMU64_HIST`'s
+histogram has never been read on a console. Parity on I/O is not parity on
+compute — do not quote this line as evidence for either.
+
+What plausibly earned it, none of it isolated by an A/B (so this is
+attribution, not measurement): the disc-backed ARAM pager replacing the window
+(2026-08-02), the per-asset `[DC/KEEP]` line being removed from the boot path —
+1,392 lines = 86,357 B = **15.0 s of dead boot at 57,600 baud**, with nothing on
+screen — and `pvr_init()` being split out as `dc_gx_backend_start()` so the load
+happens behind a real progress bar instead of behind a blanked screen.
+
+### 2026-08-03 — IT BOOTS ON REAL HARDWARE, and stops at the K.K. scene
 
 A padded CD-R burn of `dev` boots on the user's retail Dreamcast. Every
 observation before today came from Flycast. It reaches the title screen and
 stops at the K.K. Slider / player-select scene; three candidates (input never
-arriving — that burn had `DC_AUTOSTART` unset; the CD-R simply being slow, since
-the ARAM pager reads at ~500 KB/s with real seeks while every emulator run has
-`FastGDRomLoad=yes`; or a real hardware-only hang) are written up with the
-disc built to separate them in `kb/RESUME.md` §1 and `kb/state-log.md`.
+arriving — that burn had `DC_AUTOSTART` unset; ~~the CD-R simply being slow~~
+**[CLOSED 2026-08-04 — see above]**; or a real hardware-only hang) are written
+up with the disc built to separate them in `kb/RESUME.md` §1 and
+`kb/state-log.md`.
 
 ⚠️ **Never compile `DC_SCIF_FAST` into a hardware build** — a coder's cable
 will not sync at 1.5 Mbps and the console, crash dumps included, is lost.
