@@ -134,6 +134,13 @@ static unsigned int s_tris_clipped;
 static unsigned int s_tris_dropped;
 static unsigned int s_prim_unsupported;
 
+#ifndef DC_PVR_NO_VTXMEMO
+/* Defined out here, not inside the DC_PVR_BACKEND block, so dc_vi.c's [PHASE]
+ * line still links when the backend is compiled out. */
+unsigned int dc_pvr_vmemo_hit = 0;
+unsigned int dc_pvr_vmemo_total = 0;
+#endif
+
 #if DC_PVR_BACKEND
 
 #include <dc/pvr.h>
@@ -143,6 +150,45 @@ static unsigned int s_prim_unsupported;
  * is loaded into XMTRX once per BATCH. See the DC_PVR_NO_FTRV block in
  * dc_gx_backend_submit() and kb/perf-dc.md. */
 #include <dc/matrix.h>
+
+/* SH-4 FSRRA / FIPR. Two instructions that replace the two shapes this file
+ * runs thousands of times a frame, and neither is reachable from portable C:
+ *
+ *   frsqrt(x)  -> FSRRA, one instruction, ~1 cycle issue. The C it replaces is
+ *                 `1.0f / sqrtf(x)`. $KOS_CFLAGS carries -mfsrra but NOT
+ *                 -funsafe-math-optimizations, so GCC may not fold that form
+ *                 itself; VERIFIED in the shipped object, which contains
+ *                 `fsqrt` followed by up to three `fdiv` (dc_pvr.c.o+0x178).
+ *                 On SH-4 FSQRT is ~13 cycles and FDIV ~13 more, each
+ *                 non-pipelined, so a normalise costs ~50 cycles of latency
+ *                 where FSRRA costs ~3.
+ *   fipr(...)  -> FIPR, a four-component dot product in one instruction, vs
+ *                 four FMUL and three FADD.
+ *
+ * PRECISION. FSRRA and FIPR are single-precision approximations: FSRRA carries
+ * about 21 correct mantissa bits (~5e-7 relative) and FIPR accumulates without
+ * intermediate rounding. Everything they feed here ends as an 8-bit colour
+ * byte, an eye-space vector used only for a normalised direction, or a
+ * texture coordinate — never as a depth value, which is why emit_projected()'s
+ * `1.0f / c->w` is deliberately NOT converted: z-fighting is decided at a
+ * precision this would disturb.
+ *
+ * Kill switch: -DDC_PVR_NO_FASTMATH restores the exact previous arithmetic.
+ * Everything guarded by it is written as an if/else on a macro rather than a
+ * rewrite, so the A/B is the same source. */
+#ifndef DC_PVR_NO_FASTMATH
+#include <dc/fmath.h>
+#define DC_RSQRT(x)  frsqrt(x)
+#define DC_DOT3(ax, ay, az, bx, by, bz)  fipr((ax), (ay), (az), 0.0f, \
+                                              (bx), (by), (bz), 0.0f)
+#define DC_DOT4(ax, ay, az, aw, bx, by, bz, bw) \
+    fipr((ax), (ay), (az), (aw), (bx), (by), (bz), (bw))
+#else
+#define DC_RSQRT(x)  (1.0f / sqrtf(x))
+#define DC_DOT3(ax, ay, az, bx, by, bz)  ((ax) * (bx) + (ay) * (by) + (az) * (bz))
+#define DC_DOT4(ax, ay, az, aw, bx, by, bz, bw) \
+    ((ax) * (bx) + (ay) * (by) + (az) * (bz) + (aw) * (bw))
+#endif
 
 /* --- Viewport shadow -------------------------------------------------------
  * GXSetViewport hands us GameCube screen pixels, baked here into a scale and
@@ -752,6 +798,13 @@ static void chan_eval(int ci, int is_alpha, int lo, int hi,
     int ctl = ci * 2 + is_alpha;
     float mat[4], illum[4];
     int comp, li;
+    /* Hoisted out of the light loop. These are GX state, so they cannot change
+     * inside a batch let alone inside one vertex — but g_gx is a global and
+     * -fno-strict-aliasing is on, so the compiler has to reload them on every
+     * iteration unless they are named here. Eight iterations x three loads. */
+    unsigned int mask    = g_gx.chan_ctrl_light_mask[ctl];
+    int          diff_fn = g_gx.chan_ctrl_diff_fn[ctl];
+    int          is_spot = (g_gx.chan_ctrl_attn_fn[ctl] == GX_AF_SPOT);
 
     for (comp = lo; comp <= hi; comp++)
         mat[comp] = (g_gx.chan_ctrl_mat_src[ctl] == GX_SRC_VTX)
@@ -766,30 +819,47 @@ static void chan_eval(int ci, int is_alpha, int lo, int hi,
         illum[comp] = (g_gx.chan_ctrl_amb_src[ctl] == GX_SRC_VTX)
                           ? vtx_rgba[comp] : g_gx.chan_amb_color[ci][comp];
 
-    for (li = 0; li < 8; li++) {
+    for (li = 0; li < 8 && (mask >> li) != 0; li++) {
         float dx, dy, dz, d2, d, atten, ndl, w;
-        if (!(g_gx.chan_ctrl_light_mask[ctl] & (1 << li)))
+        /* `(mask >> li) != 0` in the bound, not `li < 8` alone: emu64 always
+         * writes (1 << num_lights) - 1 (emu64.c:3317), i.e. a DENSE low mask of
+         * 1-3 bits, so the loop now ends at the last set bit instead of always
+         * running eight iterations. The `li < 8` half stays because
+         * g_gx.lights[] has exactly 8 entries and a stray high bit in the mask
+         * would otherwise index off the end. Identical set of visited lights. */
+        if (!(mask & (1u << li)))
             continue;
 
         dx = g_gx.lights[li].pos[0] - eye[0];
         dy = g_gx.lights[li].pos[1] - eye[1];
         dz = g_gx.lights[li].pos[2] - eye[2];
-        d2 = dx * dx + dy * dy + dz * dz;
+        d2 = DC_DOT3(dx, dy, dz, dx, dy, dz);
         if (d2 < 1e-12f) continue;
+#ifdef DC_PVR_NO_FASTMATH
         d = sqrtf(d2);
         dx /= d; dy /= d; dz /= d;
+#else
+        /* One FSRRA where the line above is an FSQRT and three FDIVs. `d`
+         * itself is only read by the spot denominator, so it is recovered as
+         * d2 * (1/d) rather than by a second root. */
+        {
+            float rd = frsqrt(d2);
+            d = d2 * rd;
+            dx *= rd; dy *= rd; dz *= rd;
+        }
+#endif
 
         /* Diffuse term. GX_DF_NONE means "no N.L factor at all", which is how
          * fullbright materials are expressed; it is not the same as N.L = 0. */
-        switch (g_gx.chan_ctrl_diff_fn[ctl]) {
+        switch (diff_fn) {
             case GX_DF_NONE:
                 ndl = 1.0f;
                 break;
             case GX_DF_SIGN:
-                ndl = nrm[0] * dx + nrm[1] * dy + nrm[2] * dz;
+                ndl = DC_DOT3(nrm[0], nrm[1], nrm[2], dx, dy, dz);
                 break;
             default: /* GX_DF_CLAMP */
-                ndl = nrm[0] * dx + nrm[1] * dy + nrm[2] * dz;
+                ndl = DC_DOT3(nrm[0], nrm[1], nrm[2], dx, dy, dz);
                 if (ndl < 0.0f) ndl = 0.0f;
                 break;
         }
@@ -797,10 +867,10 @@ static void chan_eval(int ci, int is_alpha, int lo, int hi,
         /* attn = max(0, a . (1, cos, cos^2)) / (k . (1, d, d^2)), with cos the
          * angle off the light's own direction. GX_AF_NONE is a flat 1. */
         atten = 1.0f;
-        if (g_gx.chan_ctrl_attn_fn[ctl] == GX_AF_SPOT) {
-            float cosa = -(g_gx.lights[li].dir[0] * dx +
-                           g_gx.lights[li].dir[1] * dy +
-                           g_gx.lights[li].dir[2] * dz);
+        if (is_spot) {
+            float cosa = -DC_DOT3(g_gx.lights[li].dir[0],
+                                  g_gx.lights[li].dir[1],
+                                  g_gx.lights[li].dir[2], dx, dy, dz);
             float num = g_gx.lights[li].a0 +
                         g_gx.lights[li].a1 * cosa +
                         g_gx.lights[li].a2 * cosa * cosa;
@@ -1797,6 +1867,72 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
 #endif
 }
 
+/* ==========================================================================
+ * The per-batch vertex memo cache
+ * ==========================================================================
+ * emu64 does NOT hand this backend a mesh. It hands it an expanded triangle
+ * SOUP, and the expansion is lossy in exactly the way that matters here.
+ *
+ * The shape, read out of emu64.c:5100-5150 (the G_TRI1/G_TRI2 run collapser,
+ * which the comment there says dominates this game's display lists): a
+ * gsSPVertex has already loaded up to 32 vertices into `this->vertices[]`, and
+ * each triangle command carries three INDICES into that cache. emu64 counts the
+ * whole run of triangle commands, opens ONE GXBegin(GX_TRIANGLES, n_verts) —
+ * n_verts = 3 per triangle, 6 per TRI2 — and then calls set_position3(v0,v1,v2)
+ * per triangle, which re-emits GXColor / GXNormal / GXTexCoord / GXPosition for
+ * each index. A vertex shared by six triangles is therefore pushed through this
+ * file's transform, normal matrix, eight-light loop and texgen SIX TIMES, and
+ * produces the same 28 bytes every time.
+ *
+ * It produces the same bytes because every other input is a per-BATCH constant:
+ * the folded matrix, the modelview, the normal matrix, the light state, the TEV
+ * constants, the PT route, the texture scale. Nothing inside the k-loop reads
+ * anything that varies per vertex except `*v` itself. So memoising on the
+ * source vertex bytes is EXACT, not an approximation — it cannot change a
+ * single emitted byte, only how many times they are computed.
+ *
+ * Direct-mapped, 32 entries, because emu64's own vertex cache is 32 entries
+ * (Vtx vertices[32]) and a batch can therefore never reference more than 32
+ * distinct source vertices. The stored key is the source vertex's INDEX in
+ * verts[], not a copy of it: verts[] is g_gx.vertex_buffer and is stable for
+ * the whole call, so a hit is confirmed by comparing against the original
+ * rather than against a copy that could disagree about padding bytes.
+ *
+ * ⚠️ The comparison must not read the struct's tail padding. DCGXVertex is 30
+ * live bytes in a 32-byte aligned(8) shell (dc_gx_internal.h:116-128), and
+ * those two bytes are never written by anything — struct assignment may or may
+ * not carry them, so a plain 32-byte memcmp would compare uninitialised memory
+ * and turn a legitimate hit into a miss (or, worse, be unstable run to run).
+ * Fields are compared explicitly below.
+ *
+ * Kill switch: -DDC_PVR_NO_VTXMEMO. Counters: `vmemo=hit/total` in [PHASE]. */
+#ifndef DC_PVR_NO_VTXMEMO
+#define VMEMO_SLOTS 32
+static int     s_vmemo_src[VMEMO_SLOTS];   /* index into verts[], -1 = empty */
+static ClipVtx s_vmemo_val[VMEMO_SLOTS];
+
+static inline unsigned int vmemo_hash(const DCGXVertex* v) {
+    /* Position dominates: two vertices of one model almost never share it,
+     * while colour and normal collide constantly on flat-shaded geometry. */
+    const unsigned int* w = (const unsigned int*)(const void*)v;
+    unsigned int h = w[0] ^ (w[1] * 3u) ^ (w[2] * 5u) ^ w[5];
+    h ^= h >> 15;
+    return h & (VMEMO_SLOTS - 1);
+}
+
+static inline int vmemo_same(const DCGXVertex* a, const DCGXVertex* b) {
+    return a->position[0] == b->position[0] &&
+           a->position[1] == b->position[1] &&
+           a->position[2] == b->position[2] &&
+           a->texcoord[0] == b->texcoord[0] &&
+           a->texcoord[1] == b->texcoord[1] &&
+           a->color0[0] == b->color0[0] && a->color0[1] == b->color0[1] &&
+           a->color0[2] == b->color0[2] && a->color0[3] == b->color0[3] &&
+           a->normal[0] == b->normal[0] && a->normal[1] == b->normal[1] &&
+           a->normal[2] == b->normal[2];
+}
+#endif /* !DC_PVR_NO_VTXMEMO */
+
 static void lerp_vtx(ClipVtx* out, const ClipVtx* a, const ClipVtx* b, float t) {
     out->x = a->x + (b->x - a->x) * t;
     out->y = a->y + (b->y - a->y) * t;
@@ -2310,6 +2446,15 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                  (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
 #endif
 
+#ifndef DC_PVR_NO_VTXMEMO
+    /* Invalidate on entry, not on exit: everything the memo depends on that is
+     * NOT the source vertex — the folded matrix, mv, nm, the light state, the
+     * TEV constants, s_pt_route, tex->u_scale — is established above and is
+     * constant from here to the end of this call, and changes between calls.
+     * 32 stores, once per batch, against ~30 vertices of savings. */
+    for (i = 0; i < VMEMO_SLOTS; i++) s_vmemo_src[i] = -1;
+#endif
+
     step = per_prim;
     for (i = 0; i + per_prim <= count; i += step) {
         ClipVtx cv[4];
@@ -2319,6 +2464,17 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             const DCGXVertex* v = &verts[i + k];
             float ox = v->position[0], oy = v->position[1], oz = v->position[2];
             float eye[3], nrm[3], nl;
+#ifndef DC_PVR_NO_VTXMEMO
+            unsigned int slot = vmemo_hash(v);
+
+            dc_pvr_vmemo_total++;
+            if (s_vmemo_src[slot] >= 0 &&
+                vmemo_same(v, &verts[s_vmemo_src[slot]])) {
+                cv[k] = s_vmemo_val[slot];
+                dc_pvr_vmemo_hit++;
+                continue;
+            }
+#endif
 
 #ifdef DC_PVR_NO_FTRV
             cv[k].x = comb[0][0] * ox + comb[0][1] * oy + comb[0][2] * oz + comb[0][3];
@@ -2341,20 +2497,23 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             if (need_light)
 #endif
             {
-            eye[0] = mv[0][0] * ox + mv[0][1] * oy + mv[0][2] * oz + mv[0][3];
-            eye[1] = mv[1][0] * ox + mv[1][1] * oy + mv[1][2] * oz + mv[1][3];
-            eye[2] = mv[2][0] * ox + mv[2][1] * oy + mv[2][2] * oz + mv[2][3];
+            /* Six FIPRs where this was 21 multiplies and 15 adds. The 3x4
+             * modelview row dotted with (ox,oy,oz,1) is exactly FIPR's shape;
+             * the 3x3 normal matrix uses a zero fourth term. */
+            eye[0] = DC_DOT4(mv[0][0], mv[0][1], mv[0][2], mv[0][3], ox, oy, oz, 1.0f);
+            eye[1] = DC_DOT4(mv[1][0], mv[1][1], mv[1][2], mv[1][3], ox, oy, oz, 1.0f);
+            eye[2] = DC_DOT4(mv[2][0], mv[2][1], mv[2][2], mv[2][3], ox, oy, oz, 1.0f);
 
             {
                 float nx = v->normal[0] * (1.0f / DC_GX_NRM_SCALE);
                 float ny = v->normal[1] * (1.0f / DC_GX_NRM_SCALE);
                 float nz = v->normal[2] * (1.0f / DC_GX_NRM_SCALE);
-                nrm[0] = nm[0][0] * nx + nm[0][1] * ny + nm[0][2] * nz;
-                nrm[1] = nm[1][0] * nx + nm[1][1] * ny + nm[1][2] * nz;
-                nrm[2] = nm[2][0] * nx + nm[2][1] * ny + nm[2][2] * nz;
-                nl = nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2];
+                nrm[0] = DC_DOT3(nm[0][0], nm[0][1], nm[0][2], nx, ny, nz);
+                nrm[1] = DC_DOT3(nm[1][0], nm[1][1], nm[1][2], nx, ny, nz);
+                nrm[2] = DC_DOT3(nm[2][0], nm[2][1], nm[2][2], nx, ny, nz);
+                nl = DC_DOT3(nrm[0], nrm[1], nrm[2], nrm[0], nrm[1], nrm[2]);
                 if (nl > 1e-12f) {
-                    nl = 1.0f / sqrtf(nl);
+                    nl = DC_RSQRT(nl);
                     nrm[0] *= nl; nrm[1] *= nl; nrm[2] *= nl;
                 }
             }
@@ -2500,6 +2659,14 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                              ((unsigned int)ca << 24);
             }
 #endif
+#endif
+#ifndef DC_PVR_NO_VTXMEMO
+            /* Published only here, at the very bottom of the k-loop, so the
+             * cached ClipVtx is the FINAL one — after the PT vertex-alpha
+             * override and after both TEV-constant overrides. Storing it any
+             * earlier would memoise a half-built vertex. */
+            s_vmemo_src[slot] = i + k;
+            s_vmemo_val[slot] = cv[k];
 #endif
         }
 

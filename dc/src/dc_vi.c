@@ -68,6 +68,15 @@ extern unsigned int dc_gx_phase_verts;
 extern unsigned int dc_gx_phase_verts_lit;
 extern unsigned int dc_gx_phase_batches_lit;
 extern unsigned int dc_gx_phase_src_verts;
+#ifndef DC_PVR_NO_VTXMEMO
+/* The per-batch vertex memo cache in dc_pvr.c. `vmemo=hit/total` is the number
+ * that says whether emu64's index expansion is really re-submitting shared
+ * vertices — if the hit rate is near zero the cache is pure overhead and should
+ * be compiled out, so it reports rather than asserts. Free-running totals, not
+ * per-window: the ratio is what matters and it is stable. */
+extern unsigned int dc_pvr_vmemo_hit;
+extern unsigned int dc_pvr_vmemo_total;
+#endif
 
 static u64 s_ph_last_exit  = 0;   /* when the previous tick was released     */
 static u64 s_ph_draw_us    = 0;   /* game work on presented ticks            */
@@ -320,7 +329,11 @@ void VIWaitForRetrace(void) {
                 double n = 30.0;
                 DC_LOGE("[PHASE] draw=%.1f skip=%.1f (n=%u) vi=%.1f | "
                         "cull=%.1f xform=%.1f | v=%u vsrc=%u vlit=%u "
-                        "us/v=%.2f\n",
+                        "us/v=%.2f"
+#ifndef DC_PVR_NO_VTXMEMO
+                        " vmemo=%u/%u"
+#endif
+                        "\n",
                         (double)s_ph_draw_us / 1000.0 / n,
                         (double)s_ph_skip_us / 1000.0 / n,
                         (unsigned)(s_ph_nskip),
@@ -331,7 +344,11 @@ void VIWaitForRetrace(void) {
                         (unsigned)(s_ph_vsrc / 30u),
                         (unsigned)(s_ph_vlit / 30u),
                         s_ph_verts ? (double)s_ph_xform_us / (double)s_ph_verts
-                                   : 0.0);
+                                   : 0.0
+#ifndef DC_PVR_NO_VTXMEMO
+                        , dc_pvr_vmemo_hit, dc_pvr_vmemo_total
+#endif
+                        );
                 s_ph_draw_us = s_ph_skip_us = s_ph_vi_us = 0;
                 s_ph_cull_us = s_ph_xform_us = 0;
                 s_ph_nskip = s_ph_verts = s_ph_vlit = s_ph_vsrc = 0;
