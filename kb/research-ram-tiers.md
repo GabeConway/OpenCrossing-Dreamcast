@@ -206,7 +206,50 @@ census itself is one scripted afternoon.
 
 ## The single highest-leverage action
 
+## ⭐ 2026-08-04 — bench_mem HAS NOW BEEN BUILT AND RUN, and Flycast cannot answer it
+
+`harness/dc/bench/{Makefile,build.sh}` exist; `bash harness/dc/bench/build.sh`
+then `bash harness/dc/smoke.sh ~/.cache/oc-dc-harness/bench/bench_mem.cdi
+--timeout 180`. It **passes**: `end_rc=0`, `no_failed_asserts`, every one of the
+~56 cases reports `ok` (checksum verified), and no transfer path hangs —
+including the `dma_is_running(DMA_CHANNEL_3)` spin and the AICA section running
+without `spu_init()`, which were the two pre-run risks.
+
+**But the MB/s column from Flycast is an artefact, and it says so in its own
+shape:**
+
+| case | 4 KB | 64 KB | 256 KB |
+|---|---|---|---|
+| VRAM 32b CPU store32 **W** | 114.3 | 114.3 | 114.3 |
+| VRAM 32b CPU load32 **R** | 114.3 | 114.3 | 114.3 |
+| VRAM 64b CPU store32 **W** | 114.3 | 114.3 | 114.3 |
+| VRAM 64b CPU load32 **R** | 114.3 | 114.3 | 114.3 |
+
+Read equals write, the 32-bit window equals the 64-bit window, and every size
+gives the same figure to one decimal. On real hardware the 64-bit area is
+roughly twice the 32-bit area and a CPU read from VRAM is far worse than a
+write — the whole reason the number was wanted. This is a constant, not a
+measurement. The DMA rows are worse: `117,028 MB/s` and `29,257 MB/s` come from
+a 2,240 ns or 0 ns sample, i.e. below the timer's resolution.
+
+**So this is now a HARDWARE task, not a Flycast task**, and running it is
+de-risked: we know it completes and verifies. A hardware build must first drop
+`BENCH_BAUD` from 1,562,500 to 57,600 (`kb/traps.md`: a coder's cable will not
+sync at 1.5 Mbps and the console, crash dumps included, is lost).
+
+Until that burn happens, **R1/R3/R4/R5/R6 remain gated** — the same as before,
+but for a known reason rather than an unrun benchmark.
+
+<details><summary>the original item, and the rest of the flycast numbers</summary>
+
+Main-RAM `memcpy` reads 130-134 MB/s at all three sizes, and the AICA CPU paths
+order themselves plausibly (G2 PIO 38-47, store queues 395-398), so the
+instrument is not returning garbage everywhere — it is specifically the VRAM
+windows that Flycast flattens.
+
 **Build and run `harness/dc/bench/bench_mem.c`.** It exists and has never been
 run. It gates R1, R3, R4, R5 and R6 simultaneously and settles the project's one
 missing number — SH-4-from-VRAM read bandwidth, in both directions, plus G2 — in
 half a day.
+
+</details>
