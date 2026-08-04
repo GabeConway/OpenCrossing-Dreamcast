@@ -94,7 +94,20 @@ the additive-heap line drops the pool entirely.
 - If rejected: fallback ceiling for a separate additive pool is 1,460,204 B
   post-P1 (2,508,780 B once P4 lands) — still viable, just wasteful.
 
-### P4. ARAM graph window moves to VRAM — additive heap −1,048,576 [claim; bench exists]
+### P4. ARAM graph window moves to VRAM — additive heap −131,072 [CORRECTED 2026-08-04]
+
+⚠️ **THIS ITEM WAS BILLED AT −1,048,576 AND THAT NUMBER IS STALE BY ~917 KB.**
+The disc-backed ARAM pager landed 2026-08-02 and shrank the ARAM line from a
+1,048,576 B window to a **131,072 B** LRU block cache (`kb/STATE.md`: additive
+heap = KOS 262,144 + arena 1,900,000 + ARAM LRU 131,072 + threads 65,536). P4
+can therefore only recover what is left, which is 131,072 B. Anyone re-running
+the closing table below against the old figure starts ~0.9 MB optimistic — the
+exact class of error the one-inequality rule exists to catch. The surviving
+kernel of this item is `kb/research-ram-tiers.md` R1.
+
+<details><summary>the original P4 text, for its reasoning</summary>
+
+#### P4. ARAM graph window moves to VRAM — additive heap −1,048,576 [claim; bench exists]
 
 `kb/research-creative-ram.md` T2. `dc/src/dc_aram.c` is a single seam; every
 window touch is a bulk memcpy inside `ARStartDMA` (lines 181–185). Replace
@@ -114,6 +127,8 @@ PLAN §3.1's disc-backed LRU becomes nearly trivial.
 - VRAM budget check before growing past ~1 MB: 8 MB − framebuffers (~1.2 MB) −
   TA buffers − P2's texture set. Size after P2's numbers exist.
 - Kill switch: `DC_ARAM_IN_VRAM=0` reverts to the main-RAM window.
+
+</details>
 
 ### P5. Drop the GBA payloads from the pack — pool relief 222,568 B [measured]
 
@@ -185,7 +200,7 @@ saving worth ~0 (mutually exclusive — L3 correction 2).
 | P6 `s_assets` strings ✅ | image (`.rodata`) | −598,112 span (was billed −821,569) | 6,401,812 |
 | P7 `data_bgd` split ✅ | image (`.data`) | −246,240 span (was billed −236,544) | 6,155,572 |
 | P1 loader | image (`.bss`) | −8,460,128 | **−2,294,860** (margin 2,294,860) |
-| P4 ARAM window → VRAM | additive heap | −1,048,576 | margin 3,343,436 |
+| P4 ARAM window → VRAM | additive heap | ~~−1,048,576~~ **−131,072** (see the P4 correction above) | margin figure below is stale by ~917 KB |
 | P8 DL bodies → pool | image (`.data`) | −901,300 | margin ≈ 4.24 MB |
 | pool cost | additive (0 under P3; ≤1.46–2.5 MB if separate) | | **fits either way** |
 

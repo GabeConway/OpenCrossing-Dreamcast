@@ -1,5 +1,123 @@
 # Session log — what was observed running, in order
 
+## 2026-08-04 — frame rate, the second texture unit, and why the ARM7 is asleep
+
+Seven 600 s Flycast runs at `--timeout 600 -c config:LimitFPS=no`, each judged on
+`tools/dcqa/run_report.py --vs` **and** a screenshot pair.
+
+### The renderer got 17-26 % faster, and the win came from reading emu64's output
+
+`kb/perf-dc.md` §3.5-3.6 carries the detail. The short version is that the two
+biggest levers were both things nobody had looked at:
+
+1. **emu64 hands this backend an expanded triangle SOUP, not a mesh.**
+   `emu64.c:5100-5150` opens ONE `GXBegin(GX_TRIANGLES, 3*ntris)` for a whole run
+   of triangle commands and then re-emits every attribute per triangle INDEX
+   into its own 32-entry vertex cache. A vertex shared by six triangles was
+   transformed, lit and texgen'd six times for the same 28 bytes. A per-batch
+   memo keyed on the source vertex is **exact** — every other input to the
+   per-vertex block is a batch constant — and it hits **48.2 %** of the time.
+2. **`sqrtf` + `fdiv` had been compiled literally.** `$KOS_CFLAGS` carries
+   `-mfsrra` but not `-funsafe-math-optimizations`, so GCC never folded the
+   light normalise; the object has `fsqrt` followed by three `fdiv` at +0x178.
+   `frsqrt()` is one FSRRA. `fipr` replaced 21 multiplies and 15 adds in the
+   eye/normal transforms.
+
+Measured, matched build line, `DC_PERF_PHASE`:
+
+| | before | after 3.5+3.6 | after 128-slot memo |
+|---|---:|---:|---:|
+| `us/v` p50 | 4.71 | 3.92 | **3.81** |
+| `us/v` p90 | 6.03 | 4.45 | **4.28** |
+| `xform` p50 | 12.6 ms | 10.3 ms | **10.0 ms** |
+| FPS p50 | 22.6 | 23.6 | 23.4 |
+
+⚠️ **The memo table was 32 slots first, and 32 was wrong for a reason worth
+keeping.** emu64's vertex cache is 32 entries, so 32 bounds the WORKING SET
+correctly — and says nothing about COLLISIONS. Direct-mapped 32-into-32 measured
+42.5 %; 128 slots measured 48.2 % for 3,456 more bytes. Sizing a hash table from
+the working set instead of from the load factor cost about 6 points.
+
+### The train window's light was a two-texture effect on a one-texture GPU
+
+Human report: "the light on Rover when the window opens ... needs to be subtle,
+not this rectangle". It is `rom_train_out_shineglass_modelT`, and the batch log
+named it exactly: `64x8 ... st=2 tm=0,1 t1=1 argb=88FFFFFF bbox=-144,-165..337,494`
+— flat white, ONE alpha for every vertex, over a screen-sized wedge.
+
+The combiner is `alpha = TEXEL0.a * TEXEL1.a * PRIM_LOD_FRAC`, where TEXEL0 is a
+64x8 horizontal ramp and TEXEL1 a 16x16 **vertical** one. Neither texture is a
+light shaft; the soft 2-D falloff IS the product, one ramp per texture unit. The
+PVR has one, so the port dropped TEXEL1 — and since all four shine vertices
+carry the same `s` (168.0 texels, GX_CLAMP), what remained was a single
+constant.
+
+Fixed by sampling texmap1's alpha on the CPU, per vertex, through texgen 1, out
+of an 8x8 map built at upload, and folding it into the vertex alpha;
+MODULATEALPHA supplies the TEXEL0 factor in hardware. Fires on **5,210 of
+1,170,059 batches (0.45 %)**. Human-confirmed fixed.
+
+### The reply bubble is NOT too big — measured twice
+
+Reported as oversized. It is not: the balloon's batch bbox is
+`79.8,266.7..587.6,473.9` = 508x207 of 640x480, and counting near-white pixels
+in the decoded PNG gives **245 px of 320 = exactly `width = 245.0`**
+(`m_msg_main.c_inc:394`). The geometry is pixel-exact at its authored size.
+Whatever the human is seeing is either the CHOICE panel (`con_sentaku2_v`, which
+IS text-fitted by `scale_x/scale_y` at `m_choice_main.c_inc:137-171` and was not
+captured in any probe frame) or the art itself. **Do not go looking for a scale
+bug in the transform chain; there isn't one.**
+
+### The AICA ARM7 ran, and then wedged. Three probes, three answers.
+
+`[DC/AUDIO]` now reports `aicadrv`, `aicaclk` and `aicapos`, and together they
+turn "audio is silent" into one decidable question:
+
+- `aicadrv=EA00002D` — 0xEA is the ARM `B` opcode, so KOS's driver IS resident.
+- No `ASSERTION` line anywhere — `snd_sh4_to_aica()` opens with
+  `assert_msg(q_cmd->valid, ...)` (`snd_iface.c:84`), that assert is live in
+  `libkallisti`, and the ONLY writer of that word is the ARM's own `arm_main()`.
+  **So the ARM7 executed.**
+- `aicaclk=0` — but `AICA_MEM_CLOCK` is incremented in exactly one place,
+  `crt0.s`'s Timer-A FIQ handler, never by the main loop.
+
+⇒ the ARM reached `timer_wait(10)` at the bottom of its first pass
+(`arm/main.c:224`), which is `fin = timer + 10; while (timer <= fin);`, and with
+the FIQ never delivered it spins there forever. `aicapos=0,0,0,0` agrees: it ran
+`aica_get_pos()` once and never again.
+
+Two other things were fixed on the way and are necessary but not sufficient:
+
+- **`DC_ARAM_AUDIO_DROP=0`.** `audiorom.img` (8,300,384 B) was being thrown away
+  by the ARAM pager, so the synth read zeros. Letting it through: `mapped`
+  4,982,400 → **13,282,784**, `ext=3/32`, `LOST=0`, and `zero` **1 → 0** — the
+  extent-table overflow the guard's comment feared did not happen.
+- **The stream buffer was 16x too big for its own scratch.**
+  `snd_stream_alloc(cb, SND_STREAM_BUFFER_MAX)` is 65,536 PER CHANNEL and
+  `snd_stream_fill` asks for `size * chans` (`snd_stream.c:693-706`), i.e.
+  131,072 B against a 4,096 B scratch. The callback clamped and returned 3 % of
+  every request. `cb=2 pulled=8192` was literally the two prefills inside
+  `snd_stream_start()`, both of which ran at boot before jaudio produced a
+  sample. Now `snd_stream_init_ex(2, 8192)`, which also hands 56 KB back to
+  sbrk — the starved half of the two-pool heap.
+
+### Two renderer defects found by auditing g_gx for consumers
+
+- **`dc_gx_backend_frame_begin()` ran TWICE per scene.** 52 `BATCHLOG BEGIN`
+  against 27 `BATCHLOG END` in one log. `pc_gx_begin_frame()` has two callers —
+  `dc_vi.c` and `JW_BeginFrame` (`jsyswrap.cpp:326`) — and there was no re-entry
+  guard, so every frame ran `pvr_wait_ready()` + `pvr_scene_begin()` twice.
+  Nothing visibly broke because the two calls were adjacent in every logged
+  frame, but a second `scene_begin` after geometry has been submitted resets
+  `s_pt_n` and discards every buffered punch-through record.
+- **`t1=` in the batch log is saturated and cannot support the claim it was
+  built for.** It reads 1 in 3,048 of 3,048 batches, including the 576 whose
+  stage-1 texmap is `GX_TEXMAP_NULL`, because `tex_handle[1]` is never cleared —
+  the same stale-handle family as the already-fixed "a draw that binds no
+  texture still got one". The "52 % of batches request two texmaps" figure in
+  that comment did not come from this field.
+
+
 > ⚠️ **2026-08-02, read first:** the top entry below (framebuffer probe, "N2
 > NOT solved", FBNONZERO 0) is **SUPERSEDED** — N2 is done: `--fb-writeback` is
 > REQUIRED, golden `25789d43` works. See `kb/STATE.md` N2 and `kb/traps.md`.

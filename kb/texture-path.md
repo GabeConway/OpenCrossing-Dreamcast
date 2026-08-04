@@ -52,6 +52,15 @@ that is disqualifying. It would buy VRAM, and VRAM is not the constraint (§5).
 supported yet, if ever"*; a codebook generator would have to run on the SH-4
 per texture. 8:1 VRAM win, no quality win.
 
+⚠️ **CLARIFICATION 2026-08-04 — this closes RUNTIME VQ ENCODING, not VQ.**
+`kb/ram-plan.md` P2 proposes OFFLINE VQ conversion in `tools/dcasset`, and the
+two documents read as contradictory. They are not: an offline-converted texture
+needs only a codebook + index copy and the VQ bit in the poly header — it never
+goes near `PVR_TXRLOAD_VQ_LOAD`, and offline asset conversion is an explicitly
+legal layout lever (CLAUDE.md §1: "codegen is banned; layout is fair game"). Do
+not kill P2 by citing this paragraph. What is closed is generating a codebook on
+the console.
+
 Formats handled: `I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, C4, C8, CMPR`.
 **Silently dropped to a transparent rectangle:** everything else — notably
 `GX_TF_C14X2` (`0xA`), which `emu64.c:314`'s `dol_fmt` table emits for

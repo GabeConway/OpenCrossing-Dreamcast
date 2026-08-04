@@ -22,6 +22,7 @@ Two build-time knobs, both off by default, both in files this work owns.
 | knob | emits | cost when on |
 |---|---|---|
 | `-DDC_PERF_PHASE` | `[PHASE]` next to `[PERF]`, every 30 presented frames | 4 `dc_time_us()` per logic tick + 2 per batch |
+| (always on) | `vmemo=hit/total` inside `[PHASE]` — the vertex memo cache's hit rate, §3.5 | two increments per vertex |
 | `-DDC_PERF_GXAPI` | `[GXAPI]`, same cadence | 1 increment per GX vertex call + 2 `dc_time_us()` in `GXPosition3f32` |
 
 ```
@@ -204,6 +205,83 @@ wrong colour; the comment at each site says so.
 In the town this fires on only 6 % of vertices, but in the train/dialogue
 scenes `vlit` is 57 % of `v`, and there it is worth about a third of the win.
 
+### 3.5 THE VERTEX MEMO CACHE (`-DDC_PVR_NO_VTXMEMO`) — 2026-08-04
+
+**This is the largest single win found so far, and it comes from noticing what
+emu64's output actually is.**
+
+emu64 does not hand the backend a mesh. `emu64.c:5100-5150` — the G_TRI1/G_TRI2
+run collapser, whose own comment says it dominates this game's display lists —
+walks a run of triangle commands, counts `n_verts` (3 per TRI1, 6 per TRI2),
+opens **one** `GXBegin(GX_TRIANGLES, n_verts)`, and then calls
+`set_position3(v0, v1, v2)` per triangle. Those `v` are **indices into emu64's
+own 32-entry vertex cache**, and `set_position3` re-emits `GXColor`,
+`GXNormal`, `GXTexCoord` and `GXPosition` for each one. A vertex shared by six
+triangles therefore goes through the fold, the normal matrix, the eight-light
+loop and texgen **six times** and produces the same 28 bytes each time.
+
+Memoising on the source vertex is **exact**, not an approximation: every other
+input to the per-vertex block is a per-BATCH constant (the folded matrix, `mv`,
+`nm`, the light state, the TEV constants, `s_pt_route`, `tex->u_scale`).
+Nothing in the `k` loop reads anything that varies per vertex except `*v`.
+
+32 entries, direct-mapped, invalidated at the top of every
+`dc_gx_backend_submit()`. 32 because emu64's cache is `Vtx vertices[32]`, so
+one batch can never reference more distinct sources than that.
+
+**MEASURED HIT RATE: 11,005,939 of 25,869,013 = 42.5 %**, town and train
+combined, over a 600 s run. `vmemo=hit/total` is in the `[PHASE]` line.
+
+⚠️ The stored key is the source vertex's **index**, not a copy, and the
+comparison is field-by-field. `DCGXVertex` is 30 live bytes in a 32-byte
+`aligned(8)` shell and **nothing ever writes the two tail padding bytes**, so a
+plain 32-byte `memcmp` would compare uninitialised memory — turning legitimate
+hits into misses, unstably.
+
+### 3.6 FSRRA and FIPR (`-DDC_PVR_NO_FASTMATH`) — 2026-08-04
+
+`$KOS_CFLAGS` carries `-mfsrra -mfsca` but **not**
+`-funsafe-math-optimizations`, and the shipped object settles what GCC did with
+that: `sh-elf-objdump -d dc_pvr.c.o` has `fsqrt` at +0x178 followed by three
+`fdiv` at +0x180/182/186 — the light normalise, compiled literally. Both are
+non-pipelined on SH-4, so that is ~50 cycles of latency per light per lit
+vertex, and `vlit` is 94 % of town vertices.
+
+`frsqrt()` (KOS `dc/fmath.h`, one `FSRRA`) replaces it at ~3 cycles. `d` — read
+only by the spot attenuation denominator — is recovered as `d2 * (1/d)` rather
+than by a second root. The eye-space position and the normal transform become
+six `FIPR`s instead of 21 multiplies and 15 adds.
+
+⚠️ **`emit_projected()`'s `1.0f / c->w` is deliberately NOT converted.** That
+is the depth value written to the TA, and z-fighting between near-coplanar
+polygons is decided at a precision FSRRA's ~21 mantissa bits would disturb.
+Everything that was converted ends as an 8-bit colour byte or a normalised
+direction.
+
+Also hoisted out of `chan_eval`'s light loop: the light mask, the diffuse
+function and the spot test. `-fno-strict-aliasing` is on and `g_gx` is a
+global, so the compiler had to reload all three on each of eight iterations.
+The loop now terminates at the last set bit, since emu64 always writes a dense
+`(1 << num_lights) - 1` (`emu64.c:3317`).
+
+### Combined result of 3.5 + 3.6
+
+Two 600 s runs at the same commit, same keep list, same build line, differing
+only by the patch:
+
+| | before | after |
+|---|---:|---:|
+| `us/v` p50 | 4.71 µs | **3.92 µs** (−17 %) |
+| `us/v` p90 | 6.03 µs | **4.45 µs** (−26 %) |
+| `xform` p50 | 12.6 ms | **10.3 ms** |
+| `xform` p90 | 16.4 ms | **11.9 ms** |
+| FPS p50 | 22.6 | **23.6** |
+
+`tools/dcqa/run_report.py --vs`: no regression. Screenshot pairs at probe
+indices 0-18 are pixel-identical or within FSRRA's last-bit colour noise;
+19-25 differ only because the faster build is at a different point in the same
+scene, which is rule 3 in `kb/RESUME.md` doing its job.
+
 ### 3.4 The AABB cull loop (`-DDC_GX_NO_FAST_AABB`, `dc_gx.c`)
 
 `dc_gx_batch_is_offscreen()` runs over every vertex of every batch — including
@@ -219,6 +297,33 @@ maximum, and NaN takes neither branch in either form — which keeps the cull
 conservative, exactly as before.
 
 ---
+
+### 3.7 The GX entry-point micro-wins — MEASURED ZERO, kept only where simpler
+
+2026-08-04. A code-size census of `dc_gx.c` (from `.text.<fn>` sizes in the
+linked map) predicted 1.5-3 ms/frame from tightening the per-vertex GX entry
+points. Four were applied behind one define, `-DDC_GX_NO_FASTPATH`:
+
+- `GXPosition3f32`'s COLOR0 save/restore deleted — it was a **provable no-op**
+  (`dc_gx_commit_vertex()` only ever reads `g_gx.current_vertex`), 6,951 times a
+  frame.
+- `GXLoadNrmMtxImm`'s nine float compares + nine stores → three `memcmp(12)` /
+  `memcpy(12)`. Same semantics; the scalar form compiled to 552 B against 148 B
+  for `GXLoadPosMtxImm` doing the same job on *more* data.
+- The four kill-switch globals made `const`, so ~35 setters fold the branch
+  instead of reloading a global under `-fno-strict-aliasing`.
+- `GXNormal3f32`'s six clamps → one magnitude test. **Reverted.**
+
+**RESULT: nothing. 215 counter-matched windows, mean `draw` 31.93 → 32.07 ms
+(+0.4 %), mean `gx` 9.49 → 9.51, FPS p50 23.9 → 23.9, p1 10.8 → 10.6.** The
+prediction was wrong — either the code-size model over-prices these paths, or
+the win is below what run-to-run variation can resolve at this frame time.
+
+The first three are kept because they are strictly simpler code; the sixth-clamp
+one was reverted because it was the only one that added complexity. **The lesson
+worth keeping: instruction-count estimates off the linked map did not survive
+contact with a matched-frame A/B here, and the A/B cost two builds and two
+600 s runs — do the A/B first next time.**
 
 ## 4. Ruled out, with evidence
 
@@ -279,13 +384,16 @@ so they are not proposed again.
    (`kb/levers.md` L5, the user's call), or a cheaper acre draw list. Nothing in
    `dc/` can move it. **State this plainly in any FPS plan.**
 
-2. **Per-vertex cost is still 926 cycles (`us/v` 4.63 µs).** What remains inside
-   it, unmeasured and in rough expected order: the 8-light loop for the 94 % of
-   town vertices that light (add a per-frame count of *enabled* lights before
-   optimising — if the mask is usually one light, the loop's 8 iterations are
-   7 wasted mask tests per vertex); `apply_texgen`; the near-clip test; the
-   per-vertex divide in `emit_projected`. Expected: another 10-20 % of `xform`,
-   i.e. 2-3 ms of a 100 ms frame. **Measure the light mask first.**
+2. ✅ **DONE 2026-08-04 — §3.5 and §3.6.** `us/v` is now 3.92 µs p50, i.e.
+   ~784 cycles, down from 4.71. The two levers that paid were **not** the ones
+   listed here: the big one was that 42.5 % of the vertices reaching this code
+   were duplicates of one already computed in the same batch, and the second was
+   that `sqrtf` + `fdiv` had been compiled literally where the SH-4 has FSRRA.
+   What is left inside the per-vertex cost, still unmeasured: `apply_texgen`,
+   the near-clip test, the `pvr_prim` copy (item 3 below), and the ~58 % of
+   vertices that still miss the memo. Raising the memo's hit rate — a second
+   way index, or keying on the emu64 vertex index if it could be threaded
+   through — is now the cheapest remaining idea in this list.
 
 3. **`pvr_dr_target()` / `pvr_dr_commit()` instead of `pvr_prim()`.**
    `emit_projected()` builds a 32-byte `pvr_vertex_t` on the stack and
