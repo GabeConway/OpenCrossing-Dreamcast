@@ -304,6 +304,7 @@ void pc_platform_update_window_size(void) {
 #if !defined(DC_HOST_STUB) && !defined(DC_NO_SPLASH)
 #include <dc/biosfont.h>
 #include <dc/video.h>
+#include "dc_pvr.h"        /* dc_pvr_fb_dump_surface — the splash screenshot */
 
 /* The author's splash, shown between the Sega licence screen and the game.
  *
@@ -330,56 +331,277 @@ void pc_platform_update_window_size(void) {
 
 #define DC_SPLASH_TEXT "TechProGabe Presents..."
 
-static void dc_splash(void) {
-    /* BFONT_THIN_WIDTH is 12 and the string is ASCII, so the rendered width is
-     * exact — no measuring call needed. */
-    const int tw = (int)(sizeof(DC_SPLASH_TEXT) - 1) * BFONT_THIN_WIDTH;
-    const int x  = (DC_SCREEN_WIDTH  - tw) / 2;
-    const int y  = (DC_SCREEN_HEIGHT - BFONT_HEIGHT) / 2;
-    uint64_t t0;
+/* ==========================================================================
+ * The splash, drawn straight into the raw framebuffer
+ * ==========================================================================
+ * Everything below is a CPU write loop over a linear RGB565 640x480 surface.
+ * That is the whole reason it is safe: no PVR, no lists, no texture cache, no
+ * assets, no VRAM allocation, and nothing that has to be undone before
+ * pvr_init() takes the display. The only persistent memory it costs is the
+ * 840-byte glyph mask below.
+ *
+ * Three pieces, each independently removable:
+ *   1. the text at 2x    (-DDC_SPLASH_NO_SCALE)  bfont is 12x24 thin, which
+ *      reads as a debug print; doubled it reads as a title card.
+ *   2. a progress bar    (-DDC_SPLASH_NO_BAR)    driven by the REAL keep-list
+ *      load, which is the 15 s window in which a human cannot tell "loading"
+ *      from "hung" (kb/traps.md).
+ * Plus a vertical gradient instead of flat black, and a fade-in.
+ *
+ * A shine sweep across the letters was built and then turned OFF at the
+ * author's request — "remove the shimmer from the text, but everything else is
+ * good". It is kept behind -DDC_SPLASH_SHINE rather than deleted, because the
+ * per-pixel recolour it does is also what animates the band during the load,
+ * and someone may want that back.
+ *
+ * ⚠️ There is no back buffer here. vram_s IS the scanout surface, so every
+ * write is immediately visible and the redraw is band-limited (552x48 plus the
+ * bar) rather than a full-screen clear, or the text would flicker. */
+#define SPL_CHARS   ((int)(sizeof(DC_SPLASH_TEXT) - 1))
+#define SPL_SRC_W   (SPL_CHARS * BFONT_THIN_WIDTH)      /* 276 */
+#define SPL_SRC_H   BFONT_HEIGHT                        /* 24  */
+#ifndef DC_SPLASH_NO_SCALE
+#define SPL_ZOOM    2
+#else
+#define SPL_ZOOM    1
+#endif
+#define SPL_W       (SPL_SRC_W * SPL_ZOOM)
+#define SPL_H       (SPL_SRC_H * SPL_ZOOM)
+#define SPL_X       ((DC_SCREEN_WIDTH  - SPL_W) / 2)
+#define SPL_Y       ((DC_SCREEN_HEIGHT - SPL_H) / 2 - 16)
+#define SPL_BAR_X   120
+#define SPL_BAR_W   400
+#define SPL_BAR_H   8
+#define SPL_BAR_Y   (SPL_Y + SPL_H + 28)
+#define SPL_MASK_STRIDE ((SPL_SRC_W + 7) / 8)            /* 35 bytes */
 
-    /* Black field. vram_s is uint16_t* in RGB565 at this point. */
-    memset(vram_s, 0, (size_t)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT * 2);
+/* 1 bit per source pixel: 35 x 24 = 840 B. A byte-per-pixel mask would be
+ * 6,624 B, and this file is compiled into an image that is already over its
+ * RAM budget. */
+static unsigned char s_spl_mask[SPL_MASK_STRIDE * SPL_SRC_H];
+static int           s_spl_ready = 0;
 
-    bfont_set_foreground_color(0xFFFFFFFF);   /* white */
-    bfont_set_background_color(0x00000000);
-    bfont_draw_str_vram_fmt((uint32_t)(x < 0 ? 0 : x), (uint32_t)y,
-                            false, "%s", DC_SPLASH_TEXT);
+static inline unsigned short spl_rgb(int r, int g, int b) {
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
+    return (unsigned short)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
 
-    /* Count what was actually written. kb/traps.md: "a framebuffer HASH is not
-     * a framebuffer TEST — count nonzero pixels"; the same applies to "did the
-     * splash draw". Zero here means bfont drew nothing and the screen is black,
-     * which is otherwise indistinguishable from a splash that worked and was
-     * simply never looked at. */
+/* Vertical gradient, evaluated per row. Dark navy at the top fading to near
+ * black at the bottom — enough to stop the screen reading as "off" without
+ * competing with the text. */
+static inline unsigned short spl_bg(int y) {
+    int t = (y * 255) / (DC_SCREEN_HEIGHT - 1);
+    return spl_rgb(6 + ((14 - 6) * (255 - t)) / 255,
+                   10 + ((22 - 10) * (255 - t)) / 255,
+                   28 + ((52 - 28) * (255 - t)) / 255);
+}
+
+static void spl_fill_rows(int y0, int y1) {
+    int y, x;
+    for (y = y0; y < y1; y++) {
+        unsigned short c = spl_bg(y);
+        unsigned short* row = vram_s + (size_t)y * DC_SCREEN_WIDTH;
+        for (x = 0; x < DC_SCREEN_WIDTH; x++) row[x] = c;
+    }
+}
+
+/* Redraw the text band. `phase` is the shine position in [0,1] as a fraction of
+ * a sweep that starts off the left edge and ends off the right; `fade` is 0..255
+ * and scales the glyph colour so the first frames ramp in. */
+static void spl_draw_text(int phase_x, int fade) {
+    int sy, sx;
+#ifndef DC_SPLASH_SHINE
+    (void)phase_x;
+#endif
+
+    /* Repaint only the band. See the no-back-buffer warning above. */
+    spl_fill_rows(SPL_Y, SPL_Y + SPL_H);
+
+    for (sy = 0; sy < SPL_SRC_H; sy++) {
+        const unsigned char* mrow = s_spl_mask + (size_t)sy * SPL_MASK_STRIDE;
+        for (sx = 0; sx < SPL_SRC_W; sx++) {
+            int r, g, b, zy, zx;
+            unsigned short c;
+            if (!(mrow[sx >> 3] & (0x80u >> (sx & 7)))) continue;
+
+            /* Base is a cool white; the sweep adds a warm core so the highlight
+             * reads as a specular pass rather than as a brightness change. */
+            r = 198; g = 204; b = 226;
+#ifdef DC_SPLASH_SHINE
+            {
+                int dx = sx * SPL_ZOOM - phase_x;
+                if (dx < 0) dx = -dx;
+                if (dx < 110) {
+                    int t = 110 - dx;        /* 0..110 */
+                    int w = (t * t) / 110;   /* quadratic falloff, 0..110 */
+                    r += (255 - r) * w / 110;
+                    g += (250 - g) * w / 110;
+                    b += (215 - b) * w / 110;  /* pulls warm at the core */
+                }
+            }
+#endif
+            r = r * fade / 255; g = g * fade / 255; b = b * fade / 255;
+            c = spl_rgb(r, g, b);
+
+            for (zy = 0; zy < SPL_ZOOM; zy++) {
+                unsigned short* row = vram_s +
+                    (size_t)(SPL_Y + sy * SPL_ZOOM + zy) * DC_SCREEN_WIDTH +
+                    SPL_X + sx * SPL_ZOOM;
+                for (zx = 0; zx < SPL_ZOOM; zx++) row[zx] = c;
+            }
+        }
+    }
+}
+
+#ifndef DC_SPLASH_NO_BAR
+static void spl_draw_bar(unsigned int done, unsigned int total) {
+    int y, x, filled;
+    const unsigned short frame = spl_rgb(40, 60, 110);
+    const unsigned short fill  = spl_rgb(120, 190, 255);
+
+    if (total == 0) total = 1;
+    if (done > total) done = total;
+    filled = (int)(((unsigned long long)done * (unsigned long long)(SPL_BAR_W - 2))
+                   / total);
+
+    for (y = 0; y < SPL_BAR_H; y++) {
+        unsigned short* row = vram_s + (size_t)(SPL_BAR_Y + y) * DC_SCREEN_WIDTH
+                            + SPL_BAR_X;
+        for (x = 0; x < SPL_BAR_W; x++) {
+            int edge = (y == 0 || y == SPL_BAR_H - 1 ||
+                        x == 0 || x == SPL_BAR_W - 1);
+            row[x] = edge ? frame
+                          : ((x - 1 < filled) ? fill : spl_bg(SPL_BAR_Y + y));
+        }
+    }
+}
+#endif
+
+/* Called from the keep-list sweep so the bar tracks the REAL load, and so the
+ * shine keeps moving while the disc is being read. Both are no-ops until the
+ * splash has actually drawn, which is what s_spl_ready guards: this runs on the
+ * boot path and must never write vram_s before vid_set_mode(), nor after
+ * pvr_init() has reprogrammed the display controller at its own buffers. */
+void dc_splash_progress(unsigned int done, unsigned int total) {
+#if !defined(DC_HOST_STUB) && !defined(DC_NO_SPLASH)
+    if (!s_spl_ready) return;
+#ifdef DC_SPLASH_SHINE
     {
-        unsigned int lit = 0, i;
-        const unsigned int n = (unsigned int)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT;
-        for (i = 0; i < n; i++)
-            if (vram_s[i]) lit++;
-        DC_LOGE("[DC] splash: \"%s\" %u px lit of %u, %d ms\n",
-                DC_SPLASH_TEXT, lit, n, (int)DC_SPLASH_MS);
+        /* Tie the sweep to load progress rather than to a clock, so the
+         * animation IS the progress indication even before the bar is read. */
+        static unsigned int tick = 0;
+        int span = SPL_W + 220;
+        spl_draw_text(((int)(++tick * 14) % span) - 110, 255);
+    }
+#endif
+#ifndef DC_SPLASH_NO_BAR
+    spl_draw_bar(done, total);
+#else
+    (void)done; (void)total;
+#endif
+#else
+    (void)done; (void)total;
+#endif
+}
+
+static void dc_splash(void) {
+    uint64_t t0;
+    int sy, sx, shot = 0;
+
+    /* STEP 1 — capture the glyph shapes.
+     *
+     * bfont draws straight into vram_s and there is no way to ask it for a
+     * bitmap, so the text is rendered once into the top-left corner, read back
+     * into the 1-bit mask, and then buried under the gradient before the hold
+     * loop starts. The scratch draw is on screen for well under a frame and is
+     * never held, which is why no back buffer is needed for it. */
+    memset(vram_s, 0, (size_t)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT * 2);
+    bfont_set_foreground_color(0xFFFFFFFF);
+    bfont_set_background_color(0x00000000);
+    bfont_draw_str_vram_fmt(0, 0, false, "%s", DC_SPLASH_TEXT);
+
+    memset(s_spl_mask, 0, sizeof(s_spl_mask));
+    for (sy = 0; sy < SPL_SRC_H; sy++) {
+        const unsigned short* row = vram_s + (size_t)sy * DC_SCREEN_WIDTH;
+        for (sx = 0; sx < SPL_SRC_W; sx++)
+            if (row[sx])
+                s_spl_mask[sy * SPL_MASK_STRIDE + (sx >> 3)] |= 0x80u >> (sx & 7);
     }
 
-    /* Hold it, but never make the player wait: any button skips. The pad is
-     * polled through maple, which KOS drives from the vblank IRQ, so this is a
-     * plain busy-wait with no scheduling requirement. */
+    /* Count what bfont actually wrote. kb/traps.md: "a framebuffer HASH is not
+     * a framebuffer TEST — count nonzero pixels". Zero here means the mask is
+     * empty and every frame below will draw an empty band, which is otherwise
+     * indistinguishable from a splash nobody looked at. */
+    {
+        unsigned int lit = 0;
+        int i, n = SPL_MASK_STRIDE * SPL_SRC_H, k;
+        for (i = 0; i < n; i++)
+            for (k = 0; k < 8; k++)
+                if (s_spl_mask[i] & (1u << k)) lit++;
+        DC_LOGE("[DC] splash: \"%s\" mask %u px of %d, %dx%d at %d,%d, %d ms\n",
+                DC_SPLASH_TEXT, lit, SPL_SRC_W * SPL_SRC_H,
+                SPL_W, SPL_H, SPL_X, SPL_Y, (int)DC_SPLASH_MS);
+    }
+
+    /* STEP 2 — the field. This also erases the scratch draw. */
+    spl_fill_rows(0, DC_SCREEN_HEIGHT);
+    s_spl_ready = 1;
+
+    /* STEP 3 — hold and animate. Any button skips; the pad is polled through
+     * maple, which KOS drives from the vblank IRQ, so this needs no scheduler.
+     * vid_waitvbl() paces it at 60 Hz and keeps the band redraw off the
+     * scanout's own read of that region. */
     t0 = timer_ms_gettime64();
-    while (timer_ms_gettime64() - t0 < (uint64_t)(DC_SPLASH_MS)) {
-        maple_device_t* dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-        cont_state_t* st = dev ? (cont_state_t*)maple_dev_status(dev) : NULL;
-        if (st && st->buttons)
-            break;
-        thd_pass();
+    for (;;) {
+        uint64_t el = timer_ms_gettime64() - t0;
+        int fade, phase, span;
+        maple_device_t* dev;
+        cont_state_t* st;
+
+        if (el >= (uint64_t)(DC_SPLASH_MS)) break;
+
+        fade  = (el < 400u) ? (int)((el * 255u) / 400u) : 255;
+        span  = SPL_W + 220;
+        /* One full sweep across the title per DC_SPLASH_MS, offset so it enters
+         * from off the left edge. */
+        phase = (int)((el * (uint64_t)span) / (uint64_t)(DC_SPLASH_MS)) - 110;
+        spl_draw_text(phase, fade);
+#ifndef DC_SPLASH_NO_BAR
+        spl_draw_bar(0, 1);        /* the empty frame, so it does not pop in */
+#endif
+
+        /* One screenshot, at the sweep's midpoint, so the splash is judged on a
+         * picture like every other renderer change (kb/traps.md, "screenshots
+         * are the gate, not the counters"). Compiled out unless the image has
+         * DC_FB_PROBE and DC_FB_IMAGE. */
+        if (!shot && el >= (uint64_t)(DC_SPLASH_MS) / 2u) {
+            shot = 1;
+            dc_pvr_fb_dump_surface(vram_s);
+        }
+
+        dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+        st  = dev ? (cont_state_t*)maple_dev_status(dev) : NULL;
+        if (st && st->buttons) break;
+        vid_waitvbl();
     }
 
     /* Deliberately NOT cleared. dc_gx_backend_start() is deferred until after
-     * the keep-list load (see dc_platform.h), so leaving the text up turns what
-     * used to be a black "is it hung?" gap into a loading screen. The PVR wipes
-     * it when it finally takes the display. DC_SPLASH_MS is therefore a MINIMUM
-     * on-screen time, not the total. */
+     * the keep-list load (see dc_platform.h), so leaving the title up — now
+     * with a bar that dc_splash_progress() advances — turns what used to be a
+     * black "is it hung?" gap into a real loading screen. The PVR wipes it when
+     * it finally takes the display. DC_SPLASH_MS is a MINIMUM on-screen time,
+     * not the total. */
 }
 #else
 static void dc_splash(void) { }
+void dc_splash_progress(unsigned int done, unsigned int total) {
+    (void)done; (void)total;
+}
 #endif
 
 void dc_platform_init(void) {
@@ -759,6 +981,12 @@ static void dc_keep_sweep(void) {
         const dc_keep_rec_t* r = &s_keep_rec[i];
         file_t fd;
 
+        /* The loading screen, driven by the real work. Every 32nd asset, not
+         * every one: this repaints a 552x48 band plus the bar, and 1,392 full
+         * repaints would show up next to a load that is otherwise ~130 disc
+         * reads. 32 gives ~43 updates, which is smooth at this duration. */
+        if ((i & 31u) == 0u) dc_splash_progress(i, s_keep_n);
+
         if (r->rom_src != DC_STUB_SRC_REL && r->rom_src != DC_STUB_SRC_DOL) {
             DC_LOGE("[DC/KEEP] %s: rom_src=%d has no on-disc source, "
                     "left zeroed\n", r->who, (int)r->rom_src);
@@ -847,6 +1075,8 @@ static void dc_keep_sweep(void) {
         DC_LOG("[DC/KEEP] %s %u B @ %u\n", r->who, r->size, r->rom_off);
 #endif
     }
+
+    dc_splash_progress(s_keep_n, s_keep_n);   /* land the bar on full */
 
     /* reads= is the number to A/B. It is host-independent, so Flycast proves
      * the improvement even though FastGDRomLoad hides the wall clock. */
