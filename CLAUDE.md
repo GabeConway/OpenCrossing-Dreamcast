@@ -59,6 +59,15 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
 | — | `kb/state-log.md` | only when you need the evidence behind a number in `STATE.md` |
 
+**The port walks the town.** It boots on retail hardware with **loading at
+parity with the emulator**, and in Flycast it reaches the town, walks around it,
+meets Tom Nook and is taken to the houses. Every summer acre is in the image.
+Read `kb/RESUME.md` first — in particular the **seven** measurement rules, two
+of which were paid for on 2026-08-04: `MEMLEDGER FIT … OK` does not mean the
+image boots, and an average cost per command is not the cost of any command.
+
+<details><summary>the older status line, kept for the sequence</summary>
+
 **The port draws the title screen.** A `DC_ASSET_STUB=1` + `DC_DISC_ROOT=…`
 image boots in Flycast, runs the game loop at **29.3 FPS / 98 % speed**, and
 renders the Animal Crossing title overlay — "PRESS START" and the copyright
@@ -79,6 +88,8 @@ and the measurements; this cost a full debug cycle.
 State the *image* fit as **one inequality**, never two pools; splitting it has
 already produced two wrong numbers.
 
+</details>
+
 ---
 
 ## 3. Document map
@@ -97,7 +108,9 @@ already produced two wrong numbers.
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
 | `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
-| `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved — keep-list gap + census blind spot) and roof clip-through (three ranked hypotheses + the one-run experiment) |
+| `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved) and roof clip-through — **now reproducible for the first time**, since `DC_AUTOWALK` can walk a character under it |
+| `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram (`DC_EMU64_HIST=<N>`). Thunks swapped into emu64's dispatch table at runtime; `src/` untouched. **In the tree, never run**, and `kb/RESUME.md` §5 says run it before costing any FPS idea |
+| `harness/dc/bench/` | `bench_mem.c` plus the build path it never had. It passes — and Flycast cannot answer it (`kb/closed.md`) |
 | `PLAN.md` | milestones, the four hard problems, risk register, open questions |
 
 ### Build & test
@@ -158,7 +171,9 @@ already produced two wrong numbers.
 | `tools/dcstub/measure_dedup.py` | the L6 dedup measurement (S2). Header comment is the doc |
 | `tools/dcstub/census_resolve.py` | resolves a `DC_ASSET_CENSUS=1` console log into the scene's real working set (symbol, size, kind). The only way to learn what a scene touches — acres and NPCs are named by index, not by symbol |
 | `tools/dcstub/census_keeplist.py` | joins a resolved census to the linked map and emits `DC_STUB_KEEP`. Replaces the hand-written keep list |
-| `tools/dcstub/keeplist-opening.txt` | **the checked-in keep list for the opening scene.** Regenerating it costs two builds and a 240 s run — use it as-is unless the scene changes |
+| `tools/dcstub/keeplist-opening.txt` | the censused keep list for the opening scene. Still the right list for title-screen and size work |
+| `tools/dcstub/keeplist-town.txt` | **the keep list to BUILD WITH.** All 371 summer acre TUs, the map overlay, the date/time HUD, Nook and the raccoon NPCs, two houses. ⚠️ Enumerated from the tree, NOT censused — `sys_math.c:7` seeds the town from `sqrand(osGetCount())`, so every boot lays out a different town and no census can be correct |
+| `tools/dcstub/make_keeplist_town.py` | generates the above; its header carries the reasoning and the cost |
 | `tools/dcfb/fbimg_to_png.py` | decodes a `DC_FB_IMAGE` console log into PNG screenshots. No third-party modules |
 | `tools/dcstub/make_src_shrink.py` | the `DC_SRC_SHRINK` scratch-tree data rewriter (S3, on by default). Header comment is the doc |
 | `dc/stage-disc.sh` | flatten a `dcasset extract` tree into a disc root for `DC_DISC_ROOT` |

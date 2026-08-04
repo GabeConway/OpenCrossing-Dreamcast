@@ -10,6 +10,30 @@ Current gap: **6,999,924 [SUPERSEDED gap — now 4,705,628 post-ARAM-pager, see 
 ledger, that file is the plan. `kb/research-creative-ram.md` holds unbanked
 *concepts* that are not yet levers.
 
+## ⭐ 2026-08-04 — TWO LEVERS APPLIED, and they bought the acre fix
+
+Both are measurements the project had never taken, and together they are
+~1.15 MB. They are what made `tools/dcstub/keeplist-town.txt` affordable.
+
+| lever | bytes | status |
+|---|---|---|
+| **The arena cut.** `DC_ARENA_BYTES` 1,900,000 → **1,200,000** | **+700,000** to libc | **APPLIED.** Licensed by the first TOWN reading of `DC_ARENA_PROBE`: `[DC/ARENA] zelda used=289536 free=1124944 largest_free=1124944`. Every previous reading was the title screen, which is why no doc would license a cut. Leaves ~425 KB above measured use |
+| **jaudio `.bss` shrink**, `make_src_shrink.py` S8/S9, keyed to `DC_AUDIO=0` | **−450,368** | **APPLIED.** `seq` 256→8 tracks (−267,840), `CHANNEL` 256→8 (−79,360), `dvd_buf` (−49,152), `CALLSTACK` 128→16 frames with its modulus (−28,672), `pc_task_buf` (−25,344). Justified by the pump being `#if DC_AUDIO` and every downstream function having exactly one caller. Each rewritten TU carries an `#error` against a stale tree compiled with `DC_AUDIO=1` |
+
+⚠️ **The S9a `dmabuffer` rule is worth ZERO, not the −61,440 its design
+claimed.** `dc/build/gcdrop.txt` shows `--gc-sections` already removes
+`.bss.dmabuffer`, and `sh-elf-nm` finds no `_dmabuffer` in the linked ELF. The
+rule ships (a `--no-gc-sections` debug link puts it back) but is excluded from
+`EXPECTED`. Quoting it would be exactly the L3 class of error this file exists
+to prevent.
+
+⚠️ **`DC_AUDIO=1` gives all 401,216 B of S8 back** — the pools are only dead
+while the sequencer is. A sound build costs ~455,848 B more span than a silent
+one; that is why sound is off by default and `DC_AUDIO_SCENES` is opt-in.
+
+**The number to plan against is NOT `margin=`.** See `kb/traps.md`,
+"`MEMLEDGER FIT … OK` does not mean the image boots".
+
 Two results that reorder this list, both derived in `kb/STATE.md`:
 
 - **L4 (`.text` overlays) is NOT needed.** The gap closes without touching

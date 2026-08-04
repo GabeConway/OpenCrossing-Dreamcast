@@ -185,6 +185,66 @@ sub-8 only, where the ratio *is* an exact power of two.
 
 ---
 
+## F1 — offline bbox-CULLDL injection. NOT RECOMMENDED (2026-08-04)
+
+`kb/research-fps-ideas.md` F1 proposed splitting acre and object display lists
+into chunks, each prefixed with 8 synthetic AABB corner vertices and a
+`gsSPCullDisplayList`, so emu64 skips geometry before paying `-O0` price for it.
+A full design pass killed it on arithmetic, not on taste:
+
+- **Its RAM cost is 594 KB of `.data`** for the town keep-list scope (3,804
+  chunks x 160 B), not the 60-120 KB it claimed. 1.83 MB for all of `src/data`.
+- **Its own cost cap selects nothing.** F1 proposed bounding injection to
+  display lists of 50+ vertices. The game uses the **5-bit** N-triangle index
+  format exclusively, so no `gsSPVertex` anywhere in `src/data` exceeds **32**.
+  Max is 32, p50 is 14, and chunks with n >= 33 number **zero**.
+- **The bboxes cannot be computed without the ROM.** 2,112 files source their
+  `Vtx` from `assets/*.inc` files that do not exist in the repo; under
+  `TARGET_PC` every vertex array is uninitialised storage filled at runtime
+  from `main.dol`/`foresta.rel`. So the bbox table is ROM-derived data that may
+  not be committed (CLAUDE.md §1) and cannot be regenerated in the container.
+  A runtime AABB pass removes that but keeps every byte.
+- **G3 dominates it**: 25-35 ms against F1's ~18 ms, for **0 bytes**, covering
+  runtime-built display lists too, and needing no per-symbol reachability proof.
+  Spending 594 KB against a 4.7 MB deficit to buy a smaller version of a free
+  win is bad arithmetic.
+
+⚠️ Also note for anyone measuring an F1-shaped change: **`cmds` goes UP**, on
+every frame, even when the frame gets faster — a cull hit skips 2 commands and
+adds 4, and the win is entirely per-vertex work. That breaks `kb/perf-dc.md`
+§6's matched-frame recipe, which matches on `cmds`.
+
+The surviving variant, if the G3 sign-off is ever refused: model-granularity
+injection scoped to the town keep list, 1,355 boxes, **212 KB**. It should still
+wait for `DC_EMU64_HIST` to run.
+
+**Correction banked along the way:** `kb/perf-dc.md` §3.5 justifies the vertex
+memo's 32 entries with "emu64's cache is `Vtx vertices[32]`". That premise is
+false — `VTX_COUNT` is **128** (`emu64.hpp:33`). The memo stays correct (it is a
+direct-mapped cache with a field-by-field compare), but the stated bound is not
+a bound; what actually caps a batch at 32 distinct sources is the 5-bit
+triangle index format.
+
+## A census cannot produce a town keep list (2026-08-04)
+
+Do not propose "just re-run the census on a town scene" for missing acres,
+structures or villagers. `src/system/sys_math.c:7` seeds the whole town from
+`sqrand(osGetCount())`, which on DC is boot-elapsed time, so **every boot lays
+out a different town**. A census names what ONE run walked into. Enumerate from
+the tree (`tools/dcstub/make_keeplist_town.py`), or land S4.
+
+Separately, the census only ever observes the **depth-0 branch of every
+decision** — see `kb/traps.md`. It is a working-set tool, not a coverage tool.
+
+## Running bench_mem in Flycast (2026-08-04)
+
+`harness/dc/bench/bench_mem.c` now builds, runs and passes every checksum — and
+the emulator cannot answer the question it exists to ask. CPU read == write ==
+**114.3 MB/s** at every size in both the 32-bit and 64-bit VRAM windows, and the
+DMA rows come off 0-2,240 ns samples. Flycast models neither VRAM access latency
+nor Holly bus contention. **Do not re-run it in an emulator and quote the
+numbers.** It is a CD-R burn task now, at 57,600 baud.
+
 ## Caveat on the wider `kb/`
 
 The first session's deliverables were written by agents whose **adversarial

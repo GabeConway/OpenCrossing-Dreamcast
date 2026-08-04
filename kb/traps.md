@@ -548,6 +548,84 @@ for those see `kb/closed.md`.
   error in the commit that first printed the mix.** Per-opcode cost needs a
   per-opcode instrument — that is what `DC_EMU64_HIST` is for.
 
+## `MEMLEDGER FIT … OK` does not mean the image boots (2026-08-04)
+
+- **`margin=` IS libc's pool, and the ledger has no model of libc's demand.** A
+  wide-keep-list build printed `MEMLEDGER FIT image_span=12681100
+  additive_heap=2358752 margin=1606292 **OK**` and then died on the splash at
+  `trademark_init` with `Out of memory. Requested sbrk_base 8d0be000, was
+  8cf5c000, diff 1449984`. `OK` means the static side fits and nothing more.
+  The pair of runs gives the number that matters: libc peak ≈ margin +
+  shortfall = 3,056,276, against a 3,202,932 margin on the build that boots,
+  i.e. **~146 KB of real headroom, not 3.2 MB.** `kb/heap-two-pools.md`.
+
+## The census only ever sees the depth-0 branch (2026-08-04)
+
+- **`DC_ASSET_CENSUS` is sound; its DRIVER is the blind spot.** `DC_AUTOSTART`
+  presses A, every choice menu defaults to index 0, and anything behind index 1
+  is invisible. That is why `src/data/model/tim_win.c` — the whole clock/date
+  screen — was missing for two sessions until a human reported it: Rover's
+  "is that right?" prompt puts the clock behind `mChoice_CHOICE1`
+  (`ac_npc_guide_move.c_inc:302-314`). Ruled out first, against the artifacts:
+  not a capped table (`CENSUS SUM … overflow=0`, `full=0`), not a bypassed draw
+  path (`tim_win.c` is `gsDPSetTextureImage_Dolphin` throughout, so
+  `setup_texture_tile` hands the real symbol address to `GXLoadTexObj`), and
+  not "the run never got that far" (the resolved census contains `nam_win_*`
+  and `mra_win_*`, which the guide opens *after* the clock).
+- Same shape: anything gated on `mEv_CheckFirstIntro() == FALSE` — the
+  post-intro HUD, the START inventory, the START map, NPC spawning — is
+  invisible to every census taken so far.
+- **`ASSET MISSING` does not cover this class.** It fires only when a *kept*
+  asset fails to load from disc (`pc/src/pc_assets.c:93`). A stubbed array is
+  silently zero, and there is no runtime detector for "a zero-filled asset was
+  drawn" anywhere in `dc/`. Building one is cheap and unbuilt — `dc_gx.c` now
+  mirrors the source pointer into `g_gx.tex_obj_src[]`, so `census_resolve.py`
+  would symbolise it for free.
+
+## A stubbed acre loses its VERTICES, not its textures (2026-08-04)
+
+- **An unkept `src/data/field/bg/acre/*` file renders NOTHING, and it looks
+  like a texture bug.** The acre `.c` stubs its vertex array under `TARGET_PC`
+  — `grd_s_t_st1_2.c:15-16` is
+  `static Vtx grd_s_t_st1_2_v[0xF00 / sizeof(Vtx)]` — while the `Gfx` display
+  list is initialised data and is NOT stubbed. So the list executes normally
+  against all-zero vertices, every triangle collapses to the origin, and the
+  acre contributes no pixels. Same for `src/data/model/obj_s_*` and for NPC
+  models: **Tom Nook rendered as a black spiky mess**, which is the same defect
+  seen from the inside.
+- **A census can NEVER produce a correct town keep list.**
+  `src/system/sys_math.c:7` seeds the town from `sqrand(osGetCount())`, and on
+  DC `osGetCount()` is boot-elapsed time — **every boot lays out a different
+  town**. `kb/station-bugs.md` §1 had noticed the symptom in 2026-08-02 ("town
+  layout randomises the station column, so keep all three") without drawing the
+  general conclusion. `tools/dcstub/keeplist-town.txt` enumerates from the tree.
+
+## An average cost per command is not the cost of any command (2026-08-04)
+
+- **`emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` (r = 0.954) does NOT license
+  pricing a SUBSET of commands at 12.31 µs.** That fit is against TOTAL `cmds`,
+  and total `cmds` correlates with `vtx`, so the coefficient is dominated by
+  whichever opcode does the most work per command. Applying it to the 2,094
+  state commands per town frame gives ~26 ms; the counter-arithmetic (265
+  `G_VTX` carrying ~6,951 vertices at the separately measured ~6.9 µs/vertex
+  ≈ 48 ms) says `G_VTX` alone is most of the budget. **I made exactly this
+  error in the commit that first printed the mix.** Per-opcode cost needs a
+  per-opcode instrument — `DC_EMU64_HIST`.
+
+## A test knob that fires in the wrong scene corrupts the run (2026-08-04)
+
+- **`DC_AUTOWALK` started at a fixed `PADRead` call number and drove the
+  NAME-ENTRY KEYBOARD cursor.** Garbage name, confirm prompt declined, run
+  looped in the intro forever — reported by a human as *"just looping over the
+  name selection, press no, then entering name, then pressing no"*. It happened
+  to work on the run before, which is worse than failing every time. Now gated
+  on `sou_scene_mode` (`DC_AUTOWALK_SCENE`, default 9 = the town), and the leg
+  counter does not advance until the gate opens.
+- `u8 sou_scene_mode` (`game64.c_inc:504`) is an ordinary non-static global —
+  `8c900888 B _sou_scene_mode` in the linked ELF — so `dc/` can read the live
+  scene with no `src/` edit and no interposition. It is the same variable the
+  `[SCENE_MODE]` line prints. This is a reusable seam.
+
 ## Agent hygiene
 
 - **Agents must not run git.** The main thread commits.

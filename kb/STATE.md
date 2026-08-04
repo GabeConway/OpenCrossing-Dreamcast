@@ -6,6 +6,21 @@ true *right now*, plus what to do next. Everything else is one hop away.
 ## ⭐ 2026-08-04 session 2 — three things changed, and one of them was a
 ## misdiagnosis the project had been carrying for two sessions
 
+### ⭐ RESOLVED LATER THE SAME DAY — the acre fix LANDED, and here is what paid
+
+Item 1 below says the wide keep list does not fit. It does now.
+`DC_ARENA_BYTES` 1,900,000 → **1,200,000** on the strength of the first-ever
+TOWN arena measurement (`[DC/ARENA] zelda used=289536 free=1124944`) plus the
+jaudio `.bss` shrink (−450,368 B, keyed to `DC_AUDIO=0`) bought ~1.15 MB, and
+`tools/dcstub/keeplist-town.txt` now keeps all 371 summer acre TUs, the map
+overlay, the date/time HUD, Tom Nook and the raccoon NPCs, `obj_s_house1` and
+`obj_s_myhome1`. Shipping image: `image_span=11749436 additive_heap=1658752
+margin=3237956 OK`, no OOM, `ASSET MISSING 0`.
+
+Human verdict: *"the mountain texture works now"*, *"the textures overall look
+excellent, significantly improved"*. Read `kb/RESUME.md` §3 for the mechanism
+and §4 for what is still stubbed (60 villager models, 74 structures, winter).
+
 1. **"Missing and weird textures" is mostly MISSING GEOMETRY — and the obvious
    fix does not fit.** The keep list covers 18 of 268 acres and 11 of 84
    summer structures, and an acre `.c` stubs its **vertex** array, not just its
