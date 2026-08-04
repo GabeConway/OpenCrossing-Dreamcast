@@ -683,8 +683,29 @@ void dc_gx_init(void) {
         g_gx.chan_mat_color[i][3] = 1.0f;
     }
 
+#ifdef DC_NO_LATE_PVR
     dc_gx_backend_init();
+#endif
     dc_gx_dirty_all();
+}
+
+/* Bring the PVR up. Split out of dc_gx_init() so the boot splash survives the
+ * asset load — pvr_init() reprograms the display controller at its own buffers
+ * (kb/traps.md: "vram_s is not the displayed surface once pvr_init() has run"),
+ * so calling it early blanks the screen and every second of disc I/O after it
+ * happens on black. The GX STATE MACHINE still comes up at the old point, which
+ * is what boot-order rule 4 actually requires; nothing between there and here
+ * makes a GX call.
+ *
+ * Idempotent, so a second call is harmless.
+ * Kill switch: -DDC_NO_LATE_PVR restores pvr_init() inside dc_gx_init(). */
+void dc_gx_backend_start(void) {
+#ifndef DC_NO_LATE_PVR
+    static int started = 0;
+    if (started) return;
+    started = 1;
+    dc_gx_backend_init();
+#endif
 }
 
 void dc_gx_shutdown(void) {

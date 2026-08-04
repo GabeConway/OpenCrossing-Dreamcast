@@ -372,7 +372,11 @@ static void dc_splash(void) {
         thd_pass();
     }
 
-    memset(vram_s, 0, (size_t)DC_SCREEN_WIDTH * DC_SCREEN_HEIGHT * 2);
+    /* Deliberately NOT cleared. dc_gx_backend_start() is deferred until after
+     * the keep-list load (see dc_platform.h), so leaving the text up turns what
+     * used to be a black "is it hung?" gap into a loading screen. The PVR wipes
+     * it when it finally takes the display. DC_SPLASH_MS is therefore a MINIMUM
+     * on-screen time, not the total. */
 }
 #else
 static void dc_splash(void) { }
@@ -526,6 +530,120 @@ static const char* const dc_stub_rom_path[2] = {
 void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
                            unsigned int rom_off, int rom_src, int swap);
 
+/* ==========================================================================
+ * DC_KEEP_SWEEP — read the keep list in DISC ORDER, not in source order
+ * ==========================================================================
+ * The generated dc_stub_keep.inc calls the loader below 1,392 times in the
+ * order the keep list happens to be written, and each call is an fs_seek plus
+ * an fs_read. Measured from a real run's [DC/KEEP] lines:
+ *
+ *   874,736 useful bytes, offsets 3,012,288 .. 14,399,968 of a 15.6 MB file
+ *   1,235 of 1,392 reads are < 2048 B; 932 are < 512 B
+ *   64 backward jumps; 255 MB of total seek distance travelled
+ *   only 559 distinct 2048-byte sectors are actually wanted, in 112 runs
+ *
+ * KOS's iso9660 layer has a 16-block x 2048 B LRU sector cache
+ * (fs_iso9660.c:211) and starts a drive-level stream on a sector-aligned read
+ * (fs_iso9660.c:755-777), so it already does read-ahead — which is why this
+ * does NOT add a buffer ring. What it cannot do is fix the ORDER. Modelling
+ * that cache against the observed request order gives ~578 single-sector
+ * GD-ROM commands, each preceded by a seek to a scattered offset.
+ *
+ * Sorting the same requests by (rom_src, rom_off) and sweeping them with one
+ * window buffer, modelled on the same trace:
+ *
+ *     policy                       GD-ROM commands    bytes moved
+ *     today (source order)                    578        ~1.18 MB
+ *     sorted + 8 KB window                    193         1.61 MB
+ *     sorted + 16 KB window                   129         2.12 MB
+ *     sorted + 32 KB window                    89         2.92 MB
+ *
+ * 16 KB is the knee: -449 commands for +0.94 MB. At ~500 KB/s the extra bytes
+ * cost 1.9 s and the removed seeks save 449 x T_seek, which is 9 s at an
+ * optimistic 20 ms and 45 s at 100 ms. On Flycast with FastGDRomLoad the win
+ * is invisible; this is a hardware-only optimisation and the COMMAND COUNT is
+ * what to A/B, not the wall clock.
+ *
+ * WHY ONE PASS AND NOT TWO. The obvious shape is "call dc_stub_keep_load()
+ * once to count, once to record". That is WRONG and would silently drop
+ * assets: some rewritten loaders carry the generator's load-once guard —
+ * src/furniture/ac_radio_test.c has `static int radio_pal_loaded` — so the
+ * second traversal skips them. The loader therefore RECORDS on its single
+ * pass into a table that grows by realloc, and the sweep runs afterwards.
+ *
+ * RAM: transient only, and freed before OSInit carves the arena (boot order
+ * step 5 vs step 7, see the header of this file). ~28 KB of table plus the
+ * window. It is charged to libc's sbrk share while it lives — see
+ * kb/heap-two-pools.md — so the sweep reports its own peak rather than
+ * leaving anyone to guess.
+ *
+ * Kill switch: -DDC_KEEP_SWEEP=0 restores the old behaviour exactly (the
+ * loader does its own seek+read inline, as it always did).
+ * Window size: -DDC_KEEP_SWEEP_WIN=<bytes>, default 16384.
+ */
+#if !defined(DC_HOST_STUB) && !defined(DC_KEEP_SWEEP)
+#define DC_KEEP_SWEEP 1
+#endif
+#ifndef DC_KEEP_SWEEP_WIN
+#define DC_KEEP_SWEEP_WIN 16384u
+#endif
+
+#if defined(DC_KEEP_SWEEP) && DC_KEEP_SWEEP
+#define DC_KEEP_SECTOR 2048u
+
+typedef struct {
+    const char*  who;
+    void*        dest;
+    unsigned int size;
+    unsigned int rom_off;
+    short        rom_src;
+    short        swap;
+} dc_keep_rec_t;
+
+static dc_keep_rec_t* s_keep_rec;
+static unsigned int   s_keep_n;
+static unsigned int   s_keep_cap;
+static int            s_keep_recording;   /* 1 while the .inc is traversing */
+
+/* Sort by source file, then by offset: one forward sweep per ROM. */
+static int dc_keep_cmp(const void* a, const void* b) {
+    const dc_keep_rec_t* x = (const dc_keep_rec_t*)a;
+    const dc_keep_rec_t* y = (const dc_keep_rec_t*)b;
+    if (x->rom_src != y->rom_src) return x->rom_src - y->rom_src;
+    if (x->rom_off < y->rom_off) return -1;
+    if (x->rom_off > y->rom_off) return 1;
+    return 0;
+}
+
+static int dc_keep_record(const char* who, void* dest, unsigned int size,
+                          unsigned int rom_off, int rom_src, int swap) {
+    if (!s_keep_recording) return 0;
+    if (s_keep_n == s_keep_cap) {
+        unsigned int cap = s_keep_cap ? s_keep_cap * 2u : 256u;
+        dc_keep_rec_t* p = (dc_keep_rec_t*)realloc(s_keep_rec,
+                                                   cap * sizeof(*p));
+        if (!p) {
+            /* Out of room: fall back to loading this one inline. Correctness
+             * before speed — a dropped record is a zeroed asset. */
+            DC_LOGE("[DC/KEEP] sweep table realloc to %u failed; "
+                    "loading inline from here\n", cap);
+            s_keep_recording = 0;
+            return 0;
+        }
+        s_keep_rec = p;
+        s_keep_cap = cap;
+    }
+    s_keep_rec[s_keep_n].who     = who;
+    s_keep_rec[s_keep_n].dest    = dest;
+    s_keep_rec[s_keep_n].size    = size;
+    s_keep_rec[s_keep_n].rom_off = rom_off;
+    s_keep_rec[s_keep_n].rom_src = (short)rom_src;
+    s_keep_rec[s_keep_n].swap    = (short)swap;
+    s_keep_n++;
+    return 1;
+}
+#endif /* DC_KEEP_SWEEP */
+
 void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
                            unsigned int rom_off, int rom_src, int swap)
 {
@@ -537,6 +655,14 @@ void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
     file_t fd;
 
     if (dest == NULL || size == 0) return;
+
+#if defined(DC_KEEP_SWEEP) && DC_KEEP_SWEEP
+    /* Recording pass: remember it and return. The sweep below does the I/O in
+     * disc order. Validation of rom_src stays BELOW this point on purpose —
+     * a bad rom_src is diagnosed once, at sweep time, not twice. */
+    if (dc_keep_record(who, dest, size, rom_off, rom_src, swap))
+        return;
+#endif
 
     if (rom_src != DC_STUB_SRC_REL && rom_src != DC_STUB_SRC_DOL) {
         /* SRC_NONE means "the .bin file is the only source". There is no
@@ -583,15 +709,170 @@ void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
 
     dc_stub_keep_ok++;
     dc_stub_keep_bytes += size;
+#ifdef DC_KEEP_TRACE
+    /* ⚠️ FIFTEEN SECONDS OF BOOT, ON HARDWARE, PER RUN.
+     *
+     * This prints once per kept asset and the opening keep list has 1,392 of
+     * them: measured 86,357 bytes of console in one 600 s run. KOS busy-waits
+     * on the SCIF TX FIFO whether or not a cable is attached (the same
+     * mechanism that cost 8x the frame rate in kb/traps.md), so at the KOS
+     * default 57,600 baud that is 5,760 B/s = **15.0 s of dead boot time** with
+     * nothing on screen — which is exactly the window in which a human cannot
+     * tell "it is loading" from "it has hung". The whole log is 51.4 s.
+     *
+     * The per-asset detail has never answered a question the summary below
+     * could not: dc_stub_keep_bad and the SHORT READ line already name any
+     * asset that fails. So it is off by default and -DDC_KEEP_TRACE brings it
+     * back for the one case that wants it — auditing which assets a new keep
+     * list actually pulled. */
     DC_LOG("[DC/KEEP] %s %u B @ %u\n", who, size, rom_off);
+#else
+    (void)who; (void)rom_off;
+#endif
 #endif
 }
 
 #include "dc/build/stubsrc/dc_stub_keep.inc"
 
+#if defined(DC_KEEP_SWEEP) && DC_KEEP_SWEEP
+/* Replay the recorded table in disc order through one window buffer. */
+static void dc_keep_sweep(void) {
+    unsigned char* win = NULL;
+    unsigned int   win_cap = (unsigned int)(DC_KEEP_SWEEP_WIN);
+    int            win_src = -1;         /* which ROM the window holds       */
+    unsigned int   win_off = 0, win_len = 0;
+    unsigned int   i, reads = 0, disc_bytes = 0;
+    unsigned int   t0 = (unsigned int)timer_ms_gettime64();
+
+    if (s_keep_n == 0) return;
+
+    qsort(s_keep_rec, s_keep_n, sizeof(*s_keep_rec), dc_keep_cmp);
+
+    win = (unsigned char*)malloc(win_cap);
+    if (!win) {
+        DC_LOGE("[DC/KEEP] sweep window malloc(%u) failed; per-asset reads\n",
+                win_cap);
+        win_cap = 0;
+    }
+
+    for (i = 0; i < s_keep_n; i++) {
+        const dc_keep_rec_t* r = &s_keep_rec[i];
+        file_t fd;
+
+        if (r->rom_src != DC_STUB_SRC_REL && r->rom_src != DC_STUB_SRC_DOL) {
+            DC_LOGE("[DC/KEEP] %s: rom_src=%d has no on-disc source, "
+                    "left zeroed\n", r->who, (int)r->rom_src);
+            dc_stub_keep_bad++;
+            continue;
+        }
+
+        fd = dc_stub_rom_fd[r->rom_src];
+        if (fd == FILEHND_INVALID) {
+            fd = fs_open(dc_stub_rom_path[r->rom_src], O_RDONLY);
+            if (fd == FILEHND_INVALID) {
+                DC_LOGE("[DC/KEEP] %s MISSING — every kept asset from it "
+                        "stays zeroed\n", dc_stub_rom_path[r->rom_src]);
+                dc_stub_keep_bad++;
+                continue;
+            }
+            dc_stub_rom_fd[r->rom_src] = fd;
+            DC_LOGE("[DC/KEEP] opened %s (%d B)\n",
+                    dc_stub_rom_path[r->rom_src], (int)fs_total(fd));
+        }
+
+        /* Served by the window? */
+        if (win_cap && r->rom_src == win_src &&
+            r->rom_off >= win_off &&
+            r->rom_off + r->size <= win_off + win_len) {
+            memcpy(r->dest, win + (r->rom_off - win_off), r->size);
+        } else if (win_cap && r->size <= win_cap) {
+            /* Refill, starting on a SECTOR boundary. An unaligned start makes
+             * KOS serve the leading fragment from its single-sector cache
+             * (fs_iso9660.c:250-302) and abort the drive stream, costing an
+             * extra GD-ROM command on every single refill. */
+            ssize_t got;
+            unsigned int base = r->rom_off - (r->rom_off % DC_KEEP_SECTOR);
+            unsigned int want = win_cap;
+
+            if (base + want < r->rom_off + r->size)
+                want = (r->rom_off + r->size) - base;   /* cannot exceed cap */
+
+            if (fs_seek(fd, (off_t)base, SEEK_SET) < 0) {
+                DC_LOGE("[DC/KEEP] %s: seek to %u failed\n", r->who, base);
+                dc_stub_keep_bad++;
+                continue;
+            }
+            got = fs_read(fd, win, want);
+            if (got < (ssize_t)(r->rom_off - base + r->size)) {
+                DC_LOGE("[DC/KEEP] %s: short window read at %u (%d of %u)\n",
+                        r->who, base, (int)got, want);
+                dc_stub_keep_bad++;
+                win_src = -1; win_len = 0;
+                continue;
+            }
+            win_src = r->rom_src;
+            win_off = base;
+            win_len = (unsigned int)got;
+            reads++;
+            disc_bytes += (unsigned int)got;
+            memcpy(r->dest, win + (r->rom_off - win_off), r->size);
+        } else {
+            /* Bigger than the window: straight into the destination. */
+            if (fs_seek(fd, (off_t)r->rom_off, SEEK_SET) < 0) {
+                DC_LOGE("[DC/KEEP] %s: seek to %u failed\n",
+                        r->who, r->rom_off);
+                dc_stub_keep_bad++;
+                continue;
+            }
+            if (fs_read(fd, r->dest, r->size) != (ssize_t)r->size) {
+                DC_LOGE("[DC/KEEP] %s: short read of %u B at %u\n",
+                        r->who, r->size, r->rom_off);
+                dc_stub_keep_bad++;
+                continue;
+            }
+            reads++;
+            disc_bytes += r->size;
+            win_src = -1; win_len = 0;   /* the stream moved; window is stale */
+        }
+
+        switch (r->swap) {
+            case DC_STUB_SWAP_U16: pc_bswap_asset_u16(r->dest, r->size); break;
+            case DC_STUB_SWAP_VTX: pc_bswap_asset_vtx(r->dest, r->size); break;
+            case DC_STUB_SWAP_U32: pc_bswap_asset_u32(r->dest, r->size); break;
+            default: break;
+        }
+        dc_stub_keep_ok++;
+        dc_stub_keep_bytes += r->size;
+#ifdef DC_KEEP_TRACE
+        DC_LOG("[DC/KEEP] %s %u B @ %u\n", r->who, r->size, r->rom_off);
+#endif
+    }
+
+    /* reads= is the number to A/B. It is host-independent, so Flycast proves
+     * the improvement even though FastGDRomLoad hides the wall clock. */
+    DC_LOGE("[DC/KEEP] sweep: %u assets, %u disc reads, %u B from disc, "
+            "win %u B, table %u B, %u ms\n",
+            s_keep_n, reads, disc_bytes, win_cap,
+            (unsigned int)(s_keep_cap * sizeof(dc_keep_rec_t)),
+            (unsigned int)timer_ms_gettime64() - t0);
+
+    free(win);
+    free(s_keep_rec);
+    s_keep_rec = NULL;
+    s_keep_n = s_keep_cap = 0;
+}
+#endif /* DC_KEEP_SWEEP */
+
 /* The narrow stand-in for pc_assets_init(). */
 static void dc_stub_keep_assets(void) {
+#if defined(DC_KEEP_SWEEP) && DC_KEEP_SWEEP
+    s_keep_recording = 1;
+    dc_stub_keep_load();          /* records; does no I/O */
+    s_keep_recording = 0;
+    dc_keep_sweep();              /* one forward pass per ROM */
+#else
     dc_stub_keep_load();
+#endif
 #ifndef DC_HOST_STUB
     {
         int i;
@@ -703,6 +984,11 @@ int main(int argc, char* argv[]) {
 #else
     pc_assets_init();
 #endif
+
+    /* 5b. NOW bring the PVR up. Everything above — the disc check and the
+     *     whole keep-list load — ran with the splash still on screen, because
+     *     pvr_init() is what blanks it. See dc_gx_backend_start(). */
+    dc_gx_backend_start();
 
     /* 6/7. Hand over to the game. boot_main() runs OSInit() (which builds the
      *      arena and writes the 0x28 memory-size word — §1 rule 2),

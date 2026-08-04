@@ -373,6 +373,11 @@ void pc_audio_update_volumes(void);
 
 /* --- GX entry points the rest of the platform layer calls ------------------ */
 void dc_gx_init(void);
+/* Bring the PVR up, once. Deliberately NOT part of dc_gx_init(): pvr_init()
+ * takes over the display, so it is deferred until after the assets have
+ * loaded, which keeps the boot splash on screen for the whole load instead of
+ * a black screen. -DDC_NO_LATE_PVR puts it back inside dc_gx_init(). */
+void dc_gx_backend_start(void);
 void dc_gx_shutdown(void);
 void pc_gx_begin_frame(void);       /* game code calls this by its pc_ name */
 void dc_gx_end_frame(void);
