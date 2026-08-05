@@ -403,6 +403,18 @@ void dc_emu64_hist_frame_close(void);
 void dc_emu64_hist_report(void);
 #endif
 
+/* G2 — emu64's dispatch LOOP, at -O2, in dc/ (dc/src/dc_emu64_shadow.cpp).
+ * Same shape as G1 above and deliberately so: it installs into the same
+ * dispatch table through the same objcopy, and it arms and disarms on the same
+ * two call sites in dc_vi.c. DC_EMU64_SHADOW_LOOP=1 arms permanently; N>1 arms
+ * one frame in N, which is the matched-frame A/B. User-approved 2026-08-04. */
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+void dc_emu64_shadow_init(void);
+void dc_emu64_shadow_frame_open(unsigned int tick);
+void dc_emu64_shadow_frame_close(void);
+void dc_emu64_shadow_report(void);
+#endif
+
 /* --- Timing helper shared by dc_os.c / dc_vi.c / dc_mem_ledger.c ----------- */
 u64 dc_time_us(void);   /* free-running microseconds, safe before OSInit() */
 

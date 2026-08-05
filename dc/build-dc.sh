@@ -118,6 +118,20 @@ ENVARGS=(
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
 [ -n "${DC_AUDIO_SCENES+x}" ] && ENVARGS+=(-e DC_AUDIO_SCENES="$DC_AUDIO_SCENES")
+# G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
+# histogram came to be "in the tree, never run": dc/Makefile has
+# DC_EMU64_HIST ?= 0, so from the HOST entry point a DC_EMU64_HIST=300 build
+# compiled the instrument out AND skipped the objcopy that globalises the
+# dispatch table, silently -- the run reached the town and simply printed no
+# [EMU64H] line, which reads as "the instrument failed", not "it was never
+# built". But a plain -e DC_EMU64_HIST= would be worse than the bug: the guard
+# is `ifneq ($(DC_EMU64_HIST),0)`, and empty is not 0, so an unset variable
+# would turn the instrument ON for every build.
+[ -n "${DC_EMU64_HIST+x}" ] && ENVARGS+=(-e DC_EMU64_HIST="$DC_EMU64_HIST")
+# G2, forward-only for the same reason as DC_EMU64_HIST above -- its Makefile
+# guard is `ifneq (...,0)` too, so an empty -e would arm it on every build.
+[ -n "${DC_EMU64_SHADOW_LOOP+x}" ] && \
+    ENVARGS+=(-e DC_EMU64_SHADOW_LOOP="$DC_EMU64_SHADOW_LOOP")
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default
 # (e.g. DECOMP_OPT would become empty and KOS_CFLAGS' own -O2 would win).

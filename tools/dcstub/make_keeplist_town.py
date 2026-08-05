@@ -126,12 +126,112 @@ def structure_sources():
 
     `obj_s_` is the season prefix the field-make tables use for the
     non-winter set, the same convention as `mFM_grd_s_*`.
+    ⚠️ EACH obj_s_*.c CARRIES BOTH SEASONS, so a plain whole-file keep buys
+    winter too. obj_s_house1.c is 42,624 B of obj_s_house1_* and 42,720 B of
+    obj_w_house1_*; across the 84 files it is 328,736 B of summer against
+    223,456 B of winter. The season is chosen at runtime (ac_shop.c:92-94,
+    ac_shop_draw.c_inc:52), so in a summer town the winter half can never be
+    drawn and is pure dead weight -- and at ~146-181 KB of real headroom
+    (kb/RESUME.md §2b) it is the difference between "all 84 structures fit" and
+    "they do not".
+
+    So every entry gets make_stub_data.py's exclusion filter '#!obj_w_'.
+
+    ⚠️ EXCLUSION, not the '#obj_s_' inclusion form: 3,680 B across nine of
+    these files are season-NEUTRAL and named neither obj_s_ nor obj_w_
+    (obj_kanban_pal, hakushi_tex, obj_lotus_leaf_tex_txt,
+    obj_shop4_grass_tex_pic_i4 ...). Keeping only 'obj_s_' would stub those,
+    and a stubbed palette does not fail loudly -- it renders its model in
+    garbage colours.
+
+    ⚠️ DATED TIME BOMB. A winter town built from this list draws every one of
+    these 84 structures as a black spiky mess, exactly like the winter ground
+    (kb/RESUME.md §4 item 3). Both need a DC_SEASON=winter build.
     """
     out = []
     for fn in sorted(os.listdir(MODEL_DIR)):
         if fn.startswith("obj_s_") and fn.endswith(".c"):
-            out.append(rel(os.path.join(MODEL_DIR, fn)))
+            out.append(rel(os.path.join(MODEL_DIR, fn)) + "#!obj_w_")
     return sorted(out)
+
+
+# ---------------------------------------------------------------------------
+# HAND-ADDED ENTRIES. These are NOT derivable from a directory glob, and they
+# were previously typed straight into keeplist-town.txt -- which meant that
+# regenerating the file silently DELETED them. That regression was caught by a
+# human noticing Tom Nook, so it is now the generator's job to emit them.
+#
+# Each group is here for a reason a glob cannot express:
+#
+#   kan_* / kan_tizu2 / mMP_house_pos_list   the START map overlay
+#   clk_win / clk_jikan                      the clock / date-time HUD, which
+#                                            lives behind choice index 1 and is
+#                                            therefore invisible to every
+#                                            census ever taken (kb/RESUME.md §3)
+#   rcn/rcc/rcd/rcf/rcs/tuk _1               Tom Nook and the raccoon family.
+#                                            tuk_1 is Tanukichi himself; the rc*
+#                                            set is the shop staff. Unkept, an
+#                                            NPC model loses its VERTEX array
+#                                            and draws as a black spiky mess.
+# ---------------------------------------------------------------------------
+EXTRA_SOURCES = (
+    # START map overlay
+    "src/data/model/kan_eki.c",
+    "src/data/model/kan_fune.c",
+    "src/data/model/kan_gomi.c",
+    "src/data/model/kan_hyouji.c",
+    "src/data/model/kan_hyouji2.c",
+    "src/data/model/kan_hyouji3.c",
+    "src/data/model/kan_tizu.c",
+    "src/data/model/kan_waku.c",
+    "src/data/model/kan_win.c",
+    "src/data/model/mMP_house_pos_list.c",
+    "src/data/submenu/map/kan_tizu2.c",
+    # clock / date-time HUD
+    "src/data/model/clk_win.c",
+    "src/data/model/clk_jikan.c",
+    # Tom Nook and the raccoons, model + texture
+    "src/data/npc/model/mdl/rcc_1.c",
+    "src/data/npc/model/mdl/rcd_1.c",
+    "src/data/npc/model/mdl/rcf_1.c",
+    "src/data/npc/model/mdl/rcn_1.c",
+    "src/data/npc/model/mdl/rcs_1.c",
+    "src/data/npc/model/mdl/tuk_1.c",
+    "src/data/npc/model/tex/rcc_1.c",
+    "src/data/npc/model/tex/rcd_1.c",
+    "src/data/npc/model/tex/rcf_1.c",
+    "src/data/npc/model/tex/rcn_1.c",
+    "src/data/npc/model/tex/rcs_1.c",
+    "src/data/npc/model/tex/tuk_1.c",
+)
+
+# ---------------------------------------------------------------------------
+# INTERIOR acres, excluded by default.
+#
+# acre_sources() globs the whole tree, which sweeps in building interiors and
+# the developers' scratch rooms. They cost 269,312 B -- against 109,936 B for
+# every summer structure and roughly 146-181 KB of measured headroom
+# (kb/RESUME.md §2b), so keeping both is not a choice this list can make.
+#
+# The outdoor town is what the port currently walks, so interiors are off by
+# default and --interiors turns them on. When the villager pool lands and frees
+# room, this is the next thing to switch on.
+# ---------------------------------------------------------------------------
+INTERIOR_PREFIXES = (
+    "rom_",      # museum, tailor, shop interiors, lighthouse, tent, fortune
+    "room",      # room01
+    "tmp",       # tmp, tmp2..4, tmpr, tmpr2..4 -- scratch/temp interiors
+    "myr_etc",
+    "grd_post_office",
+    "grd_yamishop",
+)
+
+
+def is_interior(rel_path):
+    """True for an acre TU that is a building interior or a scratch room."""
+    tail = rel_path.split("/acre/", 1)[-1]
+    head = tail.split("/", 1)[0]
+    return any(head.startswith(p) for p in INTERIOR_PREFIXES)
 
 
 def main():
@@ -139,20 +239,47 @@ def main():
         if not os.path.isdir(d):
             sys.exit("missing tree: %s" % d)
 
+    want_interiors = "--interiors" in sys.argv
+
     opening = opening_entries()
     acres = acre_sources()
+    if not want_interiors:
+        acres = [a for a in acres if not is_interior(a)]
     structs = structure_sources()
+    extras = [e for e in EXTRA_SOURCES]
 
-    seen = set()
+    missing = [e for e in extras if not os.path.isfile(os.path.join(ROOT, e))]
+    if missing:
+        sys.exit("EXTRA_SOURCES names files that do not exist: %s"
+                 % ", ".join(missing))
+
+    # ⚠️ DEDUPE ON THE PATH, NOT ON THE WHOLE ENTRY. keeplist-opening.txt names
+    # 13 of these structures WITHOUT a filter, and 'foo.c' != 'foo.c#!obj_w_'
+    # as strings -- so a naive set would emit both, make_stub_data.py would see
+    # the unfiltered one too, and every byte of winter this list exists to drop
+    # would come straight back in. The structures are emitted last and win,
+    # which is why this keeps the LATER entry for a path already seen.
+    # Pass 1: resolve. A path may appear in more than one section, and the
+    # filtered form must win wherever it does.
+    resolved = {}
+    for it in opening + acres + structs + extras:
+        path = it.split("#", 1)[0]
+        if path not in resolved or ("#" in it and "#" not in resolved[path]):
+            resolved[path] = it
+
+    # Pass 2: print each path once, in section order, using the resolved form.
+    printed = set()
     def emit(items):
         n = 0
         for it in items:
-            if it in seen:
+            path = it.split("#", 1)[0]
+            if path in printed:
                 continue
-            seen.add(it)
-            print(it)
+            printed.add(path)
+            print(resolved[path])
             n += 1
         return n
+    seen = printed
 
     print("# DC_STUB_KEEP -- the WIDE (town) keep list. GENERATED, do not edit.")
     print("#")
@@ -180,12 +307,20 @@ def main():
           % len(acres))
     n_acre = emit(acres)
     print("")
-    print("# ---- every summer town structure (obj_s_*) ----")
+    print("# ---- every summer town structure (obj_s_*), winter excluded ----")
     n_str = emit(structs)
+    print("")
+    print("# ---- map overlay, clock HUD, Tom Nook and the raccoons ----")
+    print("# Not derivable from a glob. These used to be typed into the")
+    print("# generated file by hand, so regenerating it deleted them -- caught")
+    print("# by a human noticing Tom Nook. See EXTRA_SOURCES.")
+    n_extra = emit(extras)
 
     sys.stderr.write(
-        "keeplist-town: %d entries (%d censused + %d acre + %d structure)\n"
-        % (len(seen), n_open, n_acre, n_str))
+        "keeplist-town: %d entries (%d censused + %d acre + %d structure "
+        "+ %d extra)%s\n"
+        % (len(seen), n_open, n_acre, n_str, n_extra,
+           "" if want_interiors else "  [interiors excluded]"))
 
 
 if __name__ == "__main__":

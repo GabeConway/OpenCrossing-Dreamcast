@@ -626,6 +626,40 @@ for those see `kb/closed.md`.
   scene with no `src/` edit and no interposition. It is the same variable the
   `[SCENE_MODE]` line prints. This is a reusable seam.
 
+## A knob that `dc/build-dc.sh` does not FORWARD is silently off (2026-08-04)
+
+- **`DC_EMU64_HIST` was never in `dc/build-dc.sh`'s docker `-e` list, so G1 was
+  unreachable from the documented build line.** `dc/Makefile` has
+  `DC_EMU64_HIST ?= 0`; make only sees what the container's environment carries.
+  A `DC_EMU64_HIST=300 bash dc/build-dc.sh` therefore compiled the instrument
+  out AND skipped the `objcopy` that globalises the dispatch table — with no
+  diagnostic. The run reached the town and simply printed no `[EMU64H]` line,
+  which reads as "the instrument is broken", not "it was never built". That is
+  the whole reason the histogram sat in the tree "never run" for a session.
+  **Any new `DC_*` knob needs a line in `ENVARGS`, and the check is
+  `tr ' ' '\n' < dc/build/flags.stamp | grep DC_YOURKNOB`.**
+- ⚠️ **And it must be the FORWARD-ONLY form**, `[ -n "${VAR+x}" ] && ENVARGS+=(…)`,
+  never a plain `-e VAR="${VAR:-}"`. The Makefile guard is
+  `ifneq ($(VAR),0)`, and **empty is not 0**, so an unset variable forwarded as
+  empty turns the feature ON for every build.
+- **Verify the OBJECT, not just the exit code.** A build can succeed with the
+  knob silently off. For a knob that gates a whole TU:
+  `sh-elf-nm dc/build/obj/dc/src/<file>.o | grep -c <a symbol it defines>`
+  must be non-zero. One G2 run was made, watched by a human and reported as
+  "seems faster" before this check showed the shadow had never been compiled in
+  — its FPS was identical to baseline because it *was* baseline.
+
+## Killing a build mid-flight corrupts `objs.rsp` (2026-08-04)
+
+- **`TaskStop` / Ctrl-C during the link step leaves `dc/build/objs.rsp` padded
+  with NUL bytes**, because the link rule builds it with make's `$(file >>…)`
+  one path at a time. The next link then reads a response file whose first
+  ~1,500 bytes are `\0`, silently loses every object those NULs replaced, and
+  fails with **`undefined reference to 'main'`** plus `__kos_romdisk` — i.e. it
+  looks like `dc_main.c` vanished, not like a truncated file.
+  `od -c dc/build/objs.rsp | head` is the tell. **`rm dc/build/objs.rsp` and
+  relink.** Do not go looking for the bug in the code you just changed.
+
 ## Agent hygiene
 
 - **Agents must not run git.** The main thread commits.

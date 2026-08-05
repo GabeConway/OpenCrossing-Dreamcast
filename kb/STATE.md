@@ -1,7 +1,164 @@
 # Session state — resume here
 
-Updated 2026-08-04 (session 2). This file is **short on purpose**: only what is
+Updated 2026-08-04 (session 3). This file is **short on purpose**: only what is
 true *right now*, plus what to do next. Everything else is one hop away.
+
+## ⭐ 2026-08-04 session 3 — EVERY SUMMER STRUCTURE NOW RENDERS, and it cost
+## nothing, because the keep list had been buying WINTER
+
+**The headline: all 84 `obj_s_*` town structures are in the image.** Nook's
+shop, the museum, the tailor, the shrine, the police box, the notice board —
+they were 71-of-84 stubbed, i.e. black spiky messes, and they are now drawn.
+`.bss` 3,917,324 → **4,025,644 (+108,320 B)**, and the run is clean:
+
+```
+no "Out of memory", ASSET MISSING 0, LOST 0, deepest_scene unchanged (18)
+fps_p50 13.8 -> 13.6 (screenshot build, within noise)   pvr_dropped 1,314 -> 0
+VERDICT: no regression detected
+```
+
+**Why it was affordable, and this is the part worth remembering: every
+`src/data/model/obj_s_*.c` carries BOTH seasons.** `obj_s_house1.c` is 42,624 B
+of `obj_s_house1_*` and **42,720 B of `obj_w_house1_*`**. Keeping is per-FILE,
+so the 13 structures the old list kept were buying **101,216 B of winter that a
+summer town can never draw** (the season is picked at `ac_shop.c:92-94`).
+`make_stub_data.py` now takes a per-symbol filter — `path.c#!obj_w_` keeps the
+file minus its winter arrays — so all 84 summer structures cost **+109,936 B**
+against the ~146-181 KB of real headroom, instead of +332 KB.
+
+⚠️ **Use the EXCLUSION form (`#!obj_w_`), never the inclusion form
+(`#obj_s_`)**: 3,680 B across nine of those files are season-NEUTRAL and named
+neither (`obj_kanban_pal`, `hakushi_tex`, `obj_shop4_grass_tex_pic_i4` …), and a
+stubbed palette does not fail loudly — it renders its model in garbage colours.
+
+⚠️ **DATED TIME BOMB, now two of them.** A winter town draws all 84 of these as
+black spiky messes, on top of the winter ground already missing
+(`kb/RESUME.md` §4 item 3). Both need a `DC_SEASON=winter` build.
+
+### The near-miss: regenerating the keep list DELETED Tom Nook
+
+`keeplist-town.txt` had 25 entries **typed in by hand** that the generator never
+emitted — the START map overlay, the clock/date HUD, and `rcn/rcc/rcd/rcf/rcs/
+tuk _1` (Tom Nook and the raccoons). Regenerating silently dropped all 25, and
+it was caught only because a human said Nook looked wrong. They now live in
+`EXTRA_SOURCES` in `tools/dcstub/make_keeplist_town.py`, and the regenerated
+list is a strict superset of what shipped. **Verify that property whenever this
+file is regenerated**, it is two lines of python.
+
+### Interiors are deferred, on purpose
+
+The generator's acre glob also sweeps in building interiors and the developers'
+scratch rooms (`rom_*`, `room01`, `tmp*`, `myr_etc`, `grd_post_office`,
+`grd_yamishop`) — **+269,312 B**, which does not fit next to the structures.
+They are excluded by default; `--interiors` turns them on. Switch them on when
+the villager pool frees the room.
+
+### The RAM plan from here is a POOL, not a bigger keep list
+
+`kb/RESUME.md` §4's 60 stubbed villager models + ~992 KB of villager textures do
+not fit and never will. The design is fixed-slot demand loading, and it is much
+cheaper than S4 assumed:
+
+- villager **textures need no patching at all** — they are bound through
+  segment registers at draw time (`ac_npc_draw.c_inc:269-278`), so a load is 16
+  pointer writes into `npc_draw_data_tbl[]`, which is an ordinary global;
+- villager **vertices need ~26 patched `Gfx` words** per species, reachable from
+  the global skeleton `cKF_bs_r_<species>`, and the display lists are in
+  `.data`, i.e. writable;
+- the seam is `mNpc_SetNpcList` (`m_npc.c:2799`, an extern, `--wrap`-able) or
+  just polling `common_data.npclist[]`;
+- 9 slots ≈ **+40 KB** net; 15 slots (town-scoped, no eviction, no pinning
+  invariant) ≈ +120 KB net but needs the acre pool first.
+
+⚠️ **`mFM_DecideAcre` DOES NOT EXIST.** Four kb files cite it. The real
+generator is `mRF_MakeRandomField` (`m_random_field.c:9`), and it writes the
+layout **into the save**, not per boot — the port re-rolls every boot only
+because the VMU path is unwired. "A census cannot make a town keep list" stays
+true; the reason is "per player", not "per boot".
+
+### Instruments: two were unreachable, and one measured the wrong tick
+
+- **`DC_EMU64_HIST` was never forwarded into the build container**, so G1 was
+  unreachable from the documented build line — that is why it sat "in the tree,
+  never run". Fixed, along with the same hole for `DC_EMU64_SHADOW_LOOP`.
+  `kb/traps.md` has the rule and the verification command.
+- **G1 armed on the wrong edge.** It sampled the frameskipped logic tick, which
+  issues no display-list commands, so its first real run returned every opcode
+  bucket empty and 100 % of the time in `gap`. Both instruments now arm at the
+  end of *every* tick (`dc_vi.c`). **The histogram still has to be re-run** —
+  G1 has not yet produced a per-opcode number, so nothing in F1/F8/G2/G3 is
+  costed yet.
+
+### G2 WORKS — first measurement, and it is small as predicted
+
+`dc/src/dc_emu64_shadow.cpp` — emu64's dispatch LOOP at `-O2` in `dc/`, via the
+same trampoline mechanism G1 uses. Off by default (`DC_EMU64_SHADOW_LOOP=0`).
+User-approved 2026-08-04 along with G3.
+
+```
+[EMU64S] armed, mode=1
+[EMU64S] traversals=28 cmds=65729 punts=0      <- the town, one 30-frame window
+fps_p50 24.0 -> 24.8      deepest_scene 18 (unchanged)      no crash, no punts
+```
+
+The shadow really is running the traversal (65,729 commands in one window), the
+self-check never tripped, and nothing was handed back to `-O0`. **Treat +0.8 FPS
+as a first datum, not a verdict** — it is a whole-run p50 across scenes, and the
+town-only number has not been separated out.
+
+⚠️ **THE SELF-CHECK MUST RUN BEFORE THE ORIGINAL HANDLER, and getting this
+backwards cost a run.** The first version checked `gfx == *gfx_p` *after*
+calling the handler and disabled itself with "member offsets are wrong" on a
+build whose offsets were fine: `dl_G_DL`, `dl_G_ENDDL`, `dl_G_CULLDL` and
+`dl_G_BRANCH_Z` all rewrite `gfx_p` as their entire purpose, so the two
+correctly disagree afterwards. The mechanism behaved exactly as designed —
+it refused to run rather than corrupt — but it was refusing for a bogus reason.
+
+⚠️ **`pvr_dropped` is a NOISY counter across runs of identical code**: 0, 1,305,
+1,314 and 0 across four runs this session, including two that differed only in
+keep list. `run_report.py --vs` will call it a REGRESSION. Do not act on it
+without a second run.
+
+⚠️ **Its documented 7-14 ms/frame estimate is above its own ceiling.**
+`emu64_taskstart_r` is 0x480 B of `.text` and SH-4 instructions are 2 bytes, so
+the whole function is **576 instructions** — running all of it once per command
+at 2,867 cmds/frame and IPC 1.0 is 8.3 ms, and the loop body is a fraction of
+that. **Expect 2-5 ms.** G3 likewise re-estimated 15-25 ms, not 25-35.
+
+⚠️ **`emu64.hpp`'s member-offset comments are PowerPC and WRONG for sh-elf.**
+`sizeof(emu64)` is **0x2278**, `gfx` is at 0x44 not 0x48, `vertices` at 0x1018
+not 0x0E1C — `long long` aligns to 4 here and `GXTexObj` is 88 B, not 32. That
+is why the shadow is a C++ TU that includes the real header: a hand-written
+offset map would write into the neighbouring member instead of faulting.
+
+⚠️ **`kb/research-fps-ideas.md`'s `emu64_set_aflags()` seam DOES NOT EXIST.**
+`AFLAGS_MAX` is 0, so its guard is `idx > 0 && idx < 0` and `aflags_c::set()` is
+an empty body. The "acre_render-shaped lever" is unreachable that way. The
+upside: every `aflags` test folds to a constant, so a shadow can delete the
+wireframe and one-triangle paths outright.
+
+### New tool: the visual regression gate is mechanical now
+
+`tools/dcfb/shot_diff.py BASE/console.log CAND/console.log --out DIR` pairs two
+runs' framebuffer dumps by frame index and reports changed% / meanabs / maxabs
+**plus the nonzero-pixel count on each side** (so "both frames went black" can
+never score as a perfect match), and writes base|cand|diff×4 contact sheets.
+⚠️ The town is not deterministic across boots, so establish the same-build noise
+floor before reading a number as a verdict; indoor and title scenes are the
+sharp instrument.
+
+### Still open, ranked
+
+1. **Run G1** with the fixed arm edge. It gates every FPS decision.
+2. **Measure G2** — built, self-check fixed, run not yet read.
+3. **The villager pool** (above).
+4. **Tom Nook's apron is missing.** Not a keep-list gap: his draw data points
+   only at `tuk_1_tmem_txt` + palette + eyes, all kept, and all five of his
+   model parts are in the kept TU. Next step is a `DC_TEX_LOG=1` run to see
+   whether that texture uploads non-zero.
+5. Large black wedges in the town — present in the baseline too, so
+   pre-existing; suspect opaque shadow decals.
+6. `aram zero=7` still non-zero.
 
 ## ⭐ 2026-08-04 session 2 — three things changed, and one of them was a
 ## misdiagnosis the project had been carrying for two sessions

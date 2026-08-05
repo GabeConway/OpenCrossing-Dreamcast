@@ -455,23 +455,151 @@ def parse_asset_table(path):
     return table
 
 
+def keep_symbol(name, prefixes):
+    """Does `name` survive a partial keep's prefix filter?
+
+    Inclusion prefixes are a whitelist; '!'-prefixed ones are a blacklist that
+    always wins. With only exclusions, everything not excluded is kept.
+    """
+    inc = [p for p in prefixes if not p.startswith("!")]
+    exc = [p[1:] for p in prefixes if p.startswith("!")]
+    if any(name.startswith(p) for p in exc):
+        return False
+    if not inc:
+        return True
+    return any(name.startswith(p) for p in inc)
+
+
+def partial_file(text, prefixes):
+    """Prepare a PARTIALLY kept TU: keep matching symbols, stub the rest.
+
+    WHY THIS EXISTS. Keeping is per-FILE, and every src/data/model/obj_s_*.c
+    carries BOTH seasons: obj_s_house1.c is 42,624 B of summer geometry and
+    42,720 B of winter, and the keep list was buying both. Across the 13
+    structures the town keep list keeps, 101,216 B is obj_w_* that a summer
+    town can never draw — the season is chosen at ac_shop.c:92-94 and
+    ac_shop_draw.c_inc:52. That is the cheapest byte in the whole ledger:
+    spending it back pays for every summer structure that is currently a black
+    spiky mess (Nook's shop, the museum, the tailor, the shrine, the police
+    box).
+
+    Two forms, and for the seasons case the EXCLUSION form is the correct one:
+
+        '#obj_s_'   keep ONLY arrays whose name starts with obj_s_
+        '#!obj_w_'  keep everything EXCEPT arrays starting with obj_w_
+
+    Use the exclusion form to drop winter. The inclusion form looks equivalent
+    and is not: 3,680 B across nine obj_s_*.c files are season-NEUTRAL and
+    named neither obj_s_ nor obj_w_ — obj_kanban_pal, hakushi_tex,
+    obj_lotus_leaf_tex_txt, obj_shop4_grass_tex_pic_i4 and friends. '#obj_s_'
+    would stub those, and a stubbed palette renders its model in garbage
+    colours rather than failing loudly.
+
+    An array kept by these rules stays FULL SIZE and its load is redirected to
+    KEEP_LOADER, exactly as keep_file() would do. Every other array is stubbed
+    to [1] and its load suppressed, exactly as stub_file() would do.
+
+    ⚠️ This function must reproduce BOTH halves faithfully, because the two
+    halves disagree about what to do with a pc_load_asset() line and getting it
+    backwards is silent: a stubbed array whose load survives is a full-size
+    memcpy into a 1-byte destination (the .bss overrun that kb/traps.md's
+    NEUTRALISE section is about), and a kept array whose load is suppressed is
+    a correctly-sized array full of zeros, which renders as nothing at all and
+    reads as a renderer bug.
+
+    Returns (new_text, n_stubbed, bytes_saved, n_kept, n_redirected).
+    """
+    lines = text.split("\n")
+    out = list(lines)
+    n_stub = 0
+    saved = 0
+    n_kept = 0
+    stubbed = set()
+
+    for i, line in enumerate(lines):
+        if not IFDEF_RE.match(line):
+            continue
+        if i + 1 >= len(lines):
+            continue
+        m = DECL_RE.match(lines[i + 1])
+        if not m:
+            continue
+        name = m.group("name")
+        if keep_symbol(name, prefixes):
+            n_kept += 1
+            continue
+        size = int(m.group("size"), 16)
+        if size <= 1:
+            continue
+        out[i + 1] = "{indent}{head} {name}[1]{tail};".format(
+            indent=m.group("indent"),
+            head=m.group("head").strip(),
+            name=name,
+            tail=m.group("tail"),
+        )
+        stubbed.add(name)
+        n_stub += 1
+        saved += size
+
+    for i, line in enumerate(lines):
+        cm = LOAD_CALL_RE.match(line)
+        if not cm:
+            continue
+        arg = line.split(",")
+        if len(arg) < 2:
+            continue
+        dest = arg[1].strip()
+        if dest in stubbed:
+            out[i] = (cm.group(1)
+                      + "/* DC_ASSET_STUB: dest is [1], load suppressed. */")
+
+    # Whatever survived the suppression above belongs to a KEPT array, so it
+    # gets the same pc_load_asset -> KEEP_LOADER rename keep_file() applies.
+    new_text, n_redirect = PC_LOAD_IDENT_RE.subn(KEEP_LOADER, "\n".join(out))
+    return new_text, n_stub, saved, n_kept, n_redirect
+
+
 def parse_keep(cli_value):
     """Resolve the allowlist. CLI beats env; env unset means the default.
 
-    Returns (list_of_repo_relative_paths, provenance_string).
+    An entry may carry a '#'-separated symbol-prefix filter:
+
+        src/data/model/obj_s_house1.c#obj_s_
+
+    which keeps only the arrays whose names start with `obj_s_` and stubs the
+    rest of that TU. Several prefixes may be given, '#'-separated. Without a
+    filter the whole file is kept, which is the historical behaviour.
+
+    Returns (list_of (repo_relative_path, prefixes_tuple), provenance_string).
     """
     if cli_value is not None:
         raw, why = cli_value, "--keep"
     elif "DC_STUB_KEEP" in os.environ:
         raw, why = os.environ["DC_STUB_KEEP"], "DC_STUB_KEEP"
     else:
-        return list(DEFAULT_KEEP), "built-in default"
+        return [(p, ()) for p in DEFAULT_KEEP], "built-in default"
 
     parts = [p.strip() for p in re.split(r"[:,]", raw)]
     parts = [p for p in parts if p]
     if not parts:
         return [], why + " (empty — stub everything)"
-    return parts, why
+
+    out = []
+    for p in parts:
+        if "#" in p:
+            path, _, filt = p.partition("#")
+            prefixes = tuple(x for x in filt.split("#") if x)
+            if not prefixes:
+                sys.stderr.write(
+                    "make_stub_data.py: '{}' has a '#' but no symbol prefix "
+                    "after it. That would keep NOTHING in the file, which is "
+                    "never what is meant -- drop the '#' to keep all of it.\n"
+                    .format(p))
+                raise SystemExit(2)
+            out.append((path.strip(), prefixes))
+        else:
+            out.append((p, ()))
+    return out, why
 
 
 def emit_keep_inc(keep_paths, table, rewritten_cinc=None):
@@ -508,12 +636,21 @@ def emit_keep_inc(keep_paths, table, rewritten_cinc=None):
     n_cinc = 0
     emitted = set()
 
-    for rel in keep_paths:
+    for rel, prefixes in keep_paths:
         f = REPO / rel
         text = f.read_text(encoding="utf-8", errors="surrogateescape")
         globs, stats, inits = scan_declarations(text)
 
-        L.append("/* {} */".format(rel))
+        # A partial keep must not emit loader calls for the arrays it stubbed:
+        # the destination is [1] bytes and the load is a full-size memcpy into
+        # it. This is the same overrun class as kb/traps.md's NEUTRALISE table,
+        # and it is the single most dangerous way to get partial keeps wrong.
+        if prefixes:
+            globs = [(n, s) for (n, s) in globs if keep_symbol(n, prefixes)]
+            stats = [(n, s) for (n, s) in stats if keep_symbol(n, prefixes)]
+
+        L.append("/* {}{} */".format(
+            rel, "  [only {}]".format("|".join(prefixes)) if prefixes else ""))
         calls.append("    /* {} */".format(rel))
 
         for name, size in globs:
@@ -606,7 +743,10 @@ def main():
         "--keep",
         default=None,
         help="':' or ',' separated repo-relative sources to leave at FULL size. "
-             "Overrides $DC_STUB_KEEP. Pass '' to stub everything.",
+             "Overrides $DC_STUB_KEEP. Pass '' to stub everything. An entry may "
+             "carry a '#'-separated symbol-prefix filter -- "
+             "'src/data/model/obj_s_house1.c#obj_s_' keeps only the summer "
+             "arrays and stubs the winter ones in the same file.",
     )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
@@ -616,7 +756,7 @@ def main():
 
     keep_paths, keep_why = parse_keep(args.keep)
 
-    missing = [p for p in keep_paths if not (REPO / p).is_file()]
+    missing = [p for p, _ in keep_paths if not (REPO / p).is_file()]
     if missing:
         sys.stderr.write(
             "make_stub_data.py: keep list ({}) names files that do not "
@@ -626,7 +766,33 @@ def main():
             sys.stderr.write("    {}\n".format(p))
         return 2
 
-    keep_abs = {(REPO / p).resolve() for p in keep_paths}
+    keep_abs = {(REPO / p).resolve() for p, _ in keep_paths}
+    # resolved path -> prefixes. Empty tuple means "keep the whole file".
+    keep_filter = {(REPO / p).resolve(): pf for p, pf in keep_paths}
+
+    # A prefix that matches nothing is always a mistake -- a typo silently
+    # stubs the WHOLE file, which is the worst outcome available (correctly
+    # sized arrays, no loader, renders as nothing). Same rule as the rewrite
+    # rules in make_src_shrink.py: hard-error on no-match.
+    for p, prefixes in keep_paths:
+        if not prefixes:
+            continue
+        text = (REPO / p).read_text(encoding="utf-8", errors="surrogateescape")
+        globs, stats, _ = scan_declarations(text)
+        names = [n for n, _s in globs] + [n for n, _s in stats]
+        for pref in prefixes:
+            # Only INCLUSION prefixes are checked. An exclusion that matches
+            # nothing is harmless -- it means the file has no winter half, and
+            # 11 of the 84 obj_s_*.c legitimately do not. An inclusion that
+            # matches nothing is fatal: it stubs the entire TU silently.
+            if pref.startswith("!"):
+                continue
+            if not any(n.startswith(pref) for n in names):
+                sys.stderr.write(
+                    "make_stub_data.py: keep filter '{}#{}' matches NO array "
+                    "in that file. A typo here stubs the whole TU silently.\n"
+                    .format(p, pref))
+                return 2
     table = parse_asset_table(ASSET_TABLE)
 
     files = sorted(SRC.rglob("*.c"))
@@ -687,6 +853,27 @@ def main():
         if str(rel) in NEUTRALISE:
             new_text, n_rules = neutralise_file(str(rel), text)
             neutralised += n_rules
+            stub_rel.append(str(rel))
+            if not args.dry_run:
+                if write_if_changed(out_root / rel, new_text):
+                    written += 1
+                else:
+                    unchanged += 1
+            continue
+
+        if f.resolve() in keep_abs and keep_filter.get(f.resolve()):
+            # PARTIAL keep: some arrays full size, the rest stubbed. Always
+            # writes into the stub tree — unlike a whole-file keep, a partial
+            # keep ALWAYS changes the source, so there is no "compiles straight
+            # out of src/" case here.
+            prefixes = keep_filter[f.resolve()]
+            new_text, n_stub, saved, n_kept, _n_red = partial_file(text, prefixes)
+            total_arrays += n_stub
+            total_saved += saved
+            kept_arrays += n_kept
+            globs, stats, _ = scan_declarations(text)
+            kept_bytes += sum(s for n, s in globs + stats
+                              if keep_symbol(n, prefixes))
             stub_rel.append(str(rel))
             if not args.dry_run:
                 if write_if_changed(out_root / rel, new_text):

@@ -274,11 +274,45 @@ RULES = [
     # REAL storage — aNPC_keep_actor_class() hands its address out as a
     # NPC_ACTOR* (ac_npc_ctrl.c_inc:733) and aNPC_get_actor_area_proc returns
     # it for allocations up to 0x9D0 B.
+    # The LAST rule here is NOT a shrink -- see the block comment above it.
     ("src/actor/npc/ac_npc_ctrl.c_inc", "shadow", [
         (1, r"^    u8 buf\[0x800\];$",  "    u8 buf[0x10]; " + MARK),
         (1, r"^    u8 buf\[0x2000\];$", "    u8 buf[0x10]; " + MARK),
         (1, r"^    u8 buf\[0x3000\];$", "    u8 buf[0x10]; " + MARK),
         (1, r"^    u8 buf\[0x2800\];$", "    u8 buf[0x10]; " + MARK),
+
+        # -- CORRECTNESS, not size. The one exception in this file. ----------
+        # aNPC_setupActor_proc is `static int` and FALLS OFF ITS END: its last
+        # statement is an unused call to aNPC_setupActor_sub, which does return
+        # an int. Reading the result of a function that returned nothing is
+        # undefined, and four call sites read it -- through the
+        # npc_clip->setupActor_proc pointer this function is installed in at
+        # :818 and :1075:
+        #
+        #   m_post_office.c:399,416   spawned_postman  (the postman)
+        #   ac_groundhog_control.c:134 spawned_actor   (the shrine groundhog)
+        #   ac_shrine_move.c_inc:317   made_hem
+        #   ac_birth_control.c:213     was_born        (VILLAGER BIRTH)
+        #
+        # It happens to work at -O0 on SH-4 because aNPC_setupActor_sub's
+        # return value is already in r0 and this epilogue does not clobber it.
+        # That is an accident of codegen, not a guarantee, and it is exactly
+        # the class of bug that appears when something unrelated moves.
+        # Upstream ACGC-PC-Port hit it as a hard softlock and fixed it in
+        # 3b650ae1 ("Fix Nook not spawning softlock"); this is that commit's
+        # first hunk, and the ONLY part of it that applies to us -- the rest of
+        # 3b650ae1 enlarges aNPC_actor_class_overlay_c::buf from 0x9D0 to 0xA40
+        # for a 64-bit ABI, and sizeof(NPC_GUIDE_ACTOR) is exactly 0x9D0 here.
+        #
+        # ⚠️ COUPLING: this rides the DC_SRC_SHRINK tree, so DC_SRC_SHRINK=0
+        # turns the fix off along with the shrinks. That is acceptable only
+        # because the -O0 codegen accident above makes the unfixed form work
+        # today; if this ever becomes load-bearing, move it to its own
+        # rewriter with its own switch.
+        (1,
+         r"^    aNPC_setupActor_sub\(play, idx, name, profile, &pos, mvlist_no, arg\);$",
+         "    return aNPC_setupActor_sub(play, idx, name, profile, &pos, mvlist_no, arg); "
+         + MARK),
     ]),
 
     # -- S1d: aGYO_overlay ---------------------------------------------------

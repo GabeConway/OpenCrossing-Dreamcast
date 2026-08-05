@@ -273,6 +273,16 @@ void VIWaitForRetrace(void) {
     dc_emu64_hist_frame_close();
 #endif
 
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+    /* G2, disarmed at the same instant and for the same reason as G1 above:
+     * the traversal this frame's shadow loop ran happened between the previous
+     * VIWaitForRetrace and this one. Disarming here also means the table is
+     * back to the untouched -O0 originals for everything that runs after —
+     * so a crash anywhere else in the frame is not a crash "inside the
+     * shadow", and the two cannot be confused during triage. */
+    dc_emu64_shadow_frame_close();
+#endif
+
     /* Always poll input, even on logic-only ticks. */
     if (!dc_platform_poll_events()) {
         g_pc_running = 0;
@@ -369,6 +379,34 @@ void VIWaitForRetrace(void) {
             u64 ph_out = dc_time_us();
             s_ph_vi_us += ph_out - s_ph_last_exit;
             s_ph_last_exit = ph_out;
+        }
+#endif
+        /* ⚠️ THE DISPATCH-TABLE INSTRUMENTS ARM HERE TOO, AND THIS IS THE ARM
+         * THAT ACTUALLY CATCHES ANYTHING. Measured 2026-08-04: G1's first real
+         * run came back with every opcode bucket EMPTY and 100 % of the time in
+         * `gap` — `tot=8.13ms gap=8.13ms |` and nothing after the bar.
+         *
+         * The cause is this early return. Arming only from the presented path
+         * (below) means the window opens AFTER a present and closes at the
+         * entry of the next tick — and at ticks_per_visual = 2 the next tick is
+         * the LOGIC-ONLY one, which runs no display-list traversal at all. The
+         * instrument was faithfully measuring the one tick per frame that has
+         * nothing to measure.
+         *
+         * Arming at the end of EVERY tick makes each window exactly one tick,
+         * so the drawing ticks are sampled like any other. Arming during a
+         * logic-only tick is harmless: no commands dispatch, so the thunks
+         * simply do not fire and the window lands in `gap`. */
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
+        {
+            static unsigned int hist_tick_skip = 0;
+            dc_emu64_hist_frame_open(hist_tick_skip++);
+        }
+#endif
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+        {
+            static unsigned int shadow_tick_skip = 0;
+            dc_emu64_shadow_frame_open(shadow_tick_skip++);
         }
 #endif
         return;
@@ -507,6 +545,9 @@ void VIWaitForRetrace(void) {
 #if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
             dc_emu64_hist_report();
 #endif
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+            dc_emu64_shadow_report();
+#endif
 #endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "
@@ -572,6 +613,20 @@ void VIWaitForRetrace(void) {
     {
         static unsigned int hist_tick = 0;
         dc_emu64_hist_frame_open(hist_tick++);
+    }
+#endif
+
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+    /* G2. Same placement rule as G1: arm LAST so the table swap is outside the
+     * measured window, and count PRESENTED frames in a local — never gate a
+     * periodic thing on pc_frame_counter (kb/traps.md: the retrace handler
+     * returns early on frameskipped ticks AFTER incrementing it, so a
+     * `% N == 0` test only ever samples presented frames at values that jump
+     * by the skip factor). With DC_EMU64_SHADOW_LOOP=N>1 this tick is what
+     * makes the matched-frame A/B alternate. */
+    {
+        static unsigned int shadow_tick = 0;
+        dc_emu64_shadow_frame_open(shadow_tick++);
     }
 #endif
 

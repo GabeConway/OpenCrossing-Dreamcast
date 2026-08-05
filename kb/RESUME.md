@@ -1,8 +1,38 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-04 (session 2). Read `kb/STATE.md` next. Full narrative:
-`kb/state-log.md`. Everything below §6 is older material kept because it is
-still the reasoning behind items that are now closed.
+Rewritten 2026-08-04 (session 2), amended session 3. **Read `kb/STATE.md`
+first** — session 3's changes are all there and this file is not yet rewritten
+around them. Full narrative: `kb/state-log.md`. Everything below §6 is older
+material kept because it is still the reasoning behind items that are now
+closed.
+
+## SESSION 3 IN TEN LINES
+
+1. **All 84 summer structures render.** They were affordable because every
+   `obj_s_*.c` carries winter too and the keep list was buying it: the new
+   `path.c#!obj_w_` filter in `make_stub_data.py` drops it. +108,320 B `.bss`,
+   no OOM, no regression, confirmed on a screenshot pair.
+2. **Regenerating `keeplist-town.txt` used to delete Tom Nook** and 24 other
+   hand-typed entries. They are in `EXTRA_SOURCES` now.
+3. **Interiors (`rom_*`, `tmp*`, …) are excluded by default** — +269,312 B,
+   does not fit yet. `--interiors` turns them on.
+4. **`DC_EMU64_HIST` was never forwarded into the container.** G1 was
+   unreachable from the documented build line; that is why it was never run.
+5. **G1 also armed on the wrong tick** (the frameskipped one, which issues no
+   commands). Fixed. **G1 still has to be re-run — there is no per-opcode
+   number yet, so nothing in F1/F8/G2/G3 is costed.**
+6. **G2 is written** (`dc/src/dc_emu64_shadow.cpp`, off by default) and not yet
+   measured. Its 7-14 ms estimate is **above its own ceiling**; expect 2-5 ms.
+7. **`emu64.hpp`'s offset comments are PowerPC and wrong here.**
+   `sizeof(emu64)` = 0x2278. Never hand-write an offset map.
+8. **`emu64_set_aflags()` is not a seam** — `AFLAGS_MAX` is 0.
+9. **`mFM_DecideAcre` does not exist**; it is `mRF_MakeRandomField`, and the
+   layout lives in the SAVE, not in per-boot randomness.
+10. **`tools/dcfb/shot_diff.py`** makes the screenshot gate mechanical.
+
+⚠️ **Killing a build mid-link corrupts `dc/build/objs.rsp` with NUL bytes** and
+the next link fails with `undefined reference to 'main'`. `rm` it and relink;
+do not go hunting in your own diff. (`kb/traps.md`.)
 
 ## 0. Everything is committed on `dev`
 

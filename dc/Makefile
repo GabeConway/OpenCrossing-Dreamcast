@@ -889,8 +889,49 @@ endif
 DC_EMU64_HIST ?= 0
 ifneq ($(DC_EMU64_HIST),0)
 DEFINES += -DDC_EMU64_HIST=$(DC_EMU64_HIST)
-EMU64_HIST_OBJ := $(OBJDIR)/src/static/libforest/emu64/emu64.c.o
-$(EMU64_HIST_OBJ): TU_POST = sh-elf-objcopy --globalize-symbol=__ZL11dl_func_tbl $@
+EMU64_TBL_GLOBAL := 1
+endif
+
+# =============================================================================
+# G2: emu64's dispatch LOOP, at -O2, in dc/ (KILL SWITCH: =0, the default)
+# =============================================================================
+# The value is a SAMPLING PERIOD in presented frames, like DC_EMU64_HIST:
+# 0 = off, 1 = armed on every frame, N > 1 = armed one frame in N. The last
+# form is the matched-frame A/B -- armed and unarmed windows from ONE run,
+# against the same camera and the same geometry, which is what kb/RESUME.md
+# §0b rule 5 asks for.
+#
+# WHY THIS EXISTS AND WHAT AUTHORISED IT. The town frame is 77-80 % emu64
+# traversal plus game logic, all in src/, where editing and compiler flags are
+# both banned. dc/src/dc_emu64_shadow.cpp takes over the PER-COMMAND LOOP only
+# -- every handler it calls is still the untouched -O0 original. The user
+# signed this off explicitly on 2026-08-04 ("Approve G2+G3"), having been told
+# it walks near the spirit of the -O0 directive; kb/research-fps-ideas.md's
+# decision gate is the write-up.
+#
+# ⚠️ THE ESTIMATE IN THAT DOC IS TOO HIGH. It says 7-14 ms/frame. The whole of
+# emu64_taskstart_r is 0x480 bytes of .text and SH-4 instructions are 2 bytes,
+# so the function is 576 instructions END TO END -- prologue, the setjmp block,
+# the loop, the epilogue. Executing ALL of it once per command at 2,867
+# commands/frame and IPC 1.0 is 8.3 ms, and the loop body is a fraction of
+# that. Expect 2-5 ms. Measure, do not quote.
+#
+# SAME LEGALITY ARGUMENT AS G1 ABOVE, and it costs nothing extra: every
+# function the shadow calls -- all 64 handlers -- is already a global text
+# symbol in emu64.c.o. The only build change is the SAME objcopy G1 needs, on
+# the same object, which is why the two knobs share EMU64_TBL_GLOBAL below.
+DC_EMU64_SHADOW_LOOP ?= 0
+ifneq ($(DC_EMU64_SHADOW_LOOP),0)
+DEFINES += -DDC_EMU64_SHADOW_LOOP=$(DC_EMU64_SHADOW_LOOP)
+EMU64_TBL_GLOBAL := 1
+endif
+
+# Promote dl_func_tbl from local to global so dc/ can name it. Shared by G1 and
+# G2; it must be applied AT MOST ONCE, because a second TU-local TU_POST
+# assignment would silently replace the first rather than append to it.
+ifdef EMU64_TBL_GLOBAL
+EMU64_TBL_OBJ := $(OBJDIR)/src/static/libforest/emu64/emu64.c.o
+$(EMU64_TBL_OBJ): TU_POST = sh-elf-objcopy --globalize-symbol=__ZL11dl_func_tbl $@
 endif
 
 # DC_AUDIO is listed EXPLICITLY even though DEFINES already carries

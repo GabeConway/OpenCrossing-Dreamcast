@@ -646,6 +646,14 @@ void dc_platform_init(void) {
      * the table does not match the expected signature. */
     dc_emu64_hist_init();
 #endif
+
+#if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+    /* G2, same reasoning as G1 above: the dispatch table is initialised data,
+     * valid from load and long before emu64_init() runs, so capturing the
+     * originals here is safe. Logs and permanently disables itself if the
+     * table signature does not match. */
+    dc_emu64_shadow_init();
+#endif
 }
 
 void pc_platform_shutdown(void) {
