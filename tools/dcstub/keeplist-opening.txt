@@ -81,44 +81,37 @@ src/data/model/kai_sousa.c
 src/data/model/kai_sousa2.c
 src/data/model/lat_sp.c
 src/data/model/log_win_logo3_tex.c
-# --- the common ground/water texture set (hand-added 2026-08-02) ---
-# The census can never name these: the acre display lists draw from the
-# *_dummy .bss buffers in src/game/m_bg_tex.c, which m_field_make.c:1128
-# fills by bcopy from these arrays. The census resolves the address that was
-# drawn - the dummy - so it kept m_bg_tex.c (a no-op, pure .bss) and dropped
-# every real texture. With them stubbed the bcopy moved zeros, an all-zero
-# CI4 is every texel at palette index 0 (the transparent entry), and the
-# entire town ground rendered as a black silhouette. See kb/station-bugs.md.
-# Summer only: the season fork at m_field_make.c:1119 selects mFM_grd_w_*
-# for winter, and console RTC in August is summer.
-src/data/model/mFM_grd_beachA_tex.c
-src/data/model/mFM_grd_beachB_tex.c
-src/data/model/mFM_grd_s_beach_tex.c
-src/data/model/mFM_grd_s_bridge1.c
-src/data/model/mFM_grd_s_bridge1_pal.c
-src/data/model/mFM_grd_s_bridge2.c
-src/data/model/mFM_grd_s_bridge2_pal.c
-src/data/model/mFM_grd_s_bushA.c
-src/data/model/mFM_grd_s_bushB.c
-src/data/model/mFM_grd_s_cliff.c
-src/data/model/mFM_grd_s_earth.c
-src/data/model/mFM_grd_s_grass.c
-src/data/model/mFM_grd_s_rail.c
-src/data/model/mFM_grd_s_river.c
-src/data/model/mFM_grd_s_sand.c
-src/data/model/mFM_grd_s_station.c
-src/data/model/mFM_grd_s_station1_pal.c
-src/data/model/mFM_grd_s_stone.c
-src/data/model/mFM_grd_s_tekkyo.c
-src/data/model/mFM_grd_s_tunnel.c
-src/data/model/mFM_grd_sprashA_tex.c
-src/data/model/mFM_grd_sprashC_tex.c
-src/data/model/mFM_grd_water1_tex.c
-src/data/model/mFM_grd_water2_tex.c
-src/data/model/mFM_grd_wave1_tex.c
-src/data/model/mFM_grd_wave2_tex.c
-src/data/model/mFM_grd_wave3_tex.c
-# The ground PALETTES take the identical shape one function up:
+# === the common ground/water texture set: DELIBERATELY ABSENT (R1) ===========
+# ⚠️ DO NOT RE-ADD THE 27 mFM_grd_*.c FILES THAT USED TO BE HERE.
+#
+# They are demand-loaded now. mFM_LoadBGCommonTex (m_field_make.c:1126) is
+# rewritten by tools/dcstub/make_src_shrink.py to call dc_bgtex_load()
+# (dc/src/dc_bgtex.c) instead of bcopy, and that reads each source array off
+# /cd/foresta.rel straight into the m_bg_tex.c staging buffer the renderer
+# samples. Keeping them puts 80,736 B back into .bss to hold bytes that are
+# copied out exactly once per acre load and are already resident at the
+# destination.
+#
+# For the record, since this list is where the story started: the census can
+# never name these. The acre display lists draw from the *_dummy .bss buffers
+# in src/game/m_bg_tex.c, so the census resolves the DUMMY and kept
+# m_bg_tex.c (a no-op, pure .bss) while dropping every real texture. With them
+# stubbed the bcopy moved zeros, an all-zero CI4 is every texel at palette
+# index 0 (the transparent entry), and the entire town ground rendered as a
+# black silhouette. See kb/station-bugs.md.
+#
+# The old list was SUMMER ONLY, because that is all the keep list could
+# afford, and the season fork at m_field_make.c:1120 selects mFM_grd_w_* in
+# winter — so the same black ground was waiting in December. R1 covers all 96
+# summer + winter + shared symbols (150,880 B) and costs no .bss at all, which
+# is the other half of why the entries are gone rather than doubled.
+#
+# Kill switch, if you need the old behaviour: DC_BGTEX_DEMAND=0. That puts
+# these 27 files back automatically (make_stub_data.py's BGTEX_KEEP_RESTORE
+# holds the list verbatim) AND leaves the vendored bcopy in place. Adding them
+# here by hand instead gets you the .bss cost without the revert.
+#
+# The ground PALETTES below are a DIFFERENT mechanism and stay:
 # m_field_make.c:1092 bcopies l_bg_pal_segment_rom_start[] (m_field_make.c:1067)
 # into l_bg_pal_common_dummy[]. Without these the textures above still decode
 # to nothing - an all-zero CI4 palette is transparent for every index, not

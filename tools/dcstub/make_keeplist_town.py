@@ -32,12 +32,13 @@ WHAT IT KEEPS
   2. every acre display-list/vertex TU under src/data/field/bg/acre/
   3. every summer town structure src/data/model/obj_s_*.c
 
-Winter (`mFM_grd_w_*`) ground textures are still deliberately absent, exactly
-as in keeplist-opening.txt: `mFM_LoadBGCommonTex` (m_field_make.c:1113-1123)
-switches to `l_bg_w_tex_segment_table` when the console RTC says winter, and
-the entire town ground will go black in December with the same signature as
-the bug kb/station-bugs.md §1 fixed. Add them here at the same time as
-INDIRECT_SOURCES gets its `mFM_grd_w_*` rows.
+Ground textures -- summer AND winter -- are absent from this list on purpose
+and must NOT be added back. R1 demand-loads all 96 `mFM_grd_*` source arrays
+off the disc (dc/src/dc_bgtex.c), so both seasons work and neither costs a
+byte of `.bss`. Keeping them here would put 80,736 B back and buy nothing.
+That also retires the December time bomb this header used to carry: the season
+fork at `m_field_make.c:1120` picks `l_bg_w_tex_segment_table` from the
+console RTC, and until R1 the winter half was simply unaffordable.
 
 ⚠️⚠️ COST — THE FULL LIST DOES NOT FIT TODAY. MEASURED 2026-08-04.
 ------------------------------------------------------------------
@@ -297,8 +298,9 @@ def main():
     print("# Use:")
     print('#   DC_STUB_KEEP="$(grep -v \'^#\' tools/dcstub/keeplist-town.txt | paste -sd: -)"')
     print("#")
-    print("# ⚠️ Winter ground (mFM_grd_w_*) is still absent on purpose -- see the")
-    print("# generator header. The town ground goes black in December.")
+    print("# ⚠️ The mFM_grd_* ground textures are absent on purpose: R1 reads")
+    print("# them off the disc (dc/src/dc_bgtex.c), both seasons, for no .bss.")
+    print("# Adding them back costs 80,736 B and buys nothing.")
     print("")
     print("# ---- censused opening/train/town working set (keeplist-opening.txt) ----")
     n_open = emit(opening)

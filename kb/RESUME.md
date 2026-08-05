@@ -1,8 +1,10 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-04 (session 2), amended session 3. **Read `kb/STATE.md`
-first** — session 3's changes are all there and this file is not yet rewritten
-around them. Full narrative: `kb/state-log.md`. Everything below §6 is older
+Rewritten 2026-08-04 (session 2), amended session 3 and 2026-08-05. **Read
+`kb/STATE.md` first** — session 3's changes and the 2026-08-05 G1 result are all
+there and this file is not yet rewritten around them. In particular items 4-6 of
+"SESSION 3 IN TEN LINES" below are superseded: **G1 has now been run**, and §5
+carries the re-cost. Full narrative: `kb/state-log.md`. Everything below §6 is older
 material kept because it is still the reasoning behind items that are now
 closed.
 
@@ -69,8 +71,13 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
    `emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` is a fit against TOTAL `cmds`,
    which correlates with `vtx`, so the coefficient belongs to the heaviest
    opcode. I applied it to the state-command subset and was wrong by a wide
-   margin — 265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each is ~48 ms,
-   i.e. most of the emu64 budget from one opcode. `kb/traps.md`.
+   margin. ⚠️ **And then broke the same rule inside the rule.** This item used
+   to end "265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each is ~48 ms, i.e.
+   most of the emu64 budget from one opcode" — which re-applied a whole-command
+   average to a subset *and* counted `GXPosition3f32` references as loaded
+   vertices. **G1 measured `G_VTX` at 5.40 ms and `G_TRIN_INDEPEND` at
+   22.25 ms** (2026-08-05). Only the histogram is allowed to price an opcode.
+   `kb/traps.md`.
 
 ## 1. Where the port is
 
@@ -195,9 +202,13 @@ free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
    same class as the acres and it does **not** fit. S4 territory.
 2. **The other 74 `obj_s_*` structures** — 333 KB (shop1, museum, tailor,
    police box, shrine, post office…). Each is one building silhouette.
-3. **Winter ground** (`mFM_grd_w_*`, ~70 KB) is deliberately absent. **The town
-   floor will go black in December** with the same signature as the bug
-   `kb/station-bugs.md` §1 fixed. Dated time bomb; write it down.
+3. ✅ **Winter ground — FIXED 2026-08-05 by R1.** All 41 `mFM_grd_w_*` textures
+   (70,144 B) are demand-loaded off `/cd` by `dc/src/dc_bgtex.c` instead of
+   being resident-or-absent, so the December black-floor bomb is defused. ⚠️
+   **The winter time bomb is REDUCED, NOT CLEARED**: the 84 `obj_w_*`
+   structures are still stubbed, so a winter town still draws every building as
+   a black spiky mess (item 2's summer twin). Still needs a `DC_SEASON=winter`
+   build to verify.
 4. **The station roof clip-through.** Now REPRODUCIBLE for the first time —
    `DC_AUTOWALK` can walk a character under it, `DC_PVR_BATCH_LOG` prints
    `src=`/`vram=` so a batch joins to a symbol, and `-DDC_PVR_PT_NEAREST` is a
@@ -209,21 +220,33 @@ free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
 
 `kb/research-fps-ideas.md` carries this in full.
 
+⚠️ **RE-COSTED 2026-08-05 — G1 RAN, and it shrinks G2 and G3.**
+
 | | what | win | gate |
 |---|---|---|---|
-| **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | **DONE — `DC_EMU64_HIST=<N>`, in the tree, NEVER RUN** |
-| G2 | reimplement the dispatch LOOP in `dc/` at `-O2` | 7-14 ms | **needs sign-off** |
-| G3 | `-O2` shadow `dl_G_VTX`/TRI with a runtime AABB cull | **25-35 ms** | **needs sign-off** |
+| **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | ✅ **RUN 2026-08-05.** `TRIN_INDEPEND 22.25 ms/146`, `VTX 5.40/149`, `gap 7.92` |
+| G2 | reimplement the dispatch LOOP in `dc/` at `-O2` | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], capped at ~8.3 | needs sign-off, and now barely worth asking for |
+| G3 | `-O2` shadow `dl_G_VTX`/TRI with a runtime AABB cull | ~~25-35 ms~~ → **4.5-7.0 ms** [ESTIMATED] from the cull; the `-O2` half is inside G2's ~8.3 ms cap | needs sign-off |
+| — | `dc_gx_backend_submit` (`dc/src/dc_pvr.c:2448`) | **12.2 ms is the block itself**; win unmeasured | **no gate at all — it is ours** |
+
+**The re-cost, in one line:** 65 % of `G_TRIN_INDEPEND`'s 152 µs/call is already
+`dc/` code at `-O2` (`GXEnd` at `emu64.c:4935` → the AABB cull ~15 µs +
+`dc_gx_backend_submit` ~81 µs); only ~53 µs is `src/` at `-O0`. Interposing on
+emu64 buys much less than the decision assumed, and the largest single
+addressable block in the frame needs no sign-off.
 
 **⚠️ F1 (offline bbox-CULLDL injection) is NO LONGER RECOMMENDED.** A full design
 pass found its cost is **594 KB of `.data`** for town scope — 5-16× its own
-estimate — because its "50+ vertex" cap selects **zero** chunks (the game uses
-the 5-bit N-triangle format exclusively, so no `gsSPVertex` anywhere exceeds
-32). It also cannot compute its bboxes without the ROM. It buys a *smaller*
+estimate — because its "50+ vertex" cap selects **zero** chunks (no
+`gsSPVertex` anywhere in `src/data` exceeds 32 vertices; ⚠️ **corrected
+2026-08-05** — the bound comes from the 5-bit per-vertex *index* width
+(`POLY_5b`), not from the N-triangle count, which `emu64.c:4814` reads as
+**7 bits**, 1..128 faces). It also cannot compute its bboxes without the ROM. It buys a *smaller*
 version of what G3 gets for zero bytes. Details and the surviving 212 KB
 model-granularity variant are in `kb/research-fps-ideas.md`.
 
-**RUN G1 BEFORE COSTING ANY OF THEM** (rule 7).
+~~**RUN G1 BEFORE COSTING ANY OF THEM** (rule 7).~~ ✅ Done 2026-08-05; the
+table above is the re-cost. Rule 7 still binds every *future* opcode claim.
 
 ## 5b. K.K.'S STRUM IS SLAVED TO THE MUSIC — one cause, two symptoms
 

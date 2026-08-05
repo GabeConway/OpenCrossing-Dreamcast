@@ -1,7 +1,55 @@
 # Session state — resume here
 
-Updated 2026-08-04 (session 3). This file is **short on purpose**: only what is
+Updated 2026-08-05. This file is **short on purpose**: only what is
 true *right now*, plus what to do next. Everything else is one hop away.
+
+## ⭐ 2026-08-05 — G1 RAN. ONE OPCODE IS 28 % OF THE TOWN FRAME, and it is not
+## the one every plan was costing against
+
+Run `smoke-G1-20260805-160640-92325`, town, probe-free, 11.5-12.1 FPS:
+
+```
+[PHASE]  draw=78.3 skip=8.2 vi=0.4 | cull=2.2 xform=12.2 | v=3002 vcull=6042 us/v=4.07
+[EMU64H] tot=42.86ms gap=7.92ms | TRIN_INDEPEND 22.25/146  VTX 5.40/149  MTX 2.18/113  TEXRECT 2.17/25
+```
+
+- **`G_TRIN_INDEPEND`: 22.25 ms over 146 calls = 152 µs/call — 63 % of emu64
+  dispatch, 28 % of the whole frame.** Handler `emu64.c:4798` → `dl_G_TRIN`.
+- **`G_VTX` is 5.40 ms, not the ~48 ms four documents costed G3 against.** That
+  figure applied a whole-command average to a subset (rule 7, in the sentence
+  that states rule 7) *and* counted `GXPosition3f32` references as loaded
+  vertices. Corrected in place everywhere.
+- **65 % of TRIN's 152 µs is already `dc/` at `-O2`** (`GXEnd` at
+  `emu64.c:4935` → the AABB cull ~15 µs + `dc_gx_backend_submit` ~81 µs). Only
+  ~53 µs is `src/` at `-O0`, so a G2-shaped rewrite is capped at ~8.3 ms and
+  realistically buys **2-4 ms** [ESTIMATED] — not 25-35.
+- **The biggest addressable block in the frame is ours:
+  `dc_gx_backend_submit`, 12.2 ms = 15.6 % of the draw phase**
+  (`dc/src/dc_pvr.c:2448`). No trampoline, no sign-off.
+- **`gap=7.92 ms` (18 % of `tot`) is inside the draw phase, outside any emu64
+  command, and unexplained. OPEN.**
+- **`vcull=6042` against `v=3002`: 66.8 % of vertices are culled after emu64
+  paid full `-O0` price.** ⚠️ That is **not** worth 14.9 ms — culled vertices
+  already cost `xform` nothing. An ideal cull at TRIN entry is
+  **4.5-7.0 ms, central ~6.0** [ESTIMATED] ⇒ 11.5 → **12.2-12.6 FPS**.
+- **OPEN: the vertex memo's ceiling is contested** — 48.2 % (at its ceiling,
+  worth zero) vs ~60 % (11 points of headroom), depending on whether total
+  staged references are the old 6,951 or the newly measured `v + vcull` =
+  9,044. Settle it with a direct count of distinct vertex references per batch.
+  `dc_gx.c:870`'s 6,951 comment is stale.
+
+**R1 landed: acre ground textures are demand-loaded.** 96 `mFM_grd_*` symbols
+(150,880 B) stop being resident; `dc/src/dc_bgtex.c` + a `make_src_shrink.py`
+rewrite of one `bcopy`, `src/` untouched, kill switch `DC_BGTEX_DEMAND=0`.
+**`.bss` 4,027,212 → 3,945,356 (−81,856). `margin` 3,103,956 → 3,191,348
+(+87,392).** No OOM, `ASSET MISSING` 0, `aram LOST` 0, `deepest_scene` 18
+unchanged, `fps_p50` 24.1 → 24.2. ⚠️ **Screenshot verification was still in
+flight — this is a counter result, not a verdict** (rule 2).
+
+**Next, ranked:** (1) the `gap=7.92 ms`; (2) `dc_gx_backend_submit`'s 12.2 ms;
+(3) the distinct-reference count that settles the memo ceiling; (4) a sorted
+batch helper for R1's 27 scattered seeks (0.5-2.7 s [UNMEASURED]); (5) the
+villager pool. Evidence for all of it: `kb/state-log.md`, top entry.
 
 ## ⭐ 2026-08-04 session 3 — EVERY SUMMER STRUCTURE NOW RENDERS, and it cost
 ## nothing, because the keep list had been buying WINTER
@@ -31,9 +79,11 @@ against the ~146-181 KB of real headroom, instead of +332 KB.
 neither (`obj_kanban_pal`, `hakushi_tex`, `obj_shop4_grass_tex_pic_i4` …), and a
 stubbed palette does not fail loudly — it renders its model in garbage colours.
 
-⚠️ **DATED TIME BOMB, now two of them.** A winter town draws all 84 of these as
-black spiky messes, on top of the winter ground already missing
-(`kb/RESUME.md` §4 item 3). Both need a `DC_SEASON=winter` build.
+⚠️ **DATED TIME BOMB — REDUCED 2026-08-05, not cleared.** The winter *ground*
+half is fixed: R1 makes all 41 `mFM_grd_w_*` textures loadable on demand
+(`kb/RESUME.md` §4 item 3). The 84 `obj_w_*` structures are **still absent**, so
+a winter town still draws every building as a black spiky mess. Needs a
+`DC_SEASON=winter` build.
 
 ### The near-miss: regenerating the keep list DELETED Tom Nook
 
@@ -149,8 +199,10 @@ sharp instrument.
 
 ### Still open, ranked
 
-1. **Run G1** with the fixed arm edge. It gates every FPS decision.
-2. **Measure G2** — built, self-check fixed, run not yet read.
+1. ✅ **DONE 2026-08-05 — G1 ran.** See the 2026-08-05 section at the top of
+   this file; it moved the answer from `G_VTX` to `G_TRIN_INDEPEND`.
+2. **Measure G2** — built, self-check fixed, run not yet read. ⚠️ Its ceiling is
+   now known: ~8.3 ms, expect 2-4 ms.
 3. **The villager pool** (above).
 4. **Tom Nook's apron is missing.** Not a keep-list gap: his draw data points
    only at `tuk_1_tmem_txt` + palette + eyes, all kept, and all five of his
@@ -219,12 +271,14 @@ now; a `DC_ARENA_PROBE` run is in flight), or S4.
 3. **The opcode mix is now printed, and it is state-dominated.** Per town
    frame: `cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3`.
    ⚠️ **Do not price the 2,094 state commands at 12.31 µs/cmd** — that
-   coefficient is a fit against TOTAL `cmds`, which correlates with `vtx`, and
-   265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each is ~48 ms, i.e. most of
-   the emu64 budget on its own. The command COUNT is state-dominated; the
-   command COST may not be. **G1** (`DC_EMU64_HIST=<N>`) is now in the tree to
-   settle exactly that, and nothing in F1/F8/G2/G3 should be costed before it
-   runs.
+   coefficient is a fit against TOTAL `cmds`, which correlates with `vtx`, so it
+   belongs to the heaviest opcode and to no other.
+   ⚠️ **CORRECTED 2026-08-05.** This block used to continue "265 `G_VTX`
+   carrying ~6,951 vertices at ~6.9 µs each is ~48 ms, i.e. most of the emu64
+   budget on its own." **G1 measured `G_VTX` at 5.40 ms.** The ~48 ms committed
+   rule 7's error a second time (a whole-command average applied to a subset)
+   and counted `GXPosition3f32` references as loaded vertices. The heavy opcode
+   is `G_TRIN_INDEPEND` at 22.25 ms — see the 2026-08-05 section at the top.
 
 Also: `bench_mem` finally builds and runs — and Flycast cannot answer it
 (read == write == 114.3 MB/s at every size, in both VRAM windows). It is a
@@ -244,8 +298,12 @@ worst frames from 11.8 to 15.2 FPS.** The 1 % lows are not a separate problem;
 14 of the 17 worst windows are the town, which is the same wall, deeper.
 
 **AUDIO WORKS, AND COSTS 45 % OF THE FRAME RATE.** One jaudio DAC frame is
-~19.8 ms of SH-4 for ~35 ms of audio, so synthesis needs ~57 % of the machine to
-stay level. FPS p50 23.5 off vs 13.0 on. **`DC_AUDIO` therefore defaults to 0**;
+~19.8 ms of SH-4 for **17.49 ms** of audio, so synthesis runs at **0.88× real
+time and needs ~113 % of the machine** to stay level. FPS p50 23.5 off vs 13.0
+on. ⚠️ **CORRECTED 2026-08-05** — this line said "~35 ms of audio … ~57 % of the
+machine". `DAC_SIZE * 2` (`aictrl.c:292`) is 2,240 **bytes** = 560 stereo pairs
+at `JAC_DAC_RATE = 32028.5` = 17.49 ms; the 2× error had been steering audio
+decisions. `kb/audio-cpu-cost.md`. **`DC_AUDIO` therefore defaults to 0**;
 `-DDC_AUDIO=1` turns it on. No budget setting fixes this — budgeting made it
 *worse* (10.9). Root cause of the silence was that the AICA ARM7 **ran and then
 wedged** on a Timer-A FIQ that is never delivered.

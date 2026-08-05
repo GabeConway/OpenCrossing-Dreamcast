@@ -28,6 +28,10 @@
 #                    0 is a byte-identical revert. Needs the tree from
 #                    tools/dcstub/make_src_shrink.py; dc/build-dc.sh runs it.
 #   DC_ASSET_STUB=0  throwaway boot-bringup build with [1]-sized asset arrays
+#   DC_BGTEX_DEMAND=1  acre ground textures read off the disc, DEFAULT ON
+#                    (R1, -150,880 B of keep list). 0 restores the bcopy and
+#                    the 27 keep-list entries. MUST match the --bgtex-demand=
+#                    that BOTH tools/dcstub scripts were run with.
 #   DC_AUDIO=0       sound. DEFAULT OFF — it costs ~45 % of the frame rate
 #                    (dc/src/dc_audio.c). Also selects the S8 half of the
 #                    shrink tree, so it MUST match the --audio= that
@@ -75,6 +79,14 @@ ifeq ($(DC_ASSET_STUB),1)
   ifeq ($(wildcard $(STUBDIR)/stub.list),)
     $(error DC_ASSET_STUB=1 but $(STUBDIR)/stub.list is missing. \
             Run: python3 $(ROOT)/tools/dcstub/make_stub_data.py)
+  endif
+  # R1's map. Checked here rather than left to dc/src/dc_bgtex.c's #include so
+  # a stub tree generated before R1 landed says so at once, instead of failing
+  # 3,900 TUs later with a "no such file" on one platform source.
+  ifeq ($(wildcard $(STUBDIR)/dc_bgtex_map.inc),)
+    $(error DC_ASSET_STUB=1 but $(STUBDIR)/dc_bgtex_map.inc is missing — the \
+            stub tree predates R1. Run: python3 \
+            $(ROOT)/tools/dcstub/make_stub_data.py)
   endif
   # A source is stubbed iff the generator produced a file for it. $(wildcard)
   # is one stat per TU; $(filter) against the 2535-entry list would be 10M
@@ -310,6 +322,36 @@ DEFINES := \
 ifeq ($(DC_ASSET_STUB),1)
 DEFINES += -DDC_ASSET_STUB
 endif
+
+# =============================================================================
+# DC_BGTEX_DEMAND — the acre ground textures, off the disc (R1). DEFAULT ON.
+# =============================================================================
+# The 96 mFM_grd_* source arrays (150,880 B: 46 summer, 41 winter, 9 shared)
+# exist only to be bcopy'd, once per acre load, into the 27 always-resident
+# staging buffers in src/game/m_bg_tex.c. Keeping them stores the same bytes
+# twice, and the keep list could only ever afford ONE season — which is why the
+# town ground goes black in December. With this on they are read straight off
+# the disc into the staging buffer and neither season needs keeping.
+#
+# Three parts and they must agree, which is why this is ONE number:
+#   tools/dcstub/make_stub_data.py --bgtex-demand   emits dc_bgtex_map.inc, and
+#                                                   at 0 puts the 27 summer
+#                                                   files back on the keep list
+#   tools/dcstub/make_src_shrink.py --bgtex-demand  rewrites the copy loop
+#   this -D                                         is what the generated TU
+#                                                   checks itself against
+#
+# Both scratch trees survive a flag flip and flags.stamp cannot regenerate
+# them, so the rewritten m_field_make.c carries an #error for a mismatch in
+# EITHER direction. Do not delete that guard — re-run the generators
+# (dc/build-dc.sh does both for you).
+#
+# The define is unconditional so both sides always see the same literal. It is
+# read by the shrink tree's m_field_make.c only; dc/src/dc_bgtex.c keys off the
+# generated map's own row count instead, so a non-stub build (where every
+# source is full size and resident) degrades to a plain memmove with no flag.
+DC_BGTEX_DEMAND ?= 1
+DEFINES += -DDC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND)
 
 # DC_DIAG=1 turns on PC_DIAG() — the decomp's own rate-limited bring-up tracer
 # (pc/include/pc_diag.h), which is compiled out unless PC_VERBOSE_DIAG is
@@ -948,9 +990,11 @@ endif
 # holds, and DC_AUDIO now decides which of two DIFFERENT scratch trees the
 # objects were compiled against. Spelling it out is what makes a mismatched
 # dc/build/shrinksrc diagnosable from the stamp instead of from a link error.
+# DC_BGTEX_DEMAND is here for exactly the same reason, and it keys BOTH scratch
+# trees at once (shrinksrc's copy loop and stubsrc's map + keep list).
 FLAGSTAMP := $(BUILD)/flags.stamp
 FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
-             DC_AUDIO=$(DC_AUDIO) \
+             DC_AUDIO=$(DC_AUDIO) DC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND) \
              DECOMP_OPT=$(DECOMP_OPT) \
              DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
 

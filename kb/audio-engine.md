@@ -155,7 +155,14 @@ CODEC_REVERB in the shipped data — the multi-codec branches in
 The *resident* working set is per-sequence, and **the median sequence needs
 49 KB of AICA sound RAM**. Only two sequences (242 and 247, the big
 multi-bank music cues) approach or exceed the ~1.8 MB usable sound RAM.
-No individual soundfont exceeds 2 MB.
+
+⚠️ **CORRECTED 2026-08-05 — this paragraph used to end "No individual soundfont
+exceeds 2 MB", and that is true of 2 MB and false of the USABLE sound RAM.** KOS
+reserves **196,608 B** (`AICA_RAM_START 0x030000`, `aica_cmd_iface.h:37-38`),
+leaving **1,900,544 B**. The largest soundfont, **bank 153, transcodes to
+1,971,016 B — over by 70,472 B.** It fits only if `snd_stream` is retired and
+the channels are driven directly. Treat "the largest soundfont fits" as
+conditional on that decision, not as a property of the data.
 
 **⇒ Answer to "convert offline or stream from disc": convert offline, page
 per-sequence into sound RAM, and handle the two outliers specially.** No
@@ -176,5 +183,9 @@ per-sample disc streaming is needed for the common case.
    `loop_start` (dcaconv/wav2adpcm territory), (b) store looping samples as
    8-bit PCM (2× the bytes — still fits given §3.4), (c) rotate the sample so
    the loop starts at a block boundary. **This is the main stage-B risk.**
-3. **~1.8 MB usable** of the 2 MB after the KOS ARM driver + `snd_stream`
-   buffers. *(Reserve figure is an estimate — verify at M0.)*
+3. **1,900,544 B usable** of the 2,097,152 B. ⚠️ **Sharpened 2026-08-05 — this
+   said "~1.8 MB … reserve figure is an estimate".** KOS's reserve is
+   **196,608 B**, read out of the pinned tree: `AICA_RAM_START 0x030000`
+   (`aica_cmd_iface.h:37-38`). That is the ARM driver's region only —
+   `snd_stream` buffers come out of the remainder, so retiring `snd_stream` and
+   driving channels directly is what buys the last ~70 KB bank 153 needs (§3.4).

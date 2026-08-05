@@ -14,8 +14,9 @@
 # Use:
 #   DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)"
 #
-# ⚠️ Winter ground (mFM_grd_w_*) is still absent on purpose -- see the
-# generator header. The town ground goes black in December.
+# ⚠️ The mFM_grd_* ground textures are absent on purpose: R1 reads
+# them off the disc (dc/src/dc_bgtex.c), both seasons, for no .bss.
+# Adding them back costs 80,736 B and buys nothing.
 
 # ---- censused opening/train/town working set (keeplist-opening.txt) ----
 src/actor/ac_field_draw.c
@@ -63,33 +64,6 @@ src/data/model/kai_sousa.c
 src/data/model/kai_sousa2.c
 src/data/model/lat_sp.c
 src/data/model/log_win_logo3_tex.c
-src/data/model/mFM_grd_beachA_tex.c
-src/data/model/mFM_grd_beachB_tex.c
-src/data/model/mFM_grd_s_beach_tex.c
-src/data/model/mFM_grd_s_bridge1.c
-src/data/model/mFM_grd_s_bridge1_pal.c
-src/data/model/mFM_grd_s_bridge2.c
-src/data/model/mFM_grd_s_bridge2_pal.c
-src/data/model/mFM_grd_s_bushA.c
-src/data/model/mFM_grd_s_bushB.c
-src/data/model/mFM_grd_s_cliff.c
-src/data/model/mFM_grd_s_earth.c
-src/data/model/mFM_grd_s_grass.c
-src/data/model/mFM_grd_s_rail.c
-src/data/model/mFM_grd_s_river.c
-src/data/model/mFM_grd_s_sand.c
-src/data/model/mFM_grd_s_station.c
-src/data/model/mFM_grd_s_station1_pal.c
-src/data/model/mFM_grd_s_stone.c
-src/data/model/mFM_grd_s_tekkyo.c
-src/data/model/mFM_grd_s_tunnel.c
-src/data/model/mFM_grd_sprashA_tex.c
-src/data/model/mFM_grd_sprashC_tex.c
-src/data/model/mFM_grd_water1_tex.c
-src/data/model/mFM_grd_water2_tex.c
-src/data/model/mFM_grd_wave1_tex.c
-src/data/model/mFM_grd_wave2_tex.c
-src/data/model/mFM_grd_wave3_tex.c
 src/data/field/bg/beach_pal.c
 src/data/field/bg/bush_pal.c
 src/data/field/bg/cliff_pal.c

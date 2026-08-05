@@ -107,8 +107,10 @@ nondeterministically, set `--build-arg JOBS=1` and accept the wall clock.
    extrapolation with the true number.
 5. Ask the user to re-provision colima at 8 CPUs / 16 GB (§1.2) — every build
    time in this document was measured at 4 cores.
-6. Evaluate kos-ports `sh4zam` against `PLAN.md` §3.2's hand-rolled FTRV/FIPR
-   plan before writing SH-4 math by hand.
+6. ~~Evaluate kos-ports `sh4zam` against `PLAN.md` §3.2's hand-rolled FTRV/FIPR
+   plan before writing SH-4 math by hand.~~ ✅ **DONE 2026-08-05 — PASS.** The
+   hand-rolled path shipped and sh4zam would be compiled at `-O0` from `src/`.
+   Reasons: `kb/closed.md`.
 7. Decide the GCC-15.2.0-vs-decomp question at M1. `PLAN.md` §3.2 documents this
    codebase's history of optimizer breakage; fallback F3 (profile `14.4.0`,
    matching sm64-dc's GCC 14) is one ARG change away.

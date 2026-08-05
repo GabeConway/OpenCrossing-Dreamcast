@@ -63,6 +63,46 @@ there is nothing in the file to compress).
   `kb/design-shelf-hazards.md` marked it "(VERIFIED)" as KOS convention; that
   was **false for this image**.
 
+## `-mfsrra` and `-mfsca` are INERT in this build (2026-08-05)
+
+They are in `$KOS_CFLAGS` (`kb/toolchain-components.md`), so a grep finds them
+and they look live. **GCC will not act on either without
+`-funsafe-math-optimizations`** — plus `-ffinite-math-only` for `fsrra` — and
+neither flag appears anywhere in this tree. So no `sqrtf`, `1/x`, `sinf` or
+`cosf` in the image was ever folded into FSRRA/FSCA by the compiler.
+
+Corroborated, not just read off the flags: `kb/perf-dc.md` §3.6 disassembled the
+shipped `dc_pvr.c.o` and found `fsqrt` at +0x178 followed by three `fdiv` — the
+light normalise compiled literally, on the hot per-vertex path.
+
+**The consequence is already banked and does not need redoing:** the renderer
+calls KOS's `frsqrt()`/`fipr` intrinsics explicitly (`kb/perf-dc.md` §3.6). Do
+not "discover" the flags again and do not add
+`-funsafe-math-optimizations` — that is codegen, which §1 bans.
+
+## sh4zam — PASS for this port (2026-08-05)
+
+kos-ports carries **sh4zam**, an SH-4 math library, and it is flagged as a
+follow-up in `kb/toolchain-components.md` §4.3 and `kb/toolchain-decision.md`
+item 6. **Verdict: do not adopt it.** Four reasons, in order of weight:
+
+1. **The port already emits the instructions it exists to emit**, through KOS
+   `dc/fmath.h`: FTRV at `dc_pvr.c:2666` and `dc_mtx.c:246-427`, FIPR at
+   `dc_pvr.c:188-191`, FSRRA at `dc_pvr.c:187`.
+2. **Its API is `inline` in headers, so its codegen is decided by the including
+   TU's flags.** Included from `src/` that means `-O0` — the library would be
+   compiled *badly* exactly where the frame time is.
+3. **It has no FSQRT at all**, so it does not cover the one case §3.6 found
+   compiled literally.
+4. **`kb/perf-dc.md` §3.7 already measured this class of change at exactly
+   zero**: four renderer micro-optimisations predicted at 1.5-3 ms/frame came
+   back at +0.4 % across 215 counter-matched windows.
+
+Stated fairly, because the reason is "no room", not "bad library": sh4zam is
+MIT, actively developed, in kos-ports, and shipping in DCA3 and SM64-DC. If a
+future rewrite moves the per-vertex math into a `dc/`-owned `-O2` TU, reason 2
+stops applying and this is worth ten minutes — but not before.
+
 ## SH-4 MMU demand paging — VERDICT: DEAD
 
 Full writeup: `kb/research-mmu-paging.md`. Read it before ever reconsidering.
@@ -195,9 +235,14 @@ A full design pass killed it on arithmetic, not on taste:
 - **Its RAM cost is 594 KB of `.data`** for the town keep-list scope (3,804
   chunks x 160 B), not the 60-120 KB it claimed. 1.83 MB for all of `src/data`.
 - **Its own cost cap selects nothing.** F1 proposed bounding injection to
-  display lists of 50+ vertices. The game uses the **5-bit** N-triangle index
-  format exclusively, so no `gsSPVertex` anywhere in `src/data` exceeds **32**.
-  Max is 32, p50 is 14, and chunks with n >= 33 number **zero**.
+  display lists of 50+ vertices. No `gsSPVertex` anywhere in `src/data` exceeds
+  **32** vertices: max is 32, p50 is 14, and chunks with n >= 33 number
+  **zero**. ⚠️ **Wording corrected 2026-08-05 — the verdict is unchanged, the
+  stated reason was not.** The 5 bits are the per-vertex **index** width
+  (`POLY_5b`, `include/libforest/gbi_extensions.h:64,69-86`), which is what caps
+  a batch at 32 distinct sources. They are *not* the N-triangle count:
+  `emu64.c:4814` reads `n_faces = ((w0 >> 17) & 0x7F) + 1`, i.e. **7 bits,
+  1..128 faces per `G_TRIN_INDEPEND`**. Do not quote "5-bit N-triangle format".
 - **The bboxes cannot be computed without the ROM.** 2,112 files source their
   `Vtx` from `assets/*.inc` files that do not exist in the repo; under
   `TARGET_PC` every vertex array is uninitialised storage filled at runtime
@@ -218,12 +263,14 @@ The surviving variant, if the G3 sign-off is ever refused: model-granularity
 injection scoped to the town keep list, 1,355 boxes, **212 KB**. It should still
 wait for `DC_EMU64_HIST` to run.
 
-**Correction banked along the way:** `kb/perf-dc.md` §3.5 justifies the vertex
-memo's 32 entries with "emu64's cache is `Vtx vertices[32]`". That premise is
-false — `VTX_COUNT` is **128** (`emu64.hpp:33`). The memo stays correct (it is a
-direct-mapped cache with a field-by-field compare), but the stated bound is not
-a bound; what actually caps a batch at 32 distinct sources is the 5-bit
-triangle index format.
+**Correction banked along the way:** `kb/perf-dc.md` §3.5 used to justify the
+vertex memo's 32 entries with "emu64's cache is `Vtx vertices[32]`". That
+premise is false — `VTX_COUNT` is **128** (`emu64.hpp:33`). The memo stays
+correct (it is a direct-mapped cache with a field-by-field compare), but the
+stated bound is not a bound; what actually caps a batch at 32 distinct sources
+is the 5-bit per-vertex **index** width, not any triangle count (see the
+correction above). **The memo itself is 128 slots as of 2026-08-04**
+(`dc_pvr.c:1955`), hit rate 48.2-48.9 %.
 
 ## A census cannot produce a town keep list (2026-08-04)
 

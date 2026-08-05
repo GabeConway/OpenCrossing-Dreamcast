@@ -46,6 +46,29 @@ for those see `kb/closed.md`.
   changes when unrelated `.bss` changes is an overrun, not a logic bug. Look
   for a loop bound that survived the stubbing.
 
+## Demand-loading a `bcopy` source — two things that bit R1 (2026-08-05)
+
+- **The game over-reads its own asset array, and the correct fix is to
+  reproduce the over-read.** `l_bg_tex_common_dummy[15]` is a 2,048 B
+  destination whose source `mFM_grd_s_beach_tex` is **1,024 B**
+  (`pc_assets.c:22791`), so vanilla `bcopy`s 1,024 B past the end of the source
+  array on every call — on GameCube and on the PC port alike. A loader that
+  reads the SOURCE size fills half the slot and the beach ground goes wrong; a
+  loader that reads the **DEST** size reproduces the hardware's behaviour
+  byte-for-byte. R1 reads the dest size and logs the mismatch at runtime rather
+  than silently papering over it. **Any future demand-load of a `bcopy` source
+  has to check for this shape.**
+- **A demand load turns one resident array into a scattered disc seek, and the
+  count is what matters, not the payload.** R1 moved 27 `fs_seek`+`fs_read`
+  pairs into `mFM_FieldInit`, and the same loop also runs mid-scene on the
+  island boat trip (`m_field_make.c:1745,1754`, from
+  `ac_boat_demo_move.c_inc:92-102`). The payload is 33,632 B — ~67 ms at
+  500 KB/s — but `dc_main.c`'s own sweep model prices a *scattered* seek at
+  20-100 ms, so 27 of them could be **0.5-2.7 s** [UNMEASURED]. The pattern
+  that fixes it already exists: sort the requests and replay them through one
+  window, i.e. `dc_keep_sweep()` (`kb/state-log.md`, 2026-08-03, "the keep list
+  was read in source order").
+
 ## Per-TU make rules vs the scratch trees
 
 - **A `$(OBJDIR)/src/…` per-TU rule stops firing the moment a rewriter emits
@@ -467,6 +490,18 @@ for those see `kb/closed.md`.
   build into qemu.
 - **Do not rebuild `opencrossing-dc:sdk`** — ~27 min cold. It is already in the
   local Docker daemon.
+- **"KOS 2.3" IS NOT A RELEASE, and treating it as one will send you to the
+  wrong source (2026-08-05).** `include/kos/version.h` says 2.3.0, and every
+  document in this tree (this one included) calls the pinned SDK "KOS 2.3". But
+  `git describe` on the pinned `KOS_SHA=1c6398f9` gives
+  **`v2.2.0-946-g1c6398f9`**, and the tags stop at v2.2.2 — 2.3.0 is the
+  in-development version number on master, not a tagged release. Two APIs this
+  port cares about are **master-only and absent from every release tag**:
+  `pvr_dr_addr` and `dcache_toggle_ocram()`. So release-tag documentation and
+  release tarballs will disagree with the SDK image, in both directions: a
+  symbol can be missing from the docs and present in our build, or present in
+  the 2.2.x docs and behave differently here. **Read the pinned tree, never a
+  release.**
 
 ## The build tracks timestamps, not flags — FIXED, do not remove the fix
 
@@ -542,11 +577,19 @@ for those see `kb/closed.md`.
   pricing a SUBSET of commands at 12.31 µs.** That fit is against TOTAL `cmds`,
   and total `cmds` correlates with `vtx`, so the coefficient is dominated by
   whichever opcode does the most work per command. Applying it to the 2,094
-  state commands per town frame gives ~26 ms; the counter-arithmetic (265
-  `G_VTX` carrying ~6,951 vertices at the separately measured ~6.9 µs/vertex
-  ≈ 48 ms) says `G_VTX` alone is most of the budget. **I made exactly this
-  error in the commit that first printed the mix.** Per-opcode cost needs a
-  per-opcode instrument — that is what `DC_EMU64_HIST` is for.
+  state commands per town frame gives ~26 ms. **I made exactly this error in the
+  commit that first printed the mix.**
+- ⚠️ **AND THEN MADE IT AGAIN IN THE FIX (corrected 2026-08-05).** The
+  replacement arithmetic written into this entry — "265 `G_VTX` carrying ~6,951
+  vertices at the separately measured ~6.9 µs/vertex ≈ 48 ms, so `G_VTX` alone
+  is most of the budget" — is wrong on both inputs. **G1 measured `G_VTX` at
+  5.40 ms over 149 calls.** The ~6.9 µs/vertex is itself a whole-command
+  average, and the ~6,951 were `GXPosition3f32` **references**, not loaded
+  vertices (`G_VTX` loads ~3,601; the rest are re-emissions of the same
+  sources). The real cost is in `G_TRIN_INDEPEND`: **22.25 ms over 146 calls,
+  63 % of dispatch.** Per-opcode cost needs a per-opcode instrument, and a
+  correction to an averaging error must not itself be an average —
+  `DC_EMU64_HIST` is the only thing allowed to price an opcode.
 
 ## `MEMLEDGER FIT … OK` does not mean the image boots (2026-08-04)
 
@@ -606,11 +649,12 @@ for those see `kb/closed.md`.
   pricing a SUBSET of commands at 12.31 µs.** That fit is against TOTAL `cmds`,
   and total `cmds` correlates with `vtx`, so the coefficient is dominated by
   whichever opcode does the most work per command. Applying it to the 2,094
-  state commands per town frame gives ~26 ms; the counter-arithmetic (265
-  `G_VTX` carrying ~6,951 vertices at the separately measured ~6.9 µs/vertex
-  ≈ 48 ms) says `G_VTX` alone is most of the budget. **I made exactly this
-  error in the commit that first printed the mix.** Per-opcode cost needs a
-  per-opcode instrument — `DC_EMU64_HIST`.
+  state commands per town frame gives ~26 ms. **I made exactly this error in the
+  commit that first printed the mix.** Per-opcode cost needs a per-opcode
+  instrument — `DC_EMU64_HIST`. ⚠️ **This entry is duplicated above, and the
+  version above carries the 2026-08-05 correction: the "~48 ms of `G_VTX`"
+  replacement was ALSO an average applied to a subset. Measured, `G_VTX` is
+  5.40 ms and `G_TRIN_INDEPEND` is 22.25 ms.**
 
 ## A test knob that fires in the wrong scene corrupts the run (2026-08-04)
 

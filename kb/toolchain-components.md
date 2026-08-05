@@ -166,9 +166,13 @@ kos-ports `config.mk` sets `CHECK_PRECISION = true`, so ports validate against
 consistently. [VERIFIED]
 
 Also install **`zlib`** from kos-ports (base port uses it). Worth knowing:
-kos-ports also carries **`sh4zam`** (SH-4 math library) — directly relevant to
-PLAN §3.2's FTRV/FIPR work, evaluate at M4. [VERIFIED it exists in the tree;
-UNVERIFIED what it contains.]
+kos-ports also carries **`sh4zam`** (SH-4 math library). ❌ **EVALUATED AND
+PASSED 2026-08-05 — do not schedule it.** The port already emits FTRV, FIPR and
+FSRRA via KOS `dc/fmath.h`; sh4zam's API is `inline` in headers, so from `src/`
+its codegen would be decided at `-O0`; it has no FSQRT; and `kb/perf-dc.md` §3.7
+measured this whole class of change at exactly zero. Reasons in full:
+`kb/closed.md`. (This row previously read "directly relevant to PLAN §3.2's
+FTRV/FIPR work, evaluate at M4".)
 
 ### 4.4 mkdcdisc — **built and run successfully on arm64 Debian bookworm**
 

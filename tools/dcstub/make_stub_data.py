@@ -103,9 +103,38 @@ place. For case 2 the redirect is textual: a kept file is copied into the stub
 tree with the identifier `pc_load_asset` renamed, arrays untouched at full
 size. That is why a kept file can still appear in stub.list.
 
+THE ACRE GROUND TEXTURES — dc_bgtex_map.inc (R1, --bgtex-demand)
+----------------------------------------------------------------
+One family of assets does not want to be kept at all. The 96 mFM_grd_* source
+arrays (150,880 B: 46 summer, 41 winter, 9 shared) exist only to be bcopy'd, in
+mFM_LoadBGCommonTex(), into the 27 always-resident staging buffers in
+src/game/m_bg_tex.c. Keeping them stores the same bytes twice, and the keep
+list could only ever afford the summer half — which is why the town ground goes
+black in December.
+
+So this script ALSO emits
+
+    dc/build/stubsrc/dc_bgtex_map.inc
+
+a table of {source array address, path, size, rom_off, rom_src, swap} for every
+mFM_grd_* row in s_assets[], and tools/dcstub/make_src_shrink.py rewrites that
+one bcopy into a dc_bgtex_load() call. The stubbed `u8 x[1];` source array is
+still a UNIQUE ADDRESS, so the vendored season/variant tables keep doing the
+selecting and dc/src/dc_bgtex.c only has to look the pointer up. Read that file
+first; it carries the whole argument and the two hazards.
+
+Every mFM_grd_* row is emitted, summer and winter, regardless of keep-list
+membership — the point is that none of them are kept.
+
+    --bgtex-demand 0   emit an empty map AND put the 27 summer/shared
+                       mFM_grd_*.c files back on the keep list. That is the
+                       kill switch, and it must be paired with the same flag on
+                       make_src_shrink.py (dc/build-dc.sh passes both).
+
 USAGE
 -----
     python3 tools/dcstub/make_stub_data.py [--out DIR] [--keep LIST]
+                                           [--bgtex-demand 0|1]
                                            [--dry-run] [--quiet]
 
 Default --out is dc/build/stubsrc. The tree mirrors repo-relative paths, so
@@ -133,6 +162,58 @@ ASSET_TABLE = REPO / "pc" / "src" / "pc_assets.c"
 # dc/src/dc_main.c — change both or neither.
 KEEP_INC_NAME = "dc_stub_keep.inc"
 KEEP_LOADER = "dc_stub_keep_load_one"
+
+# ---------------------------------------------------------------------------
+# R1 — the acre ground-texture map. See the module docstring.
+# ---------------------------------------------------------------------------
+# Name and row shape are the contract with dc/src/dc_bgtex.c, which defines the
+# matching typedef. Change both or neither.
+BGTEX_INC_NAME = "dc_bgtex_map.inc"
+BGTEX_PREFIX = "mFM_grd_"
+
+# The file's own checksum, same rule as make_src_shrink.py's match counts: a
+# selector that silently stops matching produces a build that looks fine and
+# demand-loads nothing, and the acres it dropped render as black ground. 96 is
+# the count of mFM_grd_* rows in s_assets[], cross-checked against the six
+# segment tables in src/game/m_field_make.c — every symbol those tables name has
+# a row, and every mFM_grd_* row is named by them. If the vendored data moves,
+# re-derive this; do not relax it.
+BGTEX_ROWS_EXPECTED = 96
+
+# --bgtex-demand 0 puts these back on the keep list. This is the list
+# keeplist-opening.txt carried until R1 landed, verbatim: the summer half plus
+# the nine season-neutral arrays. The winter half was never on it — that is the
+# December bug R1 also fixes — so turning the switch off restores the OLD
+# behaviour exactly, black winter ground included.
+BGTEX_KEEP_RESTORE = (
+    "src/data/model/mFM_grd_beachA_tex.c",
+    "src/data/model/mFM_grd_beachB_tex.c",
+    "src/data/model/mFM_grd_s_beach_tex.c",
+    "src/data/model/mFM_grd_s_bridge1.c",
+    "src/data/model/mFM_grd_s_bridge1_pal.c",
+    "src/data/model/mFM_grd_s_bridge2.c",
+    "src/data/model/mFM_grd_s_bridge2_pal.c",
+    "src/data/model/mFM_grd_s_bushA.c",
+    "src/data/model/mFM_grd_s_bushB.c",
+    "src/data/model/mFM_grd_s_cliff.c",
+    "src/data/model/mFM_grd_s_earth.c",
+    "src/data/model/mFM_grd_s_grass.c",
+    "src/data/model/mFM_grd_s_rail.c",
+    "src/data/model/mFM_grd_s_river.c",
+    "src/data/model/mFM_grd_s_sand.c",
+    "src/data/model/mFM_grd_s_station.c",
+    "src/data/model/mFM_grd_s_station1_pal.c",
+    "src/data/model/mFM_grd_s_stone.c",
+    "src/data/model/mFM_grd_s_tekkyo.c",
+    "src/data/model/mFM_grd_s_tunnel.c",
+    "src/data/model/mFM_grd_sprashA_tex.c",
+    "src/data/model/mFM_grd_sprashC_tex.c",
+    "src/data/model/mFM_grd_water1_tex.c",
+    "src/data/model/mFM_grd_water2_tex.c",
+    "src/data/model/mFM_grd_wave1_tex.c",
+    "src/data/model/mFM_grd_wave2_tex.c",
+    "src/data/model/mFM_grd_wave3_tex.c",
+)
 
 # ---------------------------------------------------------------------------
 # The default allowlist: everything src/actor/ac_animal_logo.c draws.
@@ -725,6 +806,81 @@ def emit_keep_inc(keep_paths, table, rewritten_cinc=None):
     return "\n".join(L), stats_line
 
 
+def emit_bgtex_map(table, demand):
+    """Build the text of dc_bgtex_map.inc. Returns (text, n_rows, n_bytes).
+
+    Every s_assets[] row whose destination is an mFM_grd_* symbol, keyed by the
+    ADDRESS of that symbol — which is what src/game/m_field_make.c's six segment
+    tables hand to the loop, and which stays unique when the array is stubbed to
+    [1]. dc/src/dc_bgtex.c is the consumer and carries the argument.
+
+    `demand` False emits only the count macro and no table, so the runtime
+    compiles to a plain memmove and nothing is left unreferenced.
+    """
+    L = []
+    L.append("/* GENERATED by tools/dcstub/make_stub_data.py — DO NOT EDIT. */")
+    L.append("/*")
+    L.append(" * R1: the acre ground textures, read off the disc instead of kept")
+    L.append(" * resident. Each row maps a mFM_grd_* SOURCE ARRAY'S ADDRESS — the")
+    L.append(" * key src/game/m_field_make.c's segment tables hand to")
+    L.append(" * mFM_LoadBGCommonTex()'s copy loop — onto the ROM offset the bytes")
+    L.append(" * actually live at. Included by dc/src/dc_bgtex.c, which defines the")
+    L.append(" * dc_bgtex_row_t this is written against and does the lookup.")
+    L.append(" *")
+    L.append(" * The arrays these point at are [1] bytes each under DC_ASSET_STUB;")
+    L.append(" * that is the point. Only the address is used.")
+    L.append(" */")
+    L.append("#ifndef DC_BGTEX_MAP_INC_")
+    L.append("#define DC_BGTEX_MAP_INC_")
+    L.append("")
+
+    if not demand:
+        L.append("/* --bgtex-demand 0: the map is empty and the 27 summer/shared")
+        L.append(" * mFM_grd_*.c files are back on the keep list, so every source is")
+        L.append(" * resident and dc_bgtex_load() is a memmove. No table is emitted,")
+        L.append(" * so nothing here is left unreferenced. */")
+        L.append("#define DC_BGTEX_MAP_N 0")
+        L.append("")
+        L.append("#endif /* DC_BGTEX_MAP_INC_ */")
+        L.append("")
+        return "\n".join(L), 0, 0
+
+    names = sorted(n for n in table if n.startswith(BGTEX_PREFIX))
+    if len(names) != BGTEX_ROWS_EXPECTED:
+        raise SystemExit(
+            "make_stub_data: found {} '{}*' rows in {}, expected {}.\n"
+            "  This count is the table's own checksum — a selector that stops\n"
+            "  matching would emit a SHORT map, the missing acres would fall\n"
+            "  through dc_bgtex_load()'s memmove out of a [1]-sized array, and\n"
+            "  the ground would render as garbage rather than fail. Re-derive\n"
+            "  BGTEX_ROWS_EXPECTED against src/game/m_field_make.c's six segment\n"
+            "  tables; do not relax it.".format(
+                len(names), BGTEX_PREFIX, ASSET_TABLE.name, BGTEX_ROWS_EXPECTED))
+
+    n_bytes = 0
+    # `extern char x[]` regardless of the vendored element type (three of these
+    # are u16 palettes). Only the address is taken, no TU sees both spellings,
+    # and dc_stub_keep.inc above already declares kept globals the same way.
+    for name in names:
+        L.append("extern char {}[];".format(name))
+    L.append("")
+    L.append("static const dc_bgtex_row_t dc_bgtex_map[] = {")
+    for name in names:
+        bin_path, size, off, src, swap = table[name]
+        n_bytes += size
+        L.append('    {{ (const void*){}, "{}", {}u, {}u, {}, {} }},'.format(
+            name, bin_path, size, off, src, swap))
+    L.append("};")
+    L.append("")
+    # A LITERAL, not sizeof/sizeof: dc_bgtex.c tests this with #if, and sizeof
+    # is not available to the preprocessor.
+    L.append("#define DC_BGTEX_MAP_N {}".format(len(names)))
+    L.append("")
+    L.append("#endif /* DC_BGTEX_MAP_INC_ */")
+    L.append("")
+    return "\n".join(L), len(names), n_bytes
+
+
 def write_if_changed(dst, text):
     """Returns True if the file was actually written."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -748,13 +904,36 @@ def main():
              "'src/data/model/obj_s_house1.c#obj_s_' keeps only the summer "
              "arrays and stubs the winter ones in the same file.",
     )
+    ap.add_argument(
+        "--bgtex-demand",
+        type=int,
+        default=int(os.environ.get("DC_BGTEX_DEMAND", "1") or "1"),
+        choices=(0, 1),
+        help="R1. 1 (the default, matching dc/Makefile) emits "
+             "dc_bgtex_map.inc so the 96 mFM_grd_* ground textures are read off "
+             "the disc on demand. 0 emits an empty map and puts the 27 "
+             "summer/shared mFM_grd_*.c files back on the keep list. It MUST "
+             "match the --bgtex-demand= that make_src_shrink.py was run with, "
+             "and dc/Makefile's DC_BGTEX_DEMAND; dc/build-dc.sh passes all "
+             "three from one value.",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
+    bgtex_demand = bool(args.bgtex_demand)
     out_root = Path(args.out).resolve()
 
     keep_paths, keep_why = parse_keep(args.keep)
+
+    # R1's kill switch. Appended rather than expected in the caller's list: the
+    # keep list is passed in from a shell (DC_STUB_KEEP), and a kill switch that
+    # only works if the human also edits their command line is not one.
+    # Whole-file keeps, and only for paths not already named — a partial keep
+    # with a symbol filter must not be overridden by a bare duplicate.
+    if not bgtex_demand:
+        already = {p for p, _ in keep_paths}
+        keep_paths += [(p, ()) for p in BGTEX_KEEP_RESTORE if p not in already]
 
     missing = [p for p, _ in keep_paths if not (REPO / p).is_file()]
     if missing:
@@ -937,6 +1116,7 @@ def main():
     inc_text, (n_rows, n_inits, n_unmapped, n_load_bytes, n_cinc) = emit_keep_inc(
         keep_paths, table, None if args.dry_run else rewritten_cinc
     )
+    bgtex_text, n_bgtex, n_bgtex_bytes = emit_bgtex_map(table, bgtex_demand)
 
     pruned = 0
     if not args.dry_run:
@@ -959,6 +1139,10 @@ def main():
             written += 1
         else:
             unchanged += 1
+        if write_if_changed(out_root / BGTEX_INC_NAME, bgtex_text):
+            written += 1
+        else:
+            unchanged += 1
 
     if not args.quiet:
         print("== DC_ASSET_STUB tree ==")
@@ -975,6 +1159,12 @@ def main():
         print("  {:<14}: {} table rows + {} .c_inc rows + {} per-file init"
               " fns ({:,} B)".format(KEEP_INC_NAME, n_rows, n_cinc, n_inits,
                                      n_load_bytes))
+        print("  {:<14}: {} rows, {:,} B NOT resident   [R1, "
+              "--bgtex-demand={}]".format(
+                  BGTEX_INC_NAME, n_bgtex, n_bgtex_bytes, args.bgtex_demand))
+        if not bgtex_demand:
+            print("                  {} mFM_grd_*.c file(s) forced back onto the"
+                  " keep list".format(len(BGTEX_KEEP_RESTORE)))
         if n_unmapped:
             print("  WARNING       : {} kept global(s) have no s_assets[] row"
                   " and will stay zeroed".format(n_unmapped))

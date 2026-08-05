@@ -317,6 +317,17 @@ void dc_asset_census_note(const void* addr, int kind);
 void dc_asset_census_vtx(const void* addr);
 void dc_asset_census_report(void);
 
+/* --- Acre ground textures, demand-loaded (R1) -------------------------------
+ * mFM_LoadBGCommonTex() copies 27 source arrays into the always-resident
+ * staging buffers in src/game/m_bg_tex.c.  Those sources are 150,880 B of
+ * mFM_grd_* that exist only to be copied out of, so DC_SRC_SHRINK rewrites the
+ * one bcopy into this call and dc/src/dc_bgtex.c reads the bytes straight off
+ * the disc into `dest`.  `src` is the stubbed source array's ADDRESS, used as
+ * the lookup key — read that file before changing this signature.
+ * Kill switch: DC_BGTEX_DEMAND=0, which restores the bcopy and the keep-list
+ * entries and leaves this as a plain memmove. */
+void dc_bgtex_load(const void* src, void* dest, unsigned int size);
+
 /* --- Arena high-water probe (kb/STATE.md N4) --------------------------------
  * Compiled to an empty function unless -DDC_ARENA_PROBE=<frames> (DC_ARENA_PROBE
  * in dc/Makefile). Prints touched/peak arena bytes and the current libc break,

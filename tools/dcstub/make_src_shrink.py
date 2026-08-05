@@ -104,6 +104,25 @@ S8  jaudio pools, ONLY when --audio=0                          -401,216
     touched when sound is on.  With DC_AUDIO=0 the per-frame chain that fills
     them is severed at its root — see THE S8 ARGUMENT below.
 
+S10 acre ground textures off the disc (R1)                     -150,880 of keep
+    `src/game/m_field_make.c`. Not a shrink at all — a CALL-SITE REDIRECT, here
+    only because this tree is the one seam that reaches that TU without editing
+    `src/` (mFM_LoadBGCommonTex, its six segment tables, l_bg_tex_common_dummy
+    and l_water_permission are all `static`, so --wrap cannot see them; and
+    `bcopy` is not a seam either — it is undeclared for this target and GCC
+    folds it to memmove).
+    The single `bcopy(bg_tex_tbl[i], …)` in that function becomes
+    `dc_bgtex_load(bg_tex_tbl[i], …)`, which reads the bytes straight off the
+    disc into the staging buffer that is already resident. The 96 mFM_grd_*
+    source arrays (150,880 B: 46 summer / 41 winter / 9 shared) then never need
+    keeping — which is worth 80,736 B of keep list today AND is what stops the
+    winter town's ground rendering black, since the keep list could only ever
+    afford one season. dc/src/dc_bgtex.c carries the whole argument;
+    tools/dcstub/make_stub_data.py emits the pointer -> ROM map it looks up in.
+    Kill switch: --bgtex-demand=0, which must match dc/Makefile's
+    DC_BGTEX_DEMAND and make_stub_data.py's own flag. The rewritten TU carries
+    an #error for the mismatch, in both directions.
+
 S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
     `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
     of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
@@ -163,6 +182,7 @@ already non-functional in exactly this way (see the `[TRG_SE] NO FREE` note in
 USAGE
 -----
     python3 tools/dcstub/make_src_shrink.py [--out DIR] [--audio 0|1]
+                                            [--bgtex-demand 0|1]
                                             [--dry-run] [--quiet]
 
 Default --out is dc/build/shrinksrc.  Files are written only when their content
@@ -176,6 +196,7 @@ channels with no diagnostic at all.
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -708,7 +729,110 @@ def _s7_decode(stream, off, palette):
     return tuple(out)
 
 
-def _s7_rules():
+# ---------------------------------------------------------------------------
+# S10 — the acre ground textures, off the disc (R1).
+# ---------------------------------------------------------------------------
+# Rides in the S7 entry for src/game/m_field_make.c rather than getting one of
+# its own: make_src_shrink refuses to write two rule entries for the same path
+# (one output file per TU, so the second write would silently drop the first).
+#
+# WHAT IT REPLACES. mFM_LoadBGCommonTex()'s copy loop (m_field_make.c:1126-1130)
+# is the ONLY consumer, anywhere in src/ / include/ / pc/, of the 96 mFM_grd_*
+# source arrays. It runs at three call sites — :1221 (mFM_FieldInit,
+# update_tex=TRUE, 27 slots) and :1745 / :1754 (mFM_toSummer /
+# mFM_returnSeason, update_tex=FALSE, 21 slots, reached from the island boat
+# trip at ac_boat_demo_move.c_inc:92-102) — so the replacement has to be safe
+# during gameplay, not only at load. dc/src/dc_bgtex.c is written for that.
+#
+# WHY THE POINTER IS ENOUGH. make_stub_data.py rewrites an unkept asset to
+# `u8 x[1];` — one byte of .bss with a unique address — and the six segment
+# tables still name those symbols, so bg_tex_tbl[i] identifies which source the
+# slot wants. No season logic and no table duplication in dc/.
+#
+# ⚠️ THE STALE-TREE GUARD IS NOT OPTIONAL, and it points BOTH ways.
+# dc/build/shrinksrc and dc/build/stubsrc are generated host-side and survive a
+# flag flip; flags.stamp forces a rebuild but cannot regenerate either tree. A
+# demand-ON m_field_make.c compiled against a demand-OFF map is the bad case:
+# the map is empty, every load falls through dc_bgtex_load()'s memmove out of a
+# [1]-sized array, and the ground renders as garbage rather than failing. The
+# reverse (demand-OFF tree, demand-ON build) merely does nothing, and is guarded
+# too so it cannot be mistaken for "R1 did not help".
+#
+# `defined(DC_BGTEX_DEMAND) && …`, not a bare test: the undefined case must stay
+# quiet so a tree built by hand without the Makefile's -D still compiles.
+def BGTEX_GUARD(demand):
+    if demand:
+        return (
+            "/* " + "-" * 68 + "\n"
+            " * DC_SRC_SHRINK S10 — THIS COPY WAS GENERATED FOR"
+            " DC_BGTEX_DEMAND=1.\n"
+            " * The loop below reads its source arrays off the disc, and it can\n"
+            " * only do that because tools/dcstub/make_stub_data.py emitted\n"
+            " * dc/build/stubsrc/dc_bgtex_map.inc in the same pass. With the\n"
+            " * switch off that map is EMPTY, every load falls back to a memmove\n"
+            " * out of a [1]-sized source array, and the town ground is garbage\n"
+            " * rather than loudly missing. Refuse to build.\n"
+            " * " + "-" * 68 + " */\n"
+            "#if defined(DC_BGTEX_DEMAND) && !DC_BGTEX_DEMAND\n"
+            "#error \"DC_SRC_SHRINK S10: dc/build/shrinksrc was generated with "
+            "--bgtex-demand=1, but this build defines DC_BGTEX_DEMAND=0. Re-run "
+            "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+            "with --bgtex-demand=0 (or rm -rf dc/build/shrinksrc "
+            "dc/build/stubsrc) before building.\"\n"
+            "#endif")
+    return (
+        "/* " + "-" * 68 + "\n"
+        " * DC_SRC_SHRINK S10 — THIS COPY WAS GENERATED FOR DC_BGTEX_DEMAND=0.\n"
+        " * The copy loop below is the vendored bcopy, so the mFM_grd_* source\n"
+        " * arrays must be RESIDENT — which is why make_stub_data.py puts the 27\n"
+        " * summer/shared files back on the keep list at the same setting. A\n"
+        " * DC_BGTEX_DEMAND=1 build against this tree would silently keep 80,736\n"
+        " * B of .bss and read as \"R1 saved nothing\".\n"
+        " * " + "-" * 68 + " */\n"
+        "#if defined(DC_BGTEX_DEMAND) && DC_BGTEX_DEMAND\n"
+        "#error \"DC_SRC_SHRINK S10: dc/build/shrinksrc was generated with "
+        "--bgtex-demand=0, but this build defines DC_BGTEX_DEMAND=1. Re-run "
+        "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+        "with --bgtex-demand=1 (or rm -rf dc/build/shrinksrc dc/build/stubsrc) "
+        "before building.\"\n"
+        "#endif")
+
+
+def _s10_rules(demand):
+    """The R1 rules that ride in S7's src/game/m_field_make.c entry."""
+    head = BGTEX_GUARD(demand) + "\n"
+    if demand:
+        head += (
+            "/* DC_SRC_SHRINK S10: bg_tex_tbl[i] is the SOURCE ARRAY'S ADDRESS,\n"
+            " * and under DC_ASSET_STUB that array is one byte long. dc_bgtex.c\n"
+            " * uses the address as a key into the generated pointer -> ROM map\n"
+            " * and reads the bytes off the disc straight into the staging\n"
+            " * buffer. Declared here rather than pulled from dc_platform.h: this\n"
+            " * TU is vendored decomp and must not grow a dc/ include. */\n"
+            "extern void dc_bgtex_load(const void* src, void* dest,\n"
+            "                          unsigned int size);\n")
+
+    rules = [
+        (1,
+         r"^static void mFM_LoadBGCommonTex\(int update_tex, u8 tex_idx\) \{$",
+         head + "static void mFM_LoadBGCommonTex(int update_tex, u8 tex_idx) {"),
+    ]
+    if demand:
+        rules.append((
+            1,
+            r"^            bcopy\(bg_tex_tbl\[i\], l_bg_tex_common_dummy\[i\]\.data,"
+            r" l_bg_tex_common_dummy\[i\]\.size\);$",
+            # The DEST size, not the s_assets[] size — l_bg_tex_common_dummy[15]
+            # asks for 0x800 out of a 0x400 mFM_grd_s_beach_tex, in all six
+            # tables, and reading 0x800 from rom_off is what reproduces the
+            # GameCube's own over-read. dc_bgtex.c logs the discrepancy.
+            "            dc_bgtex_load(bg_tex_tbl[i],"
+            " l_bg_tex_common_dummy[i].data,\n"
+            "                          l_bg_tex_common_dummy[i].size); " + MARK))
+    return rules
+
+
+def _s7_rules(bgtex_demand):
     import collections
 
     text = (REPO / S7_BGD).read_text(encoding="utf-8", errors="surrogateescape")
@@ -871,10 +995,13 @@ def _s7_rules():
          "                    bg_data->collision_enc); " + MARK),
     ]
 
+    # S10 rides here, not in an entry of its own: one output file per TU, so a
+    # second entry for this path would overwrite the first (the `seen` check in
+    # main() is what keeps that honest). Appended last — none of its anchors is
+    # touched by the three rules above.
+    fm_rules += _s10_rules(bgtex_demand)
+
     return [(S7_BGD, "swap", bgd_rules), (S7_FM, "swap", fm_rules)]
-
-
-RULES += _s7_rules()
 
 
 # ---------------------------------------------------------------------------
@@ -1199,12 +1326,25 @@ def main():
                          "dc/Makefile) enables the S8 jaudio pool shrinks; 1 "
                          "leaves those pools at full size. The generated TUs "
                          "#error if this disagrees with the build.")
+    ap.add_argument("--bgtex-demand", type=int,
+                    default=int(os.environ.get("DC_BGTEX_DEMAND", "1") or "1"),
+                    choices=(0, 1),
+                    help="R1 (S10). 1 (the default, matching dc/Makefile) "
+                         "rewrites mFM_LoadBGCommonTex()'s copy loop to read "
+                         "the acre ground textures off the disc. 0 leaves the "
+                         "vendored bcopy. It MUST match the --bgtex-demand= "
+                         "that make_stub_data.py was run with, and "
+                         "dc/Makefile's DC_BGTEX_DEMAND; the generated TU "
+                         "#errors on either mismatch.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     audio = bool(args.audio)
-    rules_all = RULES + _audio_rules(audio)
+    bgtex = bool(args.bgtex_demand)
+    # S7 is built here, not at import time, because S10 rides in its
+    # src/game/m_field_make.c entry and needs the parsed flag.
+    rules_all = RULES + _s7_rules(bgtex) + _audio_rules(audio)
     expected = EXPECTED + ([] if audio else EXPECTED_AUDIO_OFF)
 
     out_root = Path(args.out).resolve()
@@ -1316,6 +1456,15 @@ def main():
         print("                   {:,} acres, {:,} distinct maps, palette {:,},"
               " stream {:,} B".format(
                   s["entries"], s["distinct"], s["palette"], s["stream"]))
+        # S10 saves no .bss in THIS file — it removes 96 arrays from the KEEP
+        # LIST, so the number lands in make_stub_data.py's report, not here.
+        print("  R1 / S10       : mFM_LoadBGCommonTex copy loop {}"
+              "   [--bgtex-demand={}]".format(
+                  "-> dc_bgtex_load()" if bgtex else "left as bcopy",
+                  args.bgtex_demand))
+        if bgtex:
+            print("                   150,880 B of mFM_grd_* no longer needs "
+                  "keeping (80,736 B of it was)")
         print("  (dc/Makefile adds -16,384 more by dropping KOS's dcache")
         print("   walk buffer out of dc/src/dc_os.c — see DC_OS_TU_OPT there.)")
 

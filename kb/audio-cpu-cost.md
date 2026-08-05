@@ -9,6 +9,39 @@ budget or arguing about whether stage A fits.
 
 ---
 
+## ⚠️ 0. TWO CORRECTIONS THAT MOVE EVERY NUMBER BELOW (2026-08-05)
+
+Read these before quoting anything in §2.
+
+### 0.1 A jaudio DAC frame is 17.49 ms of audio, not ~35 ms — MEASURED
+
+`dc/src/dc_audio.c:53-55, :129-131, :139-141, :916` all say "~35 ms of audio",
+and `kb/STATE.md` was costing the audio budget against it. **It is 17.49 ms.**
+`aictrl.c:292` passes `AIInitDMA(..., DAC_SIZE * 2)` where `DAC_SIZE` is in
+**s16 units**, so `DAC_SIZE * 2` is 2,240 **bytes** = 1,120 s16 = 560 stereo
+pairs; at `JAC_DAC_RATE = 32028.5` (`internal/rate.c:4-7`) that is 17.49 ms.
+`kb/audio-engine.md`'s parameter table has had it right all along — 57.19 Hz.
+
+**Consequence: at the measured ~19.8 ms of SH-4 per DAC frame, synthesis runs at
+0.88× real time and needs ~113 % of the machine to stay level — not 1.8× at
+~57 %.** Corroborated by `dc_audio.c:120-122`'s own note that the ring "starves
+essentially always", which is impossible above real time.
+
+### 0.2 The 80-180 cyc/voice-sample band is OPTIMISTIC — `rspsim.c` is `-O0`
+
+§2.2's model assumes ordinary compiled code. `src/static/jaudio_NES/internal/
+rspsim.c` is in `src/`, so it compiles at **`-O0`** like everything else
+(CLAUDE.md §1), with a stack round-trip per intermediate. Back-solving the
+cycle count from the 0.88× real-time figure in §0.1 gives **~200+
+cyc/voice-sample**.
+
+**⇒ every row of §2.3 needs scaling by ~1.7×.** A1 34 % → **~57 %**; A4 13 % →
+**~22 %**. Nothing in the A0-A4 table fits the ≤12-18 % budget §2.3 derives.
+That does not change the plan of record — stage B was already assumed
+(`kb/audio-plan-of-record.md`) — but it does remove "A4 fits" as a fallback.
+
+---
+
 ## 2. CPU cost — method, numbers, error bars
 
 ### 2.1 Method
@@ -75,20 +108,26 @@ buffer clears): ≈ 21,000 cycles/update ≈ 84,000 cycles/audio frame
 
 Voice-samples/s = voices × internal rate. CPU% = (voice-samples/s × cyc) / 200e6.
 
-| config | out / internal rate | voices | central | range |
-|---|---|---|---|---|
-| **A0** as-shipped | 32.03 k / 45.76 k | 24 | **68%** | 46–101% |
-| A0 typical load (guess 12 voices) | 32.03 k / 45.76 k | 12 | 35% | 24–52% |
-| **A1** half-rate | 22.05 k / 22.97 k | 24 | **34%** | 23–51% |
-| **A2** half-rate, capped, FIR+comb off | 22.05 k / 22.97 k | 16 | **21%** | 14–32% |
-| **A3** A2 + FP round-trip removed | 22.05 k / 22.97 k | 16 | 18% | 12–27% |
-| **A4** budget-fitting | 22.05 k / 22.97 k | **10** | **13%** | 9–20% |
+⚠️ **Every CPU% in this table is at the 120 cyc/voice-sample central estimate
+and must be scaled by ~1.7× — see §0.2.** The scaled column is what to plan
+against.
+
+| config | out / internal rate | voices | central | range | **×1.7 (`-O0`)** |
+|---|---|---|---|---|---|
+| **A0** as-shipped | 32.03 k / 45.76 k | 24 | **68%** | 46–101% | **~116%** |
+| A0 typical load (guess 12 voices) | 32.03 k / 45.76 k | 12 | 35% | 24–52% | ~60% |
+| **A1** half-rate | 22.05 k / 22.97 k | 24 | **34%** | 23–51% | **~57%** |
+| **A2** half-rate, capped, FIR+comb off | 22.05 k / 22.97 k | 16 | **21%** | 14–32% | ~36% |
+| **A3** A2 + FP round-trip removed | 22.05 k / 22.97 k | 16 | 18% | 12–27% | ~31% |
+| **A4** budget-fitting | 22.05 k / 22.97 k | **10** | **13%** | 9–20% | **~22%** |
 
 **The budget arithmetic that matters.** At 30 fps the frame is 33.3 ms. PLAN
 §3.2's M3 gate allows game logic ≤25 ms. That leaves ≤8.3 ms for *everything
 else* — renderer submission, T&L, texture work, disc I/O — so audio must land
-at **≤4–6 ms/frame ≈ 12–18% CPU**. Only A4 (and A3 at ~10–12 voices) fits.
-**Stage A at the game's real 24-voice cap does not fit the plan's own budget.**
+at **≤4–6 ms/frame ≈ 12–18% CPU**. ⚠️ **Corrected 2026-08-05: at the `-O0`
+scaling of §0.2, NOTHING in the table fits** — A4, the cheapest config, is
+~22 %. This sentence used to read "Only A4 (and A3 at ~10–12 voices) fits."
+**Stage A does not fit the plan's own budget at any voice count in this table.**
 
 The DC has one core; the "audio thread" is time-slicing, not parallelism. 34%
 CPU is 11.3 ms taken straight out of the 33.3 ms frame.

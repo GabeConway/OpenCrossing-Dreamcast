@@ -95,6 +95,7 @@ colima (4 cores), `-j4`:
 | `DC_TARGET` | `all` | pass `objs` for a compile-only run |
 | `DC_CDI_PAD` | `0` | `1` → padded 740 MB CDI (see below) |
 | `DC_ASSET_STUB` | `0` | `1` → the throwaway bring-up image (see below) |
+| `DC_BGTEX_DEMAND` | `1` | **R1** — the 27 acre ground textures are read off `/cd/foresta.rel` on demand (`dc/src/dc_bgtex.c`) instead of living in `.bss`. Worth 80,736 B of keep list, and it is what makes the WINTER town's ground render at all: the keep list could only ever afford one season, so `mFM_grd_w_*` was stubbed and December's ground was black. `0` restores the vendored `bcopy` **and** puts the 27 `mFM_grd_*.c` files back on the keep list. One value drives both `tools/dcstub` generators and the `-D`; the generated `m_field_make.c` `#error`s if they disagree |
 | `DC_DISC_ROOT` | unset | a directory whose files go on the disc **flat** |
 | `DECOMP_OPT` | `-O0` | optimization level for decomp game code |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |

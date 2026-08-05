@@ -57,6 +57,52 @@ changes instruction selection is banned:
 
 ## Applied
 
+### A4. R1 — acre ground textures demand-loaded. **−81,856 B `.bss`** (2026-08-05)
+
+**The first asset pool this port has ever shipped, and it is small on purpose:
+it proves the seam.**
+
+96 `mFM_grd_*` symbols — **150,880 B** (46 summer / 73,312 B, 41 winter /
+70,144 B, 9 shared / 7,424 B) — were pure `bcopy` **sources** into 32
+always-resident staging buffers in `src/game/m_bg_tex.c` (33,792 B, the
+`*_dummy` row L8 flagged as "placeholders, unverified"), filled by
+`mFM_LoadBGCommonTex` (`src/game/m_field_make.c:1101-1133`). **Zero other
+consumers anywhere in `src/`, `include/` or `pc/`**, so the sources never have
+to be resident — only the 32 destinations.
+
+| | before | after | Δ |
+|---|---:|---:|---:|
+| `.bss` | 4,027,212 | 3,945,356 | **−81,856** |
+| `MEMLEDGER margin` | 3,103,956 | 3,191,348 | **+87,392** |
+
+`ASSET MISSING` 0, `aram LOST` 0, no OOM, `deepest_scene` 18 unchanged,
+`fps_p50` 24.1 → 24.2. ⚠️ **Screenshot verification was still in flight when
+this was banked — the counters are not the verdict** (measurement rule 2).
+
+**The seam is NOT `--wrap`, and that is the reusable part.**
+`mFM_LoadBGCommonTex` and all six segment tables are `static`, and `bcopy` has
+no symbol in the linked image at all (GCC folds it to `memmove`). The lever is
+`tools/dcstub/make_src_shrink.py` rewriting the one `bcopy` call in the
+shrink-tree twin of `m_field_make.c`; `src/` is untouched.
+
+**What makes it cheap enough to copy:** the stub rewriter leaves each unkept
+source as a **1-byte `.bss` symbol with a unique address**, and the segment
+tables still reference those symbols by name — so `bg_tex_tbl[i]` is a unique
+*key* identifying which asset the slot wants. `dc/src/dc_bgtex.c` looks the
+pointer up in a generated 96-row map and calls the existing
+`dc_stub_keep_load_one()`; a miss falls back to `memmove`, so a kept asset still
+works. **No season logic and no `tex_idx` logic is duplicated in `dc/`.** Kill
+switch `DC_BGTEX_DEMAND=0`.
+
+Two things that came with it, both in `kb/traps.md`: vanilla over-reads
+`mFM_grd_s_beach_tex` by 1,024 B and the loader must reproduce that; and the
+27 scattered seeks this introduces are **0.5-2.7 s [UNMEASURED]** until a
+sorted batch helper mirrors `dc_keep_sweep()`.
+
+Also defuses half a dated time bomb — the 41 winter ground textures were never
+in the keep list and are now loadable. ⚠️ The 84 `obj_w_*` structures are still
+absent, so the winter bomb is **reduced, not cleared** (`kb/RESUME.md` §4).
+
 ### A3. S3 pass one — −1,746,528 B of `.bss` (4th session, commit `b0e009d`)
 
 Measured against a clean full rebuild, not estimated: `.bss` 12,415,796 →
@@ -368,7 +414,7 @@ the storage is live.** Do not re-propose these.
 |---|---:|---|---|
 | `dvd_buf.3` | 65,536 | `jaudio_NES/internal/dvdthread.c:105` | double 32 KB DVD bounce. The census missed it *in the file it audited*. Given `CALLSTACK` was refuted in the same file, **check `__WriteBuffer`'s callers before believing this one** |
 | `sys_dynamic` GBI arena | 132,104 | `include/sys_dynamic.h:27-35` | carries the smaller originals commented out, but shrinking risks a `THA_GA` overflow |
-| `m_bg_tex.c:3-34` `*_dummy` | 33,792 | | placeholders, unverified |
+| ~~`m_bg_tex.c:3-34` `*_dummy`~~ | ~~33,792~~ | | ❌ **RESOLVED 2026-08-05, and the answer is the opposite of "placeholders": they are the LIVE destinations.** The dead weight was their 96 `mFM_grd_*` **sources**, 150,880 B, now demand-loaded — see A4. The 33,792 B of destinations must stay |
 | `mCD_save_data_aram_malloc` | 147,840 | `src/first_game.c:24` | takes the three ARAM blocks from **libc `malloc`** — genuinely additive `sbrk` heap, permanent from boot. They must outlive scenes so `zelda_malloc` cannot hold them; they need a boot-time reservation inside the arena |
 
 ## L4. `.text` relocation — NOT NEEDED. Do not start this.

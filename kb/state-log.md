@@ -1,5 +1,224 @@
 # Session log — what was observed running, in order
 
+## 2026-08-05 — G1 ran, and ONE opcode is 28 % of the town frame
+
+Run `smoke-G1-20260805-160640-92325`, town (scene 9), probe-free,
+`DC_EMU64_HIST=1`, 11.5-12.1 FPS. This is the first per-opcode number the
+project has ever had, and it moves the FPS argument off `G_VTX`.
+
+```
+[PERF]   11.5 FPS | draws=167 culled=191 cmds=3458 gx=15.2ms
+[PHASE]  draw=78.3 skip=8.2 (n=30) vi=0.4 | cull=2.2 xform=12.2 | v=3002 vsrc=3002 vlit=2517 vcull=6042 us/v=4.07
+[EMU64]  cmds=3458 noop=1 vtx=298 tri=295 dl=276 | cullvis=7 cullrej=2
+[EMU64H] tot=42.86ms gap=7.92ms probe=79.9ns | TRIN_INDEPEND 22.25/146 VTX 5.40/149 MTX 2.18/113
+         MOVEMEM 0.55/207 TEXRECT 2.17/25 SETTILE_DOLPHIN 0.32/109 DL 0.29/138 SETCOMBINE 0.28/58
+         SETTIMG 0.25/112 TRI2 0.19/2 ENDDL 0.18/131 LOADTLUT 0.13/42
+```
+
+| | ms / calls | share |
+|---|---|---|
+| **`G_TRIN_INDEPEND`** | **22.25 / 146 = 152 µs per call** | **63 % of emu64 dispatch, 28 % of the whole 78.3 ms frame** |
+| `G_VTX` | 5.40 / 149 | 13 % of dispatch |
+| `G_MTX` | 2.18 / 113 | 5 % |
+| `G_TEXRECT` | 2.17 / 25 | 5 % |
+| every other opcode | ≤ 0.6 ms | — |
+| **`gap`** | **7.92 ms** | **18 % of `tot`, and unexplained — OPEN** |
+
+`G_TRIN_INDEPEND = 0x0A` (`include/libforest/gbi_extensions.h:52`), table index
+60, handler at `emu64.c:4798` forwarding to `dl_G_TRIN` (`emu64.c:4802-4940`).
+`gap` is time inside the draw phase but outside any emu64 command; nothing in
+this run attributes it. **Write it down as an open question, not as overhead.**
+
+### The `G_VTX ≈ 48 ms` figure this project has been costing G3 against was
+### WRONG, twice over
+
+`kb/research-fps-ideas.md` F0, `kb/STATE.md`, `kb/RESUME.md` rule 7 and
+`kb/traps.md` all carried "265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each
+is ~48 ms, i.e. most of the emu64 budget". Measured, `G_VTX` is **5.40 ms**.
+Two independent errors produced that number:
+
+1. It applied a whole-command average (12.31 µs/cmd, then ~6.9 µs/vertex) to a
+   subset — **exactly the failure measurement rule 7 was written to prevent, in
+   the same sentence that states the rule.**
+2. The ~6,951 "vertices" were `GXPosition3f32` **references**, not loaded
+   vertices. `G_VTX` loads ~3,601; the rest are re-emissions of the same
+   sources, which is precisely what the vertex memo exists to catch.
+
+All four sites are corrected in place.
+
+### 65 % of the heavy opcode is ALREADY `dc/` code at `-O2`
+
+`GXEnd` is live at `emu64.c:4935`, so the 152 µs charged to `G_TRIN_INDEPEND`
+includes everything `dc_gx_flush_vertices` triggers: the per-batch AABB cull
+(~15 µs) and `dc_gx_backend_submit` (~81 µs). **Only ~53 µs of the 152 is `src/`
+at `-O0`.**
+
+Consequence for the open G2/G3 decision: "reimplement the TRIN loop at `-O2`" is
+bounded above by **~8.3 ms** (146 × 53 µs, if the `src/` half went to zero) and
+realistically recovers **2-4 ms** [ESTIMATED]. It is not the 25-35 ms G3 was
+sold on. **The biggest single addressable block in the frame is
+`dc_gx_backend_submit` at 12.2 ms — 15.6 % of the draw phase — and it is ours
+(`dc/src/dc_pvr.c:2448`), needing no trampoline, no `objcopy` and no CLAUDE.md
+argument.**
+
+### The cull rate is a QUANTITY now, not an inference
+
+New counter `dc_gx_phase_culled_verts` (`dc/src/dc_gx.c`, incremented on the
+reject path), printed as `vcull=` in `[PHASE]`. **`vcull=6042` against
+`v=3002`: 66.8 % of vertices are thrown away by `dc_gx_batch_is_offscreen()`
+after emu64 has paid the full `-O0` price for them.** The old "60 %" was derived
+across two differently-instrumented builds, and `pc_gx_culled_draws` counts
+BATCHES, not vertices.
+
+⚠️ **A cull is NOT worth 22.25 × 0.668 = 14.9 ms, and the arithmetic that says
+so is wrong in an instructive way.** `dc_gx.c` returns *before*
+`dc_gx_backend_submit`, so culled vertices already contribute **zero** to
+`xform`. What an ideal cull at TRIN entry actually removes:
+
+| term | ms | tag |
+|---|---:|---|
+| staging 6,042 vertices that are then rejected | 5.0-5.6 | ESTIMATED |
+| the per-vertex AABB scan they cause (`cull=2.2`) | 2.1 | MEASURED |
+| *minus* a new O(window) visibility test | −0.25…−0.40 | ESTIMATED |
+| *minus* the irreducible per-call cost on culled calls | not separated | — |
+| **defensible range** | **4.5-7.0, central ~6.0** | ESTIMATED |
+
+At 78.3 ms/frame that is **11.5 → 12.2-12.6 FPS**. Quote the range, not the
+14.9.
+
+### OPEN — two analyses disagree about the vertex memo's ceiling
+
+Unresolved, and it must not be written down as settled either way. The
+disagreement is entirely in one input:
+
+| | total staged refs | loaded vertices | refs/vertex | ceiling | vs measured 48.2-48.9 % |
+|---|---:|---:|---:|---:|---|
+| **A** | 6,951 (`dc_gx.c:870`'s comment + older docs) | 3,601 | 1.93 | **48.2 %** | the memo is AT its ceiling; further work is worth zero |
+| **B** | `v + vcull` = 3,002 + 6,042 = **9,044** | 3,601 | 2.51 | **~60 %** | **~11 points of headroom** |
+
+B's 9,044 rests on the new `vcull` counter and is MEASURED this run; A's 6,951
+is an older figure and `dc_gx.c:870`'s comment carrying it is now **stale**.
+That does not by itself decide it — the two counts may not be measuring the same
+population. **The experiment that settles it is a direct count of distinct
+vertex references per batch**, which is cheap and unbuilt. Until it runs, do not
+plan memo work and do not close F3.
+
+### R1 landed — acre ground textures are demand-loaded, and it is the first
+### asset pool this port has ever had
+
+96 `mFM_grd_*` symbols (**150,880 B**: 46 summer / 73,312 B, 41 winter /
+70,144 B, 9 shared / 7,424 B) were pure `bcopy` **sources** into 32
+always-resident staging buffers in `src/game/m_bg_tex.c` (33,792 B), filled by
+`mFM_LoadBGCommonTex` (`src/game/m_field_make.c:1101-1133`). Zero other
+consumers anywhere in `src/`, `include/` or `pc/` — so the sources never have to
+be resident, only the 32 destinations.
+
+**Measured, one clean rebuild against the previous shipping build:**
+
+| | before | after | Δ |
+|---|---:|---:|---:|
+| `.bss` | 4,027,212 | 3,945,356 | **−81,856** |
+| `MEMLEDGER margin` | 3,103,956 | 3,191,348 | **+87,392** |
+| `ASSET MISSING` / `aram LOST` | 0 / 0 | 0 / 0 | — |
+| `deepest_scene` | 18 | 18 | — |
+| `fps_p50` | 24.1 | 24.2 | within noise |
+
+⚠️ **Screenshot verification was still in flight when this was written, so this
+is a counter result and not a verdict** (measurement rule 2 — a change can pass
+every counter and still be a visible regression).
+
+**The seam is NOT `--wrap`.** `mFM_LoadBGCommonTex` and all six segment tables
+are `static`, and `bcopy` has no symbol in the linked image at all (GCC folds it
+to `memmove`). It is `tools/dcstub/make_src_shrink.py` rewriting the one `bcopy`
+call in the shrink-tree twin of `m_field_make.c`; `src/` is untouched.
+
+**The trick that makes it cheap, and it generalises.** The stub rewriter leaves
+each unkept source as a **1-byte `.bss` symbol with a unique address**, and the
+segment tables still reference those symbols by name — so `bg_tex_tbl[i]` is a
+unique *key* naming which asset the slot wants. `dc/src/dc_bgtex.c` looks the
+pointer up in a generated 96-row map and calls the existing
+`dc_stub_keep_load_one()`; a miss falls back to `memmove` so a kept asset still
+works. **No season logic and no `tex_idx` logic is duplicated in `dc/`.** Kill
+switch `DC_BGTEX_DEMAND=0`.
+
+It also defuses half a dated time bomb: `mFM_grd_w_*` was never in the keep
+list, so a winter town would have drawn black ground. It is loadable on demand
+now. ⚠️ The 84 `obj_w_*` structures are **still absent**, so the winter bomb is
+reduced, not cleared.
+
+Two hazards banked with it:
+
+- **Vanilla over-reads its own source array by 1,024 B on every call.**
+  `l_bg_tex_common_dummy[15]` wants 2,048 B but its source
+  `mFM_grd_s_beach_tex` is 1,024 B (`pc_assets.c:22791`). Reading the **DEST**
+  size off the disc reproduces the GameCube's own behaviour exactly; it logs at
+  runtime rather than being silently papered over.
+- **27 scattered `fs_seek`+`fs_read` now happen inside `mFM_FieldInit`**, and
+  the same loop runs mid-scene on the island boat trip
+  (`m_field_make.c:1745,1754`, from `ac_boat_demo_move.c_inc:92-102`). The
+  payload is only 33,632 B (~67 ms at 500 KB/s), but `dc_main.c`'s own sweep
+  model prices a scattered seek at 20-100 ms, so 27 seeks could be **0.5-2.7 s**
+  [UNMEASURED]. The follow-up is a sorted batch helper mirroring
+  `dc_keep_sweep()`.
+
+### Corrections banked this session, each verified against the tree
+
+- **The vertex memo is 128 slots (`dc_pvr.c:1955`), not 32**, and its hit rate
+  is **48.2-48.9 %**, not 42.5 %. `kb/perf-dc.md` §3.5 had the pre-resize
+  numbers and has been corrected in place.
+- **`-mfsrra` and `-mfsca` are inert in this build.** They are in
+  `$KOS_CFLAGS`, but GCC acts on them only with `-funsafe-math-optimizations`
+  (and `-ffinite-math-only` for `fsrra`), and neither appears anywhere in this
+  tree. `kb/perf-dc.md` §3.6 already had the corroborating evidence — `fsqrt`
+  and three `fdiv` compiled literally into the shipped object. Now in
+  `kb/closed.md` so nobody rediscovers the flags.
+- **PVR Direct Rendering is UNBLOCKED.** `kb/perf-dc.md` §5 item 3 declined it
+  because "KOS 2.3 exposes `pvr_dr_addr` with no `pvr_dr_init()`, so who sets
+  QACR is unresolved". Read out of the pinned KOS tree: `pvr_list_begin()` calls
+  `sq_lock((void*)PVR_TA_INPUT)`, which sets QACR0/QACR1, and
+  `pvr_list_finish()` calls `sq_unlock()`; `pvr_dr_init`/`pvr_dr_finish` survive
+  only as deprecated no-ops in `pvr_legacy.h`. DR is safe inside the bracket the
+  code already has. Item reopened.
+- **"KOS 2.3" is not a release.** `include/kos/version.h` says 2.3.0, but
+  `git describe` on the pinned `KOS_SHA=1c6398f9` gives `v2.2.0-946-g1c6398f9`
+  and tags stop at v2.2.2. Both `pvr_dr_addr` and `dcache_toggle_ocram()` are
+  master-only and absent from every release tag. In `kb/traps.md`.
+- **sh4zam is a PASS**, and it is in `kb/closed.md` with the reasons so it stops
+  being re-proposed at every toolchain review.
+- **The N-triangle count in `G_TRIN_INDEPEND` is 7 bits, not 5.**
+  `emu64.c:4814` is `n_faces = ((w0 >> 17) & 0x7F) + 1`, i.e. 1..128 faces per
+  command. The "5-bit" figure in `kb/closed.md`'s F1 entry is the per-vertex
+  **index** width (`POLY_5b`, `gbi_extensions.h:64,69-86`), not the face count.
+  F1's verdict is unchanged — a `gsSPVertex` still never exceeds 32 vertices —
+  but the stated reason was imprecise and has been fixed.
+
+### The audio plan has been steering on a 2× arithmetic error
+
+`dc/src/dc_audio.c:53-55, :129-131, :139-141, :916` all say one jaudio DAC frame
+is "~35 ms of audio". **It is 17.49 ms.** `aictrl.c:292` passes
+`AIInitDMA(..., DAC_SIZE * 2)` where `DAC_SIZE` is in **s16 units**, so
+`DAC_SIZE * 2` is 2,240 **bytes** = 1,120 s16 = 560 stereo pairs; at
+`JAC_DAC_RATE = 32028.5` (`internal/rate.c:4-7`) that is 17.49 ms.
+`kb/audio-engine.md` has had the right number all along (57.19 Hz).
+
+**Consequence: synthesis runs at 0.88× real time and needs ~113 % of the SH-4,
+not 1.8× at 57 %.** `dc_audio.c:120-122`'s own note that the ring "starves
+essentially always" corroborates it — that cannot happen above real time.
+
+Two more audio numbers move with it:
+
+- `kb/audio-cpu-cost.md`'s 80-180 cyc/voice-sample band is **optimistic**:
+  `rspsim.c` compiles at `-O0` like all of `src/`. Back-solving from the
+  measured 0.88× gives **~200+ cyc**, so every A0-A4 row needs scaling by
+  ~1.7× (A1 34 % → ~57 %, A4 13 % → ~22 %).
+- `kb/audio-engine.md`'s "no individual soundfont exceeds 2 MB" is true of
+  2 MB and false of the **usable** sound RAM. KOS reserves 196,608 B
+  (`AICA_RAM_START 0x030000`, `aica_cmd_iface.h:37-38`), leaving 1,900,544 B;
+  bank 153 transcodes to 1,971,016 B, **over by 70,472 B**. It fits only if
+  `snd_stream` is retired and channels are driven directly.
+
+---
+
 ## 2026-08-04 — frame rate, the second texture unit, and why the ARM7 is asleep
 
 Seven 600 s Flycast runs at `--timeout 600 -c config:LimitFPS=no`, each judged on

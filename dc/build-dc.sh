@@ -10,6 +10,11 @@
 #     DC_AUDIO=1    bash dc/build-dc.sh   # sound ON (default 0; costs ~45 % FPS,
 #                                         # and gives back 401,216 B of .bss —
 #                                         # see the DC_AUDIO block in dc/Makefile)
+#     DC_BGTEX_DEMAND=0 bash dc/build-dc.sh
+#                                         # kill switch for R1 — puts the acre
+#                                         # ground textures back in .bss
+#                                         # (+80,736 B) instead of reading them
+#                                         # off the disc. Default 1.
 #     DC_CDI_PAD=1  bash dc/build-dc.sh   # padded 740 MB CDI for CD-R burns
 #     JOBS=8        bash dc/build-dc.sh
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
@@ -44,9 +49,18 @@ fi
 # the container only ever sees the resulting dc/build/stubsrc tree through the
 # bind mount. The generator is idempotent and only rewrites files whose content
 # actually changes, so re-running it does not invalidate objects.
+#
+# --bgtex-demand is R1's kill switch and it keys BOTH scratch trees: this tool
+# emits dc_bgtex_map.inc (or, at 0, puts the 27 mFM_grd_*.c files back on the
+# keep list), and make_src_shrink.py below rewrites the copy loop that reads it.
+# It is expanded HERE rather than left to the container so that one value drives
+# both generators and dc/Makefile's -DDC_BGTEX_DEMAND; the generated
+# m_field_make.c #errors if they disagree, but only after a full compile.
 if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
-    echo "-- DC_ASSET_STUB=1: regenerating $REPO/dc/build/stubsrc"
-    python3 "$REPO/tools/dcstub/make_stub_data.py"
+    echo "-- DC_ASSET_STUB=1: regenerating $REPO/dc/build/stubsrc" \
+         "(DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1})"
+    python3 "$REPO/tools/dcstub/make_stub_data.py" \
+        --bgtex-demand="${DC_BGTEX_DEMAND:-1}"
 fi
 
 # DC_SRC_SHRINK=1 (the DEFAULT) -> the .bss literal-shrink tree, 1,159,392 B of
@@ -81,8 +95,9 @@ fi
 
 if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
     echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc" \
-         "(DC_AUDIO=${DC_AUDIO:-0})"
-    python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}"
+         "(DC_AUDIO=${DC_AUDIO:-0} DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1})"
+    python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
+        --bgtex-demand="${DC_BGTEX_DEMAND:-1}"
 fi
 
 ENVARGS=(
@@ -118,6 +133,13 @@ ENVARGS=(
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
 [ -n "${DC_AUDIO_SCENES+x}" ] && ENVARGS+=(-e DC_AUDIO_SCENES="$DC_AUDIO_SCENES")
+# R1's kill switch, forward-only: dc/Makefile has `DC_BGTEX_DEMAND ?= 1`, and
+# make treats an environment variable as already-defined — so a plain
+# `-e DC_BGTEX_DEMAND=` would blank the default and expand
+# -DDC_BGTEX_DEMAND= into every TU, where the rewritten m_field_make.c's
+# `#if defined(DC_BGTEX_DEMAND) && !DC_BGTEX_DEMAND` is a preprocessor error
+# rather than a wrong build. The two generators above already saw the value.
+[ -n "${DC_BGTEX_DEMAND+x}" ] && ENVARGS+=(-e DC_BGTEX_DEMAND="$DC_BGTEX_DEMAND")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has
 # DC_EMU64_HIST ?= 0, so from the HOST entry point a DC_EMU64_HIST=300 build

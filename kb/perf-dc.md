@@ -90,6 +90,76 @@ The renderer is 26 % of the town frame. **Deleting it entirely would take
 
 ---
 
+## 2b. Per-OPCODE, at last — MEASURED 2026-08-05 (G1)
+
+§2 answers "which phase", and for a year that was as far as the instrument went.
+`DC_EMU64_HIST=<N>` answers "which opcode". Run
+`smoke-G1-20260805-160640-92325`, town, probe-free, 11.5-12.1 FPS:
+
+```
+[PHASE]  draw=78.3 skip=8.2 (n=30) vi=0.4 | cull=2.2 xform=12.2 | v=3002 vsrc=3002 vlit=2517 vcull=6042 us/v=4.07
+[EMU64]  cmds=3458 noop=1 vtx=298 tri=295 dl=276 | cullvis=7 cullrej=2
+[EMU64H] tot=42.86ms gap=7.92ms probe=79.9ns | TRIN_INDEPEND 22.25/146 VTX 5.40/149 MTX 2.18/113
+         MOVEMEM 0.55/207 TEXRECT 2.17/25 SETTILE_DOLPHIN 0.32/109 DL 0.29/138 SETCOMBINE 0.28/58
+         SETTIMG 0.25/112 TRI2 0.19/2 ENDDL 0.18/131 LOADTLUT 0.13/42
+```
+
+| opcode | ms / calls | µs/call | share of the 78.3 ms frame |
+|---|---|---:|---:|
+| **`G_TRIN_INDEPEND`** | **22.25 / 146** | **152** | **28 %** |
+| `G_VTX` | 5.40 / 149 | 36 | 7 % |
+| `G_MTX` | 2.18 / 113 | 19 | 3 % |
+| `G_TEXRECT` | 2.17 / 25 | 87 | 3 % |
+| all other opcodes | ≤ 0.55 each | — | ~2 % total |
+| **`gap`** | **7.92** | — | **10 % — OPEN** |
+
+`G_TRIN_INDEPEND = 0x0A` (`include/libforest/gbi_extensions.h:52`), dispatch
+table index 60, handler `emu64.c:4798` forwarding to `dl_G_TRIN`
+(`emu64.c:4802-4940`). One command carries 1..128 faces —
+`emu64.c:4814` is `n_faces = ((w0 >> 17) & 0x7F) + 1`, i.e. **7 bits**.
+
+Three readings, in order of how much they change plans:
+
+1. **`G_VTX` is NOT the budget.** Four documents costed G3 against "~48 ms of
+   `G_VTX`". Measured: **5.40 ms**. That figure applied a whole-command average
+   to a subset and counted `GXPosition3f32` *references* as loaded vertices.
+   See `kb/traps.md`, "An average cost per command…", which now records that
+   the correction to the averaging error was itself an averaging error.
+2. **65 % of the heavy opcode is ALREADY ours, at `-O2`.** `GXEnd` is live at
+   `emu64.c:4935`, so the 152 µs charged to `G_TRIN_INDEPEND` includes
+   everything `dc_gx_flush_vertices` triggers: the per-batch AABB cull
+   (~15 µs) and `dc_gx_backend_submit` (~81 µs). **Only ~53 µs is `src/` at
+   `-O0`.** So "reimplement the TRIN loop in `dc/` at `-O2`" is bounded above
+   by **~8.3 ms** and realistically recovers **2-4 ms** [ESTIMATED].
+3. **`gap = 7.92 ms` is 18 % of `tot`** — time inside the draw phase but
+   outside any emu64 command. Nothing in this run attributes it. **OPEN. Do not
+   describe it as dispatch overhead; it has not been measured as anything.**
+
+### The cull rate is a quantity now — and it is worth less than it looks
+
+New counter `dc_gx_phase_culled_verts` (`dc/src/dc_gx.c`, incremented on the
+reject path), printed as `vcull=`. **`vcull=6042` against `v=3002`: 66.8 % of
+vertices are thrown away by `dc_gx_batch_is_offscreen()` after emu64 has paid
+full `-O0` price.** The previous "60 %" was derived across two
+differently-instrumented builds, and `pc_gx_culled_draws` counts BATCHES.
+
+⚠️ **A cull is NOT worth 22.25 × 0.668 = 14.9 ms.** `dc_gx.c` returns *before*
+`dc_gx_backend_submit`, so culled vertices already contribute **zero** to
+`xform`. What an ideal cull at TRIN entry actually removes:
+
+| term | ms | tag |
+|---|---:|---|
+| staging 6,042 vertices that are then rejected | 5.0-5.6 | ESTIMATED |
+| the per-vertex AABB scan they cause (`cull=2.2`) | 2.1 | MEASURED |
+| *minus* a new O(window) visibility test | −0.25…−0.40 | ESTIMATED |
+| *minus* the irreducible per-call cost on culled calls | not separated | — |
+| **defensible range** | **4.5-7.0, central ~6.0** | ESTIMATED |
+
+⇒ **11.5 FPS becomes 12.2-12.6.** Quote the range and the reasoning, never the
+14.9.
+
+---
+
 ## 3. What was applied, and what it bought
 
 Four changes: three are per-vertex work in `dc_gx_backend_submit()` /
@@ -225,12 +295,28 @@ input to the per-vertex block is a per-BATCH constant (the folded matrix, `mv`,
 `nm`, the light state, the TEV constants, `s_pt_route`, `tex->u_scale`).
 Nothing in the `k` loop reads anything that varies per vertex except `*v`.
 
-32 entries, direct-mapped, invalidated at the top of every
-`dc_gx_backend_submit()`. 32 because emu64's cache is `Vtx vertices[32]`, so
-one batch can never reference more distinct sources than that.
+**128 slots** (`dc_pvr.c:1955`), direct-mapped, invalidated at the top of every
+`dc_gx_backend_submit()`.
 
-**MEASURED HIT RATE: 11,005,939 of 25,869,013 = 42.5 %**, town and train
-combined, over a 600 s run. `vmemo=hit/total` is in the `[PHASE]` line.
+⚠️ **CORRECTED 2026-08-05 — this paragraph used to read "32 entries … 32 because
+emu64's cache is `Vtx vertices[32]`, so one batch can never reference more
+distinct sources than that", with a 42.5 % hit rate.** Both halves were wrong.
+32 bounds the WORKING SET and says nothing about COLLISIONS, and sizing a
+direct-mapped table from its working set instead of from its load factor cost
+about six points of hit rate. The table has been 128 slots since 2026-08-04.
+
+**MEASURED HIT RATE: 48.2-48.9 %** (the 42.5 % above was the 32-slot table).
+`vmemo=hit/total` is in the `[PHASE]` line.
+
+⚠️ **OPEN: whether that is at the ceiling.** Two derivations disagree, entirely
+on one input — total staged vertex references per frame. Using the older 6,951
+(the figure in `dc_gx.c:870`'s comment, now **stale**) against ~3,601 loaded
+vertices gives 1.93 refs/vertex and a **48.2 % ceiling**, i.e. the memo is done.
+Using the newly measured `v + vcull` = 3,002 + 6,042 = **9,044** gives 2.51
+refs/vertex and a **~60 % ceiling**, i.e. ~11 points of headroom. The 9,044
+rests on the `vcull` counter added 2026-08-05 and is measured; the 6,951 is
+older. **Do not record either as fact.** The experiment that settles it is a
+direct count of distinct vertex references per batch.
 
 ⚠️ The stored key is the source vertex's **index**, not a copy, and the
 comparison is field-by-field. `DCGXVertex` is 30 live bytes in a 32-byte
@@ -241,8 +327,9 @@ hits into misses, unstably.
 ### 3.6 FSRRA and FIPR (`-DDC_PVR_NO_FASTMATH`) — 2026-08-04
 
 `$KOS_CFLAGS` carries `-mfsrra -mfsca` but **not**
-`-funsafe-math-optimizations`, and the shipped object settles what GCC did with
-that: `sh-elf-objdump -d dc_pvr.c.o` has `fsqrt` at +0x178 followed by three
+`-funsafe-math-optimizations` (nor `-ffinite-math-only`, which `fsrra`
+additionally requires), so **both flags are inert in this build** — closed
+2026-08-05, `kb/closed.md`. The shipped object settles what GCC did with them: `sh-elf-objdump -d dc_pvr.c.o` has `fsqrt` at +0x178 followed by three
 `fdiv` at +0x180/182/186 — the light normalise, compiled literally. Both are
 non-pipelined on SH-4, so that is ~50 cycles of latency per light per lit
 vertex, and `vlit` is 94 % of town vertices.
@@ -378,32 +465,53 @@ so they are not proposed again.
 
 ## 5. What is left, ranked
 
-1. **The 58 ms of emu64 + draw traversal. `src/`, and therefore closed to
-   editing.** ~13.3 µs per GBI command. The only lever that does not touch
-   `src/` is to make emu64 execute *fewer* commands — i.e. scene/content work
-   (`kb/levers.md` L5, the user's call), or a cheaper acre draw list. Nothing in
-   `dc/` can move it. **State this plainly in any FPS plan.**
+1. **The emu64 + draw traversal. `src/`, and therefore closed to editing** — but
+   §2b now says *which part*, and it is smaller than this item assumed.
+   `G_TRIN_INDEPEND` is 22.25 ms of the 78.3 ms frame, and **65 % of that bucket
+   is already `dc/` code at `-O2`** (`GXEnd` → the cull + submit); only ~53 µs
+   of its 152 µs/call is `src/` at `-O0`. The levers that do not touch `src/`
+   are still: make emu64 execute *fewer* commands (scene/content work,
+   `kb/levers.md` L5, the user's call), cull *before* the staging cost
+   (4.5-7.0 ms [ESTIMATED], §2b), or speed up the `dc/` code inside the bucket
+   — item 1b. **State this plainly in any FPS plan, and stop quoting "58 ms of
+   emu64" as one indivisible wall.**
+
+1b. **`dc_gx_backend_submit` — 12.2 ms, 15.6 % of the draw phase, and it is
+   ours.** `dc/src/dc_pvr.c:2448`. This is the largest single addressable block
+   in the frame. It needs no trampoline, no `objcopy --globalize-symbol`, no
+   sign-off and no CLAUDE.md argument, which is more than can be said for
+   anything in `kb/research-fps-ideas.md`'s G-series. §3.5/§3.6 already took
+   ~28 % out of it; items 3, 4 and 5 below are the remaining named ideas.
 
 2. ✅ **DONE 2026-08-04 — §3.5 and §3.6.** `us/v` is now 3.92 µs p50, i.e.
    ~784 cycles, down from 4.71. The two levers that paid were **not** the ones
-   listed here: the big one was that 42.5 % of the vertices reaching this code
-   were duplicates of one already computed in the same batch, and the second was
-   that `sqrtf` + `fdiv` had been compiled literally where the SH-4 has FSRRA.
+   listed here: the big one was that **48.2-48.9 %** of the vertices reaching
+   this code were duplicates of one already computed in the same batch (42.5 %
+   at the original 32-slot table), and the second was that `sqrtf` + `fdiv` had
+   been compiled literally where the SH-4 has FSRRA.
    What is left inside the per-vertex cost, still unmeasured: `apply_texgen`,
-   the near-clip test, the `pvr_prim` copy (item 3 below), and the ~58 % of
-   vertices that still miss the memo. Raising the memo's hit rate — a second
-   way index, or keying on the emu64 vertex index if it could be threaded
-   through — is now the cheapest remaining idea in this list.
+   the near-clip test, the `pvr_prim` copy (item 3 below), and the ~51 % of
+   vertices that still miss the memo. ⚠️ **Raising the memo's hit rate is no
+   longer safe to call "the cheapest remaining idea" — whether there is ANY
+   headroom left is an open question as of 2026-08-05** (§3.5: the ceiling is
+   either 48.2 % or ~60 % depending on a reference count nobody has taken).
 
 3. **`pvr_dr_target()` / `pvr_dr_commit()` instead of `pvr_prim()`.**
    `emit_projected()` builds a 32-byte `pvr_vertex_t` on the stack and
    `pvr_prim()` then copies it through `sq_fast_cpy` (KOS `pvr_scene.c:259`).
    Direct Rendering writes the vertex straight into the store queue, removing
    one 32-byte copy and one call per vertex — perhaps 0.5-1.5 ms/frame.
-   ⚠️ **Not attempted deliberately:** KOS 2.3 exposes `pvr_dr_addr` as a bare
-   global with no `pvr_dr_init()` in the header, so who sets `QACR` for the TA
-   is unresolved, and a wrong `QACR` writes 32-byte blocks to an arbitrary
-   physical address. Read `sq.h`/`pvr_scene.c` end to end before trying it.
+   ✅ **UNBLOCKED 2026-08-05 — REOPENED.** This item used to say "not attempted
+   deliberately: KOS 2.3 exposes `pvr_dr_addr` as a bare global with no
+   `pvr_dr_init()` in the header, so who sets `QACR` for the TA is unresolved."
+   Read out of the pinned KOS tree, which is what that note asked for:
+   **`pvr_list_begin()` calls `sq_lock((void*)PVR_TA_INPUT)`, and that is what
+   sets QACR0/QACR1**; `pvr_list_finish()` calls `sq_unlock()`.
+   `pvr_dr_init`/`pvr_dr_finish` survive only as **deprecated no-ops** in
+   `pvr_legacy.h`, which is why the header looked incomplete. **DR is safe
+   inside the `pvr_list_begin`/`pvr_list_finish` bracket the code already
+   has.** ⚠️ `pvr_dr_addr` is master-only — see `kb/traps.md`, "KOS 2.3 is not a
+   release".
 
 4. **Direct-slot vertex staging in `dc_gx.c`.** `GXPosition3f32` fills
    `g_gx.current_vertex` and `dc_gx_commit_vertex()` then copies 32 bytes into
