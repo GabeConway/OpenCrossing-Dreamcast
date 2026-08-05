@@ -243,7 +243,10 @@ static int shadow_selfcheck(emu64 *self)
  *                                 So we do not delete the test — we PUNT the
  *                                 whole traversal back to -O0 when it is set,
  *                                 which is both cheaper here and impossible to
- *                                 get subtly wrong.
+ *                                 get subtly wrong. The punt rewinds the
+ *                                 command it had already staged and hands that
+ *                                 one back too; returning without the rewind
+ *                                 makes the -O0 loop skip it entirely.
  *
  * cmds_processed is kept. Its only readers are two never-compiled
  * PC_GX_VERBOSE printfs, but it is three instructions and it is the only
@@ -269,8 +272,35 @@ static void shadow_loop(emu64 *self)
 
         self->work_ptr = 0;                              /* :5814 */
 
-        /* A G_TAG_INFO NOOP can arm this mid-traversal. Hand the rest back. */
-        if (self->print_commands) { s_punts++; return; } /* :5816 */
+        /* :5816. A G_TAG_INFO NOOP arms this mid-traversal (emu64.c:4445), so
+         * the test cannot be deleted — but a bare `return` here LOSES A COMMAND.
+         * By this point gfx_p has already been advanced onto the staged command
+         * and nothing has executed it; the -O0 loop then does its own gfx_p++
+         * (emu64.c:5874) and steps straight over it. One display-list command
+         * silently missing is a matrix that was never loaded or a texture that
+         * was never bound, for the rest of the traversal.
+         *
+         * So hand back the staged command too, not just the ones after it:
+         * rewind every side effect of staging it and leave gfx_p one short,
+         * which is exactly where the -O0 loop's ++ puts it back onto this
+         * command. -O0 re-reads it, re-pushes dl_history, runs its own
+         * print_commands block and dispatches it — executed once, by the loop
+         * that implements the flag we punted for. Executing it here instead
+         * would run the one command the punt exists to protect through the code
+         * that does NOT implement print_commands.
+         *
+         * gfx/gfx_cmd stay stale against gfx_p across the return; nothing reads
+         * either before emu64.c:5809 overwrites both. work_ptr needs no rewind —
+         * :5814 sets it to the same null. punts=0 in every run measured so far,
+         * so this path has never actually fired. */
+        if (self->print_commands) {
+            self->gfx_p--;
+            self->cmds_processed--;
+            self->dl_history_start =
+                (u8)((self->dl_history_start - 1) & (DL_HISTORY_COUNT - 1));
+            s_punts++;
+            return;
+        }
 
         pc_emu64_frame_cmds++;                           /* :5826-5834 */
         switch (self->gfx_cmd) {
@@ -303,9 +333,29 @@ static void shadow_loop(emu64 *self)
                  * (!end_dl && !FrameCansel) -> TRUE, and carry on executing
                  * whatever follows an unrecognised command. Setting it is
                  * observationally equivalent — nothing reads end_dl between
-                 * that break and emu64_taskstart_r:5776, which resets it. */
-                self->Printf0("予期しないコマンドがありました。中断します。(cmd=%02x)\n",
-                              self->gfx_cmd);
+                 * that break and emu64_taskstart_r:5776, which resets it.
+                 *
+                 * ⚠️ THE CAP OF 5 IS NOT COSMETIC. emu64.c:5859 counts these
+                 * and goes quiet after five; printing unconditionally instead
+                 * turns one malformed display list into a console flood, and a
+                 * flood on this console is a frame-rate event. An emu64 Printf0
+                 * fired 10,877 times in one run and took the town to 1.1 FPS at
+                 * gx=35.1 ms — the renderer was 4 % of that frame and the
+                 * console was the rest (kb/traps.md:252-262). Printf0 reaches
+                 * vprintf directly, so it is not covered by the printf override
+                 * that rate-limits everything else.
+                 *
+                 * The counter is ours rather than the -O0 loop's static, so an
+                 * armed run can spend both budgets: 10 lines worst case. */
+                static int s_unexpected_cmds = 0;
+                if (s_unexpected_cmds < 5) {
+                    self->Printf0("予期しないコマンドがありました。中断します。(cmd=%02x)\n",
+                                  self->gfx_cmd);
+                    s_unexpected_cmds++;
+                    if (s_unexpected_cmds == 5)
+                        self->Printf0("[PC] (suppressing further unexpected "
+                                      "command messages)\n");
+                }
                 self->end_dl = 1;
                 return;
             }

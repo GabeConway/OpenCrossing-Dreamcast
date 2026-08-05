@@ -393,6 +393,21 @@ extern u64 dc_gx_texload_time_us;
  * them. kb/research-fps-ideas.md F2. No-op when the cache is compiled out. */
 void dc_mtx_xmtrx_invalidate(void);
 
+/* ⚠️ G1 AND G2 ARE MUTUALLY EXCLUSIVE, AND THE COLLISION IS SILENT.
+ *
+ * Both write the same 64-entry emu64 dispatch table. In dc_vi.c the arm order
+ * is G1 first, G2 second, so G2's trampolines overwrite G1's thunks; and even
+ * with the order reversed the shadow loop calls s_orig[idx].fn(self) directly
+ * (dc_emu64_shadow.cpp) and never routes through the table at all. A build with
+ * both on produces a histogram that is 100 % `gap` with every opcode bucket
+ * empty — byte-for-byte the same output as G1's 2026-08-04 wrong-arm-edge bug,
+ * which cost a run to diagnose. Refuse to build rather than hand anyone that
+ * log a second time. */
+#if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0 && \
+    defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
+#error "DC_EMU64_HIST (G1) and DC_EMU64_SHADOW_LOOP (G2) both install into emu64's dispatch table; G2 wins and G1 measures nothing. Build them separately."
+#endif
+
 /* G1 — per-opcode emu64 timing histogram (dc/src/dc_emu64_hist.c). Compiled
  * to nothing unless DC_EMU64_HIST > 0, which is why the call sites are all
  * inside #if. */

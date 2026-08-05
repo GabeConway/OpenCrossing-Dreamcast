@@ -126,12 +126,24 @@ unsigned int dc_gx_phase_verts = 0;
 unsigned int dc_gx_phase_verts_lit = 0;
 unsigned int dc_gx_phase_batches_lit = 0;
 unsigned int dc_gx_phase_src_verts = 0;
+/* Vertices thrown away by the AABB cull below, i.e. vertices emu64 paid the
+ * full -O0 price to produce and that never reached a transform.
+ *
+ * This exists because the project's most-quoted performance number was never
+ * measured. "60 % of vertices are culled after the fact" is DERIVED — 6,951
+ * GXPosition3f32 calls minus 2,757 that reached the backend, across two
+ * differently-instrumented builds, and `pc_gx_culled_draws` counts BATCHES, not
+ * vertices. Every estimate for the G3 cull rests on that inference. One
+ * increment on the reject path makes it a quantity instead of an argument, and
+ * costs nothing that -DDC_PERF_PHASE was not already costing. */
+unsigned int dc_gx_phase_culled_verts = 0;
 #ifdef DC_PERF_PHASE
 static u64 s_cull_time_acc = 0;
 static u64 s_submit_time_acc = 0;
 static unsigned int s_phase_verts = 0;
 static unsigned int s_phase_verts_lit = 0;
 static unsigned int s_phase_batches_lit = 0;
+static unsigned int s_phase_culled_verts = 0;
 /* ---- GX API census (-DDC_PERF_GXAPI) --------------------------------------
  * The phase split says ~58 % of a town frame is display-list traversal: the
  * game's draw code plus emu64 plus THIS FILE's GX entry points. Only the last
@@ -551,6 +563,9 @@ void dc_gx_flush_vertices(void) {
 #endif
         if (off) {
             pc_gx_culled_draws++;
+#ifdef DC_PERF_PHASE
+            s_phase_culled_verts += (unsigned int)count;
+#endif
             s_flush_pending_attr = 1;
             s_flush_time_acc += dc_time_us() - t0;
             g_gx.current_vertex_idx = 0;
@@ -606,6 +621,8 @@ void dc_gx_frame_timing_snapshot(void) {
     dc_gx_phase_batches_lit = s_phase_batches_lit;
     dc_gx_phase_src_verts = s_phase_src_verts;
     s_phase_src_verts = 0;
+    dc_gx_phase_culled_verts = s_phase_culled_verts;
+    s_phase_culled_verts = 0;
 #endif
 #ifdef DC_PERF_GXAPI
     dc_gx_api_pos = s_api_pos;     s_api_pos = 0;

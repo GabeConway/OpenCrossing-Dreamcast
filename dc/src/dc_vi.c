@@ -125,6 +125,7 @@ extern unsigned int dc_gx_phase_verts;
 extern unsigned int dc_gx_phase_verts_lit;
 extern unsigned int dc_gx_phase_batches_lit;
 extern unsigned int dc_gx_phase_src_verts;
+extern unsigned int dc_gx_phase_culled_verts;
 #ifndef DC_PVR_NO_VTXMEMO
 /* The per-batch vertex memo cache in dc_pvr.c. `vmemo=hit/total` is the number
  * that says whether emu64's index expansion is really re-submitting shared
@@ -145,6 +146,7 @@ static unsigned int s_ph_nskip = 0;
 static unsigned int s_ph_verts = 0;
 static unsigned int s_ph_vlit  = 0;
 static unsigned int s_ph_vsrc  = 0;
+static unsigned int s_ph_vcull = 0;
 #endif
 
 #ifdef DC_PERF_GXAPI
@@ -437,6 +439,7 @@ void VIWaitForRetrace(void) {
     s_ph_verts    += dc_gx_phase_verts;
     s_ph_vlit     += dc_gx_phase_verts_lit;
     s_ph_vsrc     += dc_gx_phase_src_verts;
+    s_ph_vcull    += dc_gx_phase_culled_verts;
 #endif
 #ifdef DC_PERF_GXAPI
     s_api_pos   += dc_gx_api_pos;    s_api_clr   += dc_gx_api_clr;
@@ -501,7 +504,7 @@ void VIWaitForRetrace(void) {
                 double n = 30.0;
                 DC_LOGE("[PHASE] draw=%.1f skip=%.1f (n=%u) vi=%.1f | "
                         "cull=%.1f xform=%.1f | v=%u vsrc=%u vlit=%u "
-                        "us/v=%.2f"
+                        "vcull=%u us/v=%.2f"
 #ifndef DC_PVR_NO_VTXMEMO
                         " vmemo=%u/%u"
 #endif
@@ -515,6 +518,7 @@ void VIWaitForRetrace(void) {
                         (unsigned)(s_ph_verts / 30u),
                         (unsigned)(s_ph_vsrc / 30u),
                         (unsigned)(s_ph_vlit / 30u),
+                        (unsigned)(s_ph_vcull / 30u),
                         s_ph_verts ? (double)s_ph_xform_us / (double)s_ph_verts
                                    : 0.0
 #ifndef DC_PVR_NO_VTXMEMO
@@ -524,6 +528,7 @@ void VIWaitForRetrace(void) {
                 s_ph_draw_us = s_ph_skip_us = s_ph_vi_us = 0;
                 s_ph_cull_us = s_ph_xform_us = 0;
                 s_ph_nskip = s_ph_verts = s_ph_vlit = s_ph_vsrc = 0;
+                s_ph_vcull = 0;
             }
 
             /* The opcode mix and emu64's OWN display-list cull, both of which
@@ -542,12 +547,25 @@ void VIWaitForRetrace(void) {
                     pc_emu64_frame_vtx_cmds, pc_emu64_frame_tri_cmds,
                     pc_emu64_frame_dl_cmds,
                     pc_emu64_frame_cull_visible, pc_emu64_frame_cull_rejected);
+#endif  /* DC_PERF_PHASE */
+
+            /* ⚠️ DELIBERATELY OUTSIDE THE DC_PERF_PHASE BLOCK ABOVE, and it was
+             * inside it until 2026-08-05. The dispatch-table instruments arm
+             * from their own #if in this file, independently of the phase
+             * timer — so a build with DC_EMU64_HIST=1 and no -DDC_PERF_PHASE
+             * swapped in 64 thunks, paid a clock read on every one of ~2,867
+             * commands per frame, and then PRINTED NOTHING, for the whole run.
+             * The documented perf build line happens to carry -DDC_PERF_PHASE,
+             * which is the only reason this never bit anyone.
+             *
+             * Read `tot=` against `[PHASE] draw=` minus `[PERF] gx=` for the
+             * same window before believing any bucket — that self-check needs
+             * -DDC_PERF_PHASE, but the histogram itself does not. */
 #if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
             dc_emu64_hist_report();
 #endif
 #if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
             dc_emu64_shadow_report();
-#endif
 #endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "

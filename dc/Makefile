@@ -929,8 +929,16 @@ endif
 # Promote dl_func_tbl from local to global so dc/ can name it. Shared by G1 and
 # G2; it must be applied AT MOST ONCE, because a second TU-local TU_POST
 # assignment would silently replace the first rather than append to it.
+#
+# Spelled through both rewriters, same caveat as the DC_ASSET_CENSUS rule above:
+# this was a literal $(OBJDIR)/src/... path, which is the object name emu64.c has
+# only while it is in NEITHER scratch tree. LATENT TODAY — emu64.c is in neither
+# stub.list nor shrink.list — but the day either rewriter emits it, the TU_POST
+# assignment lands on an object nobody builds, objcopy never runs, dl_func_tbl
+# stays local, and the failure is a link-time `undefined reference` at best and a
+# silently dead interposition at worst.
 ifdef EMU64_TBL_GLOBAL
-EMU64_TBL_OBJ := $(OBJDIR)/src/static/libforest/emu64/emu64.c.o
+EMU64_TBL_OBJ := $(OBJDIR)/$(call shrinkify,$(call stubify,src/static/libforest/emu64/emu64.c)).o
 $(EMU64_TBL_OBJ): TU_POST = sh-elf-objcopy --globalize-symbol=__ZL11dl_func_tbl $@
 endif
 
