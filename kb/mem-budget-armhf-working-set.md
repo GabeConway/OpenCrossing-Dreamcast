@@ -7,6 +7,19 @@ superseded wherever it disagrees with `kb/mem-budget-m1-sh4.md`. Also carries
 the measurement provenance (subjects and tools) for
 `kb/mem-budget-armhf-binary-size.md`.
 
+> ⚠️ **[STALE 2026-08-06] the `-O0` era ended.** `src/` builds at `-Os` + a
+> 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` is `-O3`. Measured on
+> the shipping Dreamcast town build: `.text` **5,506,964 → 2,753,700 B**
+> (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**, `.bss`
+> unchanged (3,945,356 → 3,945,484). **Codegen was worth ~2.75 MB of `.text`,
+> roughly every `.bss` lever this project has landed put together.** This file
+> is almost all `.bss`, arena, transient and disc arithmetic, none of which
+> optimization touches — the 15,640,056 B REL transient, the 68,108,104 B
+> address space and the disc table below all still stand. Do not carry the
+> armhf `.text`/`.data` figures forward as a DC size prediction, and do not
+> substitute the four numbers above into any armhf table. Evidence: the
+> 2026-08-06 entry of `kb/state-log.md`.
+
 Measured 2026-08-01. Supersedes the sketch in `PLAN.md` §3.1; PLAN should be
 updated to point here. Every number below is tagged **[M]** measured today,
 **[D]** derived from measured numbers, or **[?]** unverified estimate that

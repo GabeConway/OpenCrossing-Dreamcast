@@ -6,7 +6,35 @@ problem, then vetted against `kb/closed.md` idea by idea. The companion to
 `kb/ram-plan.md` (whose arithmetic it corrects).
 
 **Every idea below was cross-checked against `kb/closed.md`. None reopens MMU
-paging, AICA-as-C-arrays, `--icf`, strip/compress, or `-O1+`.**
+paging, AICA-as-C-arrays, `--icf`, strip/compress, or ~~`-O1+`~~.**
+
+> ## ⚠️ [2026-08-06] `-O1+` WAS REOPENED, AND IT WAS WORTH MORE THAN THIS WHOLE PAGE
+>
+> The `-O0` directive was reversed. `src/` builds at `-Os` with a 14-TU `-O3`
+> hot list; `dc/src` moved `-O2` → `-O3`. Measured, matched town windows:
+>
+> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
+> |---|---:|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,729,152 | **2,753,700** |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 | **2,224,832** |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 | **3,945,484** |
+>
+> **`.text` −2,753,264 B in one flag.** That is larger than R1+R3+R4+R6
+> combined, at none of their hardware risk. Evidence: `kb/state-log.md`, top
+> entry, 2026-08-06.
+>
+> **What it does to this page:**
+>
+> - **R6 loses its premise outright.** R6 opens "`-O0` means `.text` can only
+>   *move*". `.text` did not have to move; it had to be compiled. See R6.
+> - **R1-R5 and R7-R8 are unaffected in mechanism** — they attack `.bss`, the
+>   arena and libc heap, none of which moved (`.bss` +128 B). They ARE affected
+>   in urgency: the gap they were sized against is 2.75 MB narrower, so the
+>   hardware-gated ones (R1/R3/R4/R5, all waiting on a `bench_mem` burn) should
+>   be re-justified rather than assumed necessary.
+> - **R9's first bullet ("drop jaudio") is now doubly uncertain**: its FPS half
+>   is an `-O0` measurement, and the software-vs-AICA audio verdict it leans on
+>   has reopened (`kb/audio-plan.md`).
 
 ---
 
@@ -124,9 +152,29 @@ the fastest non-main-RAM in the machine is idle while audio is off.
 AICA tier permanently is self-deception. Label it bridge capacity, repayable on
 demand, and never count it.
 
-### R6. Cold `.text` → VRAM. 0.5-1.5 MB image-equivalent. The honest replacement for L4.
+### R6. Cold `.text` → VRAM. ~~0.5-1.5 MB image-equivalent.~~ The honest replacement for L4.
 
-`-O0` means `.text` (5,804,776 B) can only *move*. VRAM is SH-4 addressable,
+> 🔴 **[PREMISE VOID 2026-08-06 — R6 SHOULD BE RE-RANKED TO NEARLY LAST.]**
+> R6's opening sentence is its whole justification, and it is now false. `.text`
+> did not have to move; it had to be compiled. **5,506,964 → 2,753,700 B, a
+> −2,753,264 B win, taken by a compiler flag with zero hardware risk** — against
+> R6's speculative 0.5-1.5 MB that requires a linker `MEMORY` region at a VRAM
+> VMA, a boot-time copy-out ordered before `pvr_init`, a curated cold set, and
+> **the one genuinely unverified hardware premise on this page** (SH-4
+> instruction fetch from VRAM across Holly, contending with TA traffic).
+>
+> What replaces the claim: the cheap, safe lever on `.text` is **codegen**, and
+> it has been taken. `DC_OPT_PROFILE=size` (flat `-Os`, no `-O3` hot list) is a
+> further −72,   ... i.e. `.text` 2,753,700 → 2,680,676 B, and it is a one-word
+> build change with a kill switch (`.text` 2,753,700 → 2,680,676 B, at a
+> measured cost of 20.6 → 18.5 town FPS) — that is the lever to reach for
+> *before* R6.
+> R6 survives only as a genuine last resort if the fit fails after every cheaper
+> move, and its candidate cold set (T5's 102,648 B floor, `dvderr` ~42 KB, …)
+> was itself measured at `-O0` and shrank with the rest of `.text`. Evidence:
+> `kb/state-log.md`, 2026-08-06.
+
+~~`-O0` means `.text` (5,804,776 B) can only *move*.~~ VRAM is SH-4 addressable,
 cacheable through P1, and the SH-4 can fetch instructions from it. So: a linker
 `MEMORY` region at a VRAM VMA, curated cold sections (`-ffunction-sections` is
 already on, so this is pure placement) with VMA=VRAM and LMA=image tail, copied
@@ -180,6 +228,14 @@ census itself is one scripted afternoon.
   after L1. And note what 2026-08-04 measured: sound now works but costs ~45 %
   of the frame rate (`kb/state-log.md`), so this lever now buys RAM *and* FPS.
   Belongs beside L5 in the "documented DC edition" bucket.
+  ⚠️ **[STALE 2026-08-06] Both halves of that costing moved and neither has been
+  re-taken.** The `319,194 B` of `.text` is an `-O0` figure (whole-image `.text`
+  fell 5,506,964 → 2,753,700 B); the `.bss` figure should be unaffected
+  (`.bss` moved +128 B in total). The **~45 % of frame rate** was measured with
+  jaudio compiled at `-O0`, and jaudio is now `-Os` — see `kb/audio-cpu-cost.md`,
+  where that whole cost model is flagged void. **Do not quote this bullet's
+  price until an audio-on `perf`-vs-`o0` A/B runs.** It is still the user's
+  call, and it is now a call on unknown numbers rather than known ones.
 - **Famicom/NES**: already measured at ~39 KB. Not worth the product cost.
   Confirmed, not re-proposed.
 

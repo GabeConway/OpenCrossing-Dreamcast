@@ -168,11 +168,16 @@ consistently. [VERIFIED]
 Also install **`zlib`** from kos-ports (base port uses it). Worth knowing:
 kos-ports also carries **`sh4zam`** (SH-4 math library). ❌ **EVALUATED AND
 PASSED 2026-08-05 — do not schedule it.** The port already emits FTRV, FIPR and
-FSRRA via KOS `dc/fmath.h`; sh4zam's API is `inline` in headers, so from `src/`
-its codegen would be decided at `-O0`; it has no FSQRT; and `kb/perf-dc.md` §3.7
-measured this whole class of change at exactly zero. Reasons in full:
-`kb/closed.md`. (This row previously read "directly relevant to PLAN §3.2's
-FTRV/FIPR work, evaluate at M4".)
+FSRRA via KOS `dc/fmath.h`; ~~sh4zam's API is `inline` in headers, so from
+`src/` its codegen would be decided at `-O0`~~ **[that reason is VOID as of
+2026-08-06 — `src/` builds at `-Os` + a 14-TU `-O3` hot list, so header
+`inline`s from `src/` do now inline]**; it has no FSQRT; and `kb/perf-dc.md`
+§3.7 measured this whole class of change at exactly zero. **The verdict stands
+on the other two reasons** — the zero measurement is the load-bearing one — but
+if sh4zam is ever reopened, do not cite `-O0` as the argument. Reasons in full:
+`kb/closed.md`; the reversal: `kb/state-log.md` 2026-08-06. (This row
+previously read "directly relevant to PLAN §3.2's FTRV/FIPR work, evaluate at
+M4".)
 
 ### 4.4 mkdcdisc — **built and run successfully on arm64 Debian bookworm**
 

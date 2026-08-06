@@ -6,6 +6,36 @@ call on 2026-08-01: execute it, do not re-litigate it.** Current status and the
 concrete next moves live in `kb/STATE.md`; the costed solution stack for S3's
 remainder and S4 is `kb/ram-plan.md`; the ranked ledger is `kb/levers.md`.
 
+> ## ⚠️ [2026-08-06] A LEVER THIS PLAN EXPLICITLY FORBADE WAS TAKEN, AND IT WORKED
+>
+> The `-O0` directive was reversed by the user. `src/` builds at `-Os` with a
+> 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` moved `-O2` → `-O3`.
+> Measured, matched town windows:
+>
+> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
+> |---|---:|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,729,152 | **2,753,700** |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 | **2,224,832** |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 | **3,945,484** |
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06.
+>
+> **The S1→S5 ordering itself SURVIVES, and two of its findings got stronger:**
+>
+> - **`.bss` did not move (+128 B).** S4/L1 is still the binding move and still
+>   the critical path. No compiler flag reaches asset destination `.bss`.
+> - **Finding 1 — "`.text` overlays (L4) are NOT needed" — is now much more
+>   securely true.** `.text` fell 2,753,264 B for free, which is far more than
+>   any overlay scheme was ever costed at. The `R_SH_DIR32` loader is further
+>   from being needed than when this was written.
+> - **Finding 2 — "the asset pool is the binding constraint" — stands**, and the
+>   pool ceiling should now be *re-derived* upward: the image-span side of the
+>   inequality gained ~2.75 MB of slack that the ~498,250 B pool ceiling was
+>   computed without. **Re-derive it from a current link before sizing S4's
+>   pool; do not reuse the number in "Finding 2".**
+>
+> **What does NOT survive is this file's closing instruction — see the bottom.**
+
 ## Next actions — the agreed plan
 
 **User chose this sequence on 2026-08-01 (S1 → S4, in order).** Do not
@@ -68,7 +98,9 @@ Build a **throwaway** image with the destination arrays sized `[1]`: a
 `DC_ASSET_STUB` build mode that rewrites generator output into a scratch tree.
 **No `src/` edits, nothing committed to the real tree** — `src/data/**/*.c` is
 output of `pc/tools/gen_runtime_assets.py`, so regenerating small is a
-*generator* change, legal under the `-O0` rule.
+*generator* change, legal under the ~~`-O0` rule~~ **no-`src/`-edits rule** (the
+`-O0` half was reversed 2026-08-06; the no-edits half was not, and it is the
+half this argument actually needed).
 
 `.bss` → ~3,644,150, under the 4,143,556 ceiling with ~500 KB spare. **The
 image fits and should boot.**
@@ -185,9 +217,28 @@ than any further `.bss` trimming.
 
 ---
 
-**Be honest in reporting.** "Still N MB short with `-O0` mandatory" is a valid
+~~**Be honest in reporting.** "Still N MB short with `-O0` mandatory" is a valid
 and important result. If the levers do not close the gap, cutting content
 (`kb/levers.md` L5 — the user's call, not engineering's) or declaring a
 stock-16 MB build infeasible are the honest options; quietly reopening the
-optimization question is not.
+optimization question is not.~~
+
+🔴 **[REWRITTEN 2026-08-06 — this paragraph was the plan's single most costly
+sentence.]** It told every future session that the optimization question was
+not merely settled but *dishonourable to raise*, so nobody re-read what the ban
+rested on: one unreproduced armhf session, never tested on SH-4, in which
+`-O1` was never isolated from `-mcpu=cortex-a53 -mfpu=neon-vfpv4` and the
+failure was blamed on unaligned LDRD/VFP — **which cannot happen on SH-4**. The
+question was reopened openly, by the user, on maintainer advice, and it was
+worth `.text` 5,506,964 → 2,753,700 B and town FPS 11.6 → 20.6.
+
+**What replaces it.** Be honest in reporting: "still N MB short" is still a
+valid and important result, and cutting content (`kb/levers.md` L5) or declaring
+a stock-16 MB build infeasible are still honest options. But the rule is now the
+opposite of the old one — **raising a closed question OPENLY, with the evidence
+it rests on quoted back, is exactly what is wanted; what is forbidden is
+changing the build quietly.** Optimization is a live, kill-switched lever:
+`DC_OPT_PROFILE=perf|size|o0`, lists in `dc/opt-lists.mk`, `o0` a
+byte-identical revert. Evidence: `kb/closed.md`'s `-O0` post-mortem and
+`kb/state-log.md`, 2026-08-06.
 

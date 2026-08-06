@@ -61,6 +61,10 @@ STUBDIR  := $(BUILD)/stubsrc
 STUBREL  := $(patsubst $(ROOT)/%,%,$(STUBDIR))
 SHRINKDIR := $(BUILD)/shrinksrc
 SHRINKREL := $(patsubst $(ROOT)/%,%,$(SHRINKDIR))
+# Vendored sh4zam (dc/third_party/sh4zam/VENDORING.md). Defined HERE, with the
+# other paths, because $(INCLUDES) below is := and expands it long before the
+# source-discovery section that builds $(SHZ_C) from it.
+SHZ_DIR   := $(DC_DIR)/third_party/sh4zam
 
 # =============================================================================
 # DC_ASSET_STUB — the throwaway boot-bringup build (kb/STATE.md, step S1)
@@ -452,6 +456,7 @@ INCLUDES := \
 	$(SHRINK_INCLUDES) \
 	$(STUB_INCLUDES) \
 	-I$(DC_DIR)/include \
+	-I$(SHZ_DIR)/include \
 	-I$(ROOT)/pc/include \
 	-I$(ROOT)/include \
 	-I$(ROOT)/src \
@@ -997,6 +1002,25 @@ GAME_CXX := $(shell cd $(ROOT) && find src -name '*.cpp' | LC_ALL=C sort | grep 
 DC_C   := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(DC_DIR)/src/*.c)))
 DC_CXX := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(DC_DIR)/src/*.cpp)))
 
+# =============================================================================
+# sh4zam — vendored SH-4 math library (dc/third_party/sh4zam/VENDORING.md)
+# =============================================================================
+# MIT, pinned at d4c648f. NOT a kos-ports dependency: taking it from there
+# would force a ~27 min SDK image rebuild, and the library needs nothing from
+# KOS. Almost all of it is SHZ_INLINE in headers; these four .c files are the
+# out-of-line remainder.
+#
+# It is built with the dc/src flag set (our code, $(DC_OPT), gnu11) rather than
+# the decomp set, because it is a library we chose rather than vendored decomp
+# — with warnings OFF, since it is upstream code at a pinned commit and a
+# warning in it is not actionable here.
+# NB $(SHZ_DIR) itself is defined up with the other paths, NOT here: $(INCLUDES)
+# is a := assignment far above this line and would expand an empty SHZ_DIR into
+# a bare `-I/include`, which is a real directory on some systems and silently
+# not this one.
+SHZ_C := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(SHZ_DIR)/source/*.c)))
+DC_C  += $(SHZ_C)
+
 # Padclamp.c lives under the excluded src/static/dolphin/pad/ but is pure math
 # (analog-stick clamping) with no Dolphin hardware dependency. The PC port adds
 # it back the same way (pc/CMakeLists.txt:415).
@@ -1180,6 +1204,13 @@ $(DC_C_OBJS): TU_OPT  = $(DC_OPT) -fno-strict-aliasing -fwrapv -fsigned-char
 $(DC_CXX_OBJS): TU_CC   = $(KCXX)
 $(DC_CXX_OBJS): TU_LANG = $(DC_WARN) -fpermissive -fno-exceptions -fno-rtti
 $(DC_CXX_OBJS): TU_OPT  = $(DC_OPT) -fno-strict-aliasing -fwrapv -fsigned-char
+
+# sh4zam: same flag set as dc/src above, minus the warnings. Upstream code at a
+# pinned commit — a warning in it is not actionable here, and letting it into
+# the log would bury the ones in dc/src, which we do act on. MUST come after
+# the $(DC_C_OBJS) rules above, which also match these objects.
+SHZ_OBJS := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(SHZ_C)))
+$(SHZ_OBJS): TU_LANG = -std=gnu11 -w
 
 # KOS owns main(). Rename the game's two entry points, same as the PC build.
 #

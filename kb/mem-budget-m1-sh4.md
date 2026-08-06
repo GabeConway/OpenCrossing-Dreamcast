@@ -3,10 +3,39 @@
 The first numbers taken from an actual Dreamcast link (`sh-elf-gcc 15.2.0`,
 `-O0`, 3,917 TUs): section sizes, the `.bss` split, the levers applied and the
 dead ends, why `--gc-sections` is mandatory, the optimization table that policy
-rejected, and the boot attempt that proved the silence is image size alone.
+rejected (**and 2026-08-06 adopted — see the banner**), and the boot attempt
+that proved the silence is image size alone.
 **This is the part of the old ledger that is still true**; it supersedes the
 armhf extrapolations in `kb/mem-budget-armhf-working-set.md` and
 `kb/mem-budget-armhf-binary-size.md` wherever they disagree. Live running numbers are in `kb/STATE.md`.
+
+> ## ⚠️ [STALE 2026-08-06] — §8.6's "REJECTED BY POLICY" is now "ADOPTED"
+>
+> **The `-O0` directive was reversed on 2026-08-06.** `src/` builds at `-Os`
+> with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` =
+> `-Os` everywhere; `o0` = byte-identical revert); `dc/src` moved from `-O2` to
+> `-O3`. Measured on matched town windows of the shipping build:
+>
+> | | `-O0` | `-Os` | shipping (`-Os` + `-O3` hot) |
+> |---|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,753,700 |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 |
+>
+> `.text` fell 2,826,288 B at flat `-Os`; `.data` fell 113,148 B; `.bss` did not
+> move (+128 B). **The codegen lever was worth roughly every `.bss` lever this
+> project has landed put together.**
+>
+> What that voids in this document: **§8.6's rejection**, and **§8.8's "the
+> remaining 13.34 MB cannot come from codegen (policy)"** — it can, and 2.75 MB
+> of it did. §8.1's `.text`/`.data` rows, and every total derived from them, are
+> `-O0`-era. What survives untouched: §8.2 (the `.bss` split), §8.3 (the four
+> `.bss` levers), §8.4 (strip = 0, NES ≈ 40 KB), §8.5 (`--gc-sections` is
+> mandatory and already spent), §8.7 (boot is gated on image size).
+>
+> ⚠️ The table above is from the *shipping stubbed town* build line, not the
+> full-asset link §8 measures — do not substitute one into the other. Evidence:
+> the 2026-08-06 entry of `kb/state-log.md`.
 
 ## 8. M1 post-link measurement — the real numbers from a real Dreamcast ELF
 
@@ -140,10 +169,17 @@ Codegen-identity note: `-ffunction-sections -fdata-sections` change only which
 named section a function is emitted into, never instruction selection. This is
 therefore **not** an optimization and is compatible with the `-O0` policy.
 
-### 8.6 Optimization levels — measured, then REJECTED BY POLICY
+### 8.6 Optimization levels — measured, then ~~REJECTED BY POLICY~~ **ADOPTED [2026-08-06]**
 
-Recorded once so the number is not mistaken for unknown. **User decision
-2026-08-01: decomp game code stays at `-O0`.** Do not propose these.
+Recorded once so the number is not mistaken for unknown. ~~**User decision
+2026-08-01: decomp game code stays at `-O0`.** Do not propose these.~~
+
+⚠️ **[2026-08-06] the 2026-08-01 decision was REVERSED.** `src/` ships at `-Os`
+with a 14-TU `-O3` hot list. The four-row table below is a full-asset `-O0`-era
+link and is kept as history; the shipping numbers are in the banner at the top
+of this file (`.text` 5,506,964 → 2,753,700 B on the town build line). **This
+section was right that the numbers existed and wrong only about what to do with
+them.** `kb/state-log.md`, 2026-08-06.
 
 | `DECOMP_OPT` | `.text` | `.data` | `.bss` | total |
 |---|---:|---:|---:|---:|
@@ -157,10 +193,21 @@ let alone the 8,035,072 B image budget. Optimization was never sufficient on
 its own, so the policy costs less than it appears to: the budget always had to
 come out of `.bss`.
 
+⚠️ **[2026-08-06] "sufficient on its own" was the wrong test, and it is what
+made this paragraph misleading for five days.** Nothing is sufficient on its own
+here; the question is what each lever is worth. Optimization was worth
+2,826,288 B of `.text` — measured, at flat `-Os`, on the shipping town build —
+which is the same order as the entire `.bss` programme. "It does not close the
+gap by itself" was true of every lever in this document.
+
 The one real consequence: §4's bucket 3 budgets `.text` at 2,600,000 B, which
 is only reachable with optimization. At `-O0` it is 6,318,568 B — **3.7 MB over
 bucket 3, against a ledger whose entire margin was 1.75 MB.** §4 no longer
 closes as written, independently of the asset work.
+⚠️ **[2026-08-06]** and optimization is now on, so bucket 3 is no longer 3.7 MB
+out of reach: the shipping `.text` is **2,753,700 B** against that 2,600,000 B
+target — the same neighbourhood, not a different order of magnitude. (Different
+build lines; do not subtract them and call it margin.)
 
 ### 8.7 Boot attempt — mechanism confirmed, no crash to symbolise
 
@@ -202,9 +249,17 @@ Against the 8,035,072 B image budget from `kb/research-size-reduction.md`
 | image budget | 8,035,072 |
 | **still to shed** | **13,339,924** |
 
-This pass removed 1,111,040 B of it. The remaining 13.34 MB cannot come from
-codegen (policy), from stripping (0 B), from `--gc-sections` (already spent),
+This pass removed 1,111,040 B of it. ~~The remaining 13.34 MB cannot come from
+codegen (policy)~~, from stripping (0 B), from `--gc-sections` (already spent),
 or from dropping the NES path (~40 KB). It has to come from the ranked plan in
 `kb/research-size-reduction.md` — of which **8.45 MB is demand-loading the
 `src/data` staged assets**, i.e. the asset pack's runtime loader. That is the
 critical path, and it is the next milestone's work.
+
+⚠️ **[2026-08-06] "cannot come from codegen (policy)" is VOID.** The policy was
+reversed; codegen delivered `.text` 5,506,964 → 2,753,700 B on the shipping
+town build (2,680,676 at flat `-Os`), i.e. ~2.75 MB — the second-largest single
+lever in the project, behind only `src/data` demand residency and ahead of every
+`.bss` lever landed to date. The 13,339,924 B figure above is `-O0` arithmetic
+against a superseded budget; do not carry it forward. Demand residency is still
+the critical path. Evidence: the 2026-08-06 entry of `kb/state-log.md`.

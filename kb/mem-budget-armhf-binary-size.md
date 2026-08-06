@@ -7,13 +7,45 @@ in `kb/mem-budget-armhf-working-set.md`. Read for per-symbol attribution; the
 8,771,358 B asset-destination figure here was later corroborated to the byte
 against the real DC link (`kb/mem-budget-m1-sh4.md` §8.2).
 
+> ## ⭐⚠️ [2026-08-06] THIS DOCUMENT WAS FLAGGED VOID FOR ITS CONCLUSION. THE CONCLUSION WAS RIGHT.
+>
+> `CLAUDE.md` §3 marks this file void "for its *the only real lever is codegen*
+> conclusion" (§2, "Top contributors, `.text`"). **That conclusion is now
+> VINDICATED, not void.** The `-O0` directive was reversed on 2026-08-06: `src/`
+> builds at `-Os` with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the
+> default; `size` = `-Os` everywhere; `o0` = byte-identical revert), and
+> `dc/src` moved from `-O2` to `-O3`. Measured on matched town windows of the
+> shipping build:
+>
+> | | `-O0` | `-Os` | shipping (`-Os` + `-O3` hot) |
+> |---|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,753,700 |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 |
+>
+> **`.text` fell 2,826,288 B at flat `-Os` (−2,753,264 B in the shipping
+> profile), `.data` fell 113,148 B, `.bss` did not move (+128 B).** On this
+> target the codegen lever was worth roughly **as much as every `.bss` lever
+> this project has landed put together**.
+>
+> So the two halves of this document's `.text` verdict both held up: "there is
+> no `.text` diet that matters" (the free deletions really are only ~90 KB) and
+> "the only real lever is codegen" (it was, and it was worth ~2.75 MB). What was
+> wrong was the *policy* layered on top of it, not the analysis. The one
+> qualification that still applies: it was **the only real lever for `.text`**,
+> never for `.bss`, and `.bss` is untouched by it.
+>
+> ⚠️ These four numbers are from the *shipping stubbed town* Dreamcast build
+> line; everything below is armhf-era. Do not substitute one into the other.
+> Evidence: the 2026-08-06 entry of `kb/state-log.md`.
+
 ## 2. Binary size: top contributors (task 2 answer)
 
 ### Section totals [M]
 
 | Section | Bytes | DC fate |
 |---|---:|---|
-| `.text` | 3,335,604 | stays (SH-4 recompile — size ratio unknown, see [?]) |
+| `.text` | 3,335,604 | stays (SH-4 recompile — ~~size ratio unknown, see [?]~~ **[2026-08-06] the DC link is now measured: `.text` 5,506,964 at `-O0`, 2,753,700 shipping**) |
 | `.rodata` | 713,756 | stays (note: 699,686 B of this is string/merge pools with no sized symbols — only 14,070 B is symbol-attributed) |
 | `.data` | 2,643,072 | stays, minus evictions |
 | `.data.rel.ro` | 364,308 | becomes plain rodata on a non-PIE static ELF |
@@ -181,6 +213,14 @@ Content-cut candidates, measured [M]:
 Free deletions total only ~90 KB. **There is no `.text` diet that matters —
 the only real lever is codegen** (game code is currently `-O0`; DC will be
 `-O2`/`-Os` on 16-bit SH-4 instructions).
+
+⭐ **[CONFIRMED 2026-08-06, and this is the sentence CLAUDE.md called void.]**
+It was correct, including the prediction of what the DC would ship. `src/` now
+builds at `-Os` with a 14-TU `-O3` hot list; measured on the shipping town
+build, `.text` went **5,506,964 → 2,753,700 B** (2,680,676 B at flat `-Os`)
+while `.bss` did not move. Codegen was worth ~2.75 MB — the free-deletion list
+above is ~90 KB, so the ratio this paragraph asserted holds to about 30×.
+Evidence: the 2026-08-06 entry of `kb/state-log.md`.
 
 ### `.data`: how much can be evicted [M]
 

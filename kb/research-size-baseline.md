@@ -14,6 +14,18 @@ the real ELF: **every one was wrong, most by a lot, and two of the stated
 mechanisms were impossible.** Use `kb/levers.md` for numbers; use this
 document for the reasoning and the sources.
 
+> ⚠️ **[STALE 2026-08-06] this document's `-O0` premise is VOID.** `src/` builds
+> at `-Os` + a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` is `-O3`.
+> Measured on the shipping town build: `.text` **5,506,964 → 2,753,700 B**
+> (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**, `.bss`
+> unchanged (3,945,356 → 3,945,484). **Codegen was worth ~2.75 MB of `.text`,
+> roughly every `.bss` lever this project has landed put together.** The
+> `.text`/`.rodata`/`.data` rows in §1's tables are `-O0`-era and are kept as
+> history; they are also full-asset-image numbers, so do not substitute the four
+> above into them. **§4 is unaffected** — `.bss` did not move (+128 B), so the
+> demand-residency argument is exactly as valid as it was, just no longer the
+> *only* lever. Evidence: the 2026-08-06 entry of `kb/state-log.md`.
+
 ## 1. The measured baseline
 
 Subject: `/Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast/dc/build/AnimalCrossing.elf`
@@ -105,6 +117,12 @@ it is 16,343 assets that `gen_runtime_assets.py` turned into empty
 `ATTRIBUTE_ALIGN(32)` arrays which `pc_assets_init()` fills at boot from the
 decompressed REL. It is a static reservation of a thing that should be a cache.
 Everything else in this document is a rounding error next to it.
+
+⚠️ **[2026-08-06]** "everything else" no longer includes codegen, which was
+excluded from this document by policy rather than measured out of it. At `-Os`
+`.text` fell 2,826,288 B — the same order as this line item — so `src/data`
+demand residency is now the largest of **two** levers, not the only one.
+`kb/state-log.md`, 2026-08-06.
 
 ---
 

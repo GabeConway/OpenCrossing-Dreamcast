@@ -33,6 +33,12 @@ average on one A53 core at 1.5 GHz **with game code compiled at -O0**, and its
 bottleneck is CPU (game logic), not GPU (GL time is only 5.4 ms/frame after
 the batching/culling passes).
 
+> ⚠️ **2026-08-06 — the `-O0` half of that anchor no longer describes this
+> port.** `src/` builds at `-Os` with a 14-TU `-O3` hot list; see §3.2, which
+> was rewritten. Every estimate in this document that was derived from an
+> `-O0` measurement is stale in the direction of pessimism. Evidence:
+> `kb/state-log.md`, 2026-08-06 entry.
+
 ## 3. The four hard problems
 
 Everything else is porting labor; these four decide viability. Ordered by risk.
@@ -54,11 +60,15 @@ caches + 10.9 MB binary. Plan of attack:
   DC arena to measured-peak + margin. Target: ≤ 9 MB.
 - **Shrink the binary.** The armhf ELF is 10.9 MB largely because `src/data/`
   (464k LOC of generated tables) compiles in. Extend `gen_runtime_assets.py`
-  to evict the biggest tables to disc-loaded assets. **Not `-Os`** — see the
-  directive at the head of §3.2. The size levers are all layout-class:
-  `-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, `.bss`
-  right-sizing, dropping non-goal subsystems (NES), and moving rodata to
-  `/cd`. Target: ≤ 4 MB text+data resident.
+  to evict the biggest tables to disc-loaded assets. ~~**Not `-Os`** — see the
+  directive at the head of §3.2.~~ **[REVERSED 2026-08-06: `-Os` IS the
+  lever, and it is the biggest one in this section.]** It landed `.text`
+  **5,506,964 → 2,753,700 B** — roughly the size of every `.bss` lever this
+  project has shipped put together, and it is RAM, not just speed. The
+  layout-class levers still apply on top: `-ffunction-sections
+  -fdata-sections` + `-Wl,--gc-sections`, `.bss` right-sizing, dropping
+  non-goal subsystems (NES), and moving rodata to `/cd`. Target: ≤ 4 MB
+  text+data resident.
 - **Vertex buffer:** 3.1 MB static (65536 × 48 B) shrinks — DC submits in
   32-byte `pvr_vertex16_t`-style records per-list; batch buffer can be ¼ the
   size with 16-bit quantized formats (dca3's meshlet trick, decoded by FTRV).
@@ -76,7 +86,7 @@ requirement (dca3 holds this line, we hold it too).
 
 | | bytes | note |
 |---|---:|---|
-| linked ELF `.text` | 6,318,568 | at `-O0`, all 3917 TUs, zero exclusions |
+| linked ELF `.text` | 6,318,568 | at `-O0`, all 3917 TUs, zero exclusions — **[STALE 2026-08-06: `.text` is now 2,753,700 at `-Os` + a 14-TU `-O3` hot list]** |
 | linked ELF `.data` | 2,638,852 | |
 | linked ELF `.bss` | 13,526,548 | classification in flight |
 | **total** | **22,483,968** | ends `0x8d581c14`; `_arch_mem_top` = `0x8d000000` |
@@ -95,7 +105,15 @@ This single fact is what makes the problem structural rather than cosmetic,
 and it is why compression and debug-stripping are worth exactly zero here
 (`.bss` is `NOBITS`).
 
-`-O0` is mandatory throughout. `kb/research-size-reduction.md` ranks the
+⚠️ ~~`-O0` is mandatory throughout.~~ **[VOID 2026-08-06.]** The sentence that
+opened this paragraph was the premise the whole size plan was built on, and it
+is gone: `src/` builds at `-Os` + a 14-TU `-O3` hot list, worth **2,753,264 B
+of `.text`** on its own. `kb/research-size-reduction.md` and everything derived
+from it were commissioned to close the gap *without* that term — they are still
+correct as layout analysis, but their necessity arithmetic is now conservative
+by ~2.75 MB. **Do not re-derive the budget from this paragraph**; the live
+numbers are in `kb/STATE.md` and the reasoning in `kb/state-log.md` 2026-08-06.
+`kb/research-size-reduction.md` ranks the
 codegen-neutral techniques and totals **−14.77 MB against −14.45 MB required:
 it closes on paper with a 2% margin**, which is "closes on paper", not "safe".
 The dominant term is demand-loading `src/data` (−8.45 MB, 57% of the cut);
@@ -110,7 +128,9 @@ nothing else is within a factor of five. Levers measured rather than guessed:
   15,726 static arrays totalling ~8,617,214 B that stay resident regardless of
   source. This is now the largest single line in the budget. The pack format
   makes every asset individually addressable, so demand-loading into pooled
-  storage is a loader-only change — no codegen, permitted under §3.2.
+  storage is a loader-only change — no codegen, permitted under §3.2. (The
+  "permitted under §3.2" clause is moot as of 2026-08-06 — codegen is no longer
+  banned — but the lever is still worth doing on its own merits.)
 - **`foresta.map`/`static.map`, −5,402,023 B of disc (settled, droppable).**
   Only reader is `JUTException::queryMapAddress_single` on the
   `OSSetErrorHandler` path, which returns false outside
@@ -124,8 +144,10 @@ nothing else is within a factor of five. Levers measured rather than guessed:
 already spent (29,471 discarded sections recover 522,150 B of allocatable RAM
 and that is all there is — GCC does not emit unreferenced `static`s even at
 `-O0`); `--icf` has no SH implementation in gold, `ld.bfd` or `lld`; SH GCC has
-no small-data model, so the KOS script's `.sdata`/`.sbss` are inert; `-mrelax`
-is a codegen change and is disqualified; stripping debug info and compressing
+no small-data model, so the KOS script's `.sdata`/`.sbss` are inert; ~~`-mrelax`
+is a codegen change and is disqualified~~ **[premise VOID 2026-08-06 — `-mrelax`
+is now merely UNEVALUATED; `kb/design-shelf-flags.md` §3.2's real objection is
+that it interacts badly with `--gc-sections` during triage]**; stripping debug info and compressing
 `1ST_READ.BIN` each save exactly 0 RAM; AICA's 2 MB is DMA-only over a 16-bit
 25 MHz G2 bus and cannot hold a C array — budget 0 MB of it.
 
@@ -142,7 +164,89 @@ SH-4↔VRAM read figure** — measure before relying on it.
 bucket 6 (4.0 MB `JKRHeap`/`__osMalloc`) is entirely unmeasured; if it is
 really 6 MB, the plan is 2 MB short.
 
-### 3.2 CPU: 200 MHz vs -O0 decomp code
+### 3.2 CPU: 200 MHz vs decomp code
+
+> ## ⭐ **REVISED AGAIN 2026-08-06 — the `-O0` directive is REVERSED.**
+>
+> The 2026-08-01 directive that used to head this section is quoted in the
+> collapsed block below. It is void. `src/` builds at **`-Os` with a 14-TU
+> `-O3` hot list** (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os`
+> everywhere, the lever for when the image will not fit; `o0` = a
+> byte-identical revert). `dc/src` moved `-O2` → `-O3`. Per-TU lists live in
+> `dc/opt-lists.mk`; the guard set `OPT_GUARDS` lives in `dc/Makefile`.
+>
+> | | `-O0` | `-Os` + `-O3` hot list |
+> |---|---:|---:|
+> | `.text` | 5,506,964 | **2,753,700** |
+> | town FPS | 11.6 | **20.6** |
+> | `draw` ms | 79.1 | **45.4** |
+> | µs/vertex | 4.05 | **3.11** |
+>
+> Full rebuild: **96 s**. Evidence, controls and screenshot gate:
+> `kb/state-log.md`, 2026-08-06 entry.
+
+- **`-Os` + a measured hot list is the contract now.** The rule that replaces
+  "`-O0` is the contract" is: **`DC_OPT_PROFILE=o0` must stay a byte-identical
+  revert**, `dc/opt-lists.mk` must carry evidence per entry, and a stale path
+  in it is a hard error rather than a silent no-op.
+- **Why the old ban fell.** It rested on one armhf session (2026-07-13)
+  surviving only as a comment in `pc/CMakeLists.txt:21-29`. It was never
+  reproduced on SH-4; the `-O2` attempt was never isolated from a simultaneous
+  `-mcpu=cortex-a53 -mfpu=neon-vfpv4` change; the `-O1` SIGBUS's stated
+  mechanism (unaligned LDRD/VFP) **cannot occur on SH-4** — max alignment 4,
+  no 64-bit integer loads; and `-O2` on `emu64.c` was device-verified *safe* on
+  armhf on the very intro-train scene the `-O1` failure was blamed on. The
+  likeliest real cause is a **link** bug: the decomp never defines
+  `JUTRomFont::spFontHeader_`, and `-O2` starts referencing it — which is the
+  entire non-CMake content of upstream's "Compile everything at -O2" commit.
+  ⚠️ **That symbol is still undefined in this tree, deliberately**, so an
+  optimized build that emits a reference fails loudly at link instead of
+  dereferencing NULL. Do not define it.
+- **The safety net, which is what makes this different from the armhf
+  attempt.** `OPT_GUARDS` = `-fno-isolate-erroneous-paths-dereference` (keeps a
+  tolerated NULL deref from becoming a trap — the "wild pointer" shape),
+  `-fno-ipa-sra` (the decomp calls 968 K&R `()`-declared functions, some *with*
+  arguments), `-fno-store-merging` (SH-4 traps any misaligned store),
+  `-fno-ipa-icf` (keeps crash addresses unambiguous). Plus `make warnscan` (all
+  3,926 TUs at `-O2` with the decomp's `-w` removed, 132 s) +
+  `tools/dcopt/warnscan_report.py`, `tools/dcopt/bisect_o0.sh` with
+  `predicate_town.sh`, and `DC_AUTOVAR_INIT=zero`.
+- **What the decomp's UB measures at:** 35 missing returns in 30 files, 99
+  uninitialised reads, 8 array-bounds, 3 sequence-point, **0 strict-aliasing**.
+  `emu64.c` — hot, and compiled as C++, where a missing return gets *deleted*
+  rather than merely returning garbage — is **clean** on missing returns.
+  `jammain_2.c` is the one C++-compiled TU that is not; it is inert at
+  `DC_AUDIO=0` and is the first suspect when audio work starts.
+- **Codegen vs layout** — the distinction no longer gates anything. Layout
+  levers (`-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, `.bss`
+  right-sizing, linker placement, moving data to disc) are still the RAM plan
+  (§3.1); they are now *in addition to* the 2.75 MB `-Os` bought, not instead
+  of it.
+- **Speed still needs the rest of the list:** SH-4 FTRV/XMTRX in the matrix
+  layer (`dc/src/dc_mtx.c`, done), store queues for PVR submission, fewer draw
+  calls, a 30 fps target, and source-level work on whatever the profiler names.
+  `-Os` did not remove any of those; it moved the town from 11.6 to 20.6 FPS,
+  which is not 30.
+- **Alignment is still the residual class**, and now with a more aggressive
+  compiler. Mitigation is unchanged and its first line is a flag:
+  `-fno-store-merging`. SH-4 raises a CPU exception on unaligned access — the
+  handler that logs PC + faulting address is installed in `dc_main.c`; triage
+  per-TU with `DC_OPT_O0_EXTRA` / `tools/dcopt/bisect_o0.sh`; fix misaligned
+  casts at the source where found (upstreamable). ⚠️ Open and unaddressed:
+  `#pragma dont_inline` is silently ignored by GCC, and four kept files use it.
+- **Budget arithmetic — better, and still not proven to close.**
+  Single-thread A53@1.5 GHz ≈ 10–20× SH-4@200 MHz scalar. The `-O0`→optimized
+  term is **back**, measured at ~1.8× on the town frame (11.6 → 20.6 FPS) —
+  less than the 2–3× the original arithmetic assumed. What remains is the
+  30 fps target, FTRV/XMTRX, store queues, and profiled source-level work.
+  **Go/no-go gate at M3 is unchanged:** measured game logic time for a town
+  frame must be ≤ 25 ms on hardware/Flycast-with-realistic-timing before
+  renderer perf work continues. ⚠️ **Nothing in the 2026-08-06 measurement ran
+  on hardware.** Flycast models no cache and no bus contention, and a 2.75 MB
+  smaller `.text` should behave *better* on a real SH-4's instruction cache
+  than the emulator can show — but that is a hope, not a number.
+
+<details><summary>the 2026-08-01 directive this replaced, kept for the sequence</summary>
 
 > **Revised 2026-08-01 by user directive.** This section previously planned to
 > adopt upstream's `-O2`. **Optimization is off the table**: "the optimizations
@@ -157,34 +261,22 @@ really 6 MB, the plan is 2 MB short.
   flyngmt commit `4f428276` (2026-07-10, "Compile everything at -O2") with
   `-fno-strict-aliasing -fwrapv` is an **x86-only** data point and does not
   transfer. Do not re-propose `-O1`/`-O2`/`-Os`/LTO as a size or speed lever.
-- **Codegen vs layout.** The ban is on anything that changes instruction
-  selection. It is *not* a ban on `-ffunction-sections -fdata-sections` +
-  `-Wl,--gc-sections`, `.bss` right-sizing, linker script placement, or moving
-  data to disc — those are layout, and they are the RAM plan (§3.1).
-- **Speed therefore has to come from elsewhere:** SH-4 FTRV/XMTRX in the
-  matrix layer (`dc/src/dc_mtx.c`, done), store queues for PVR submission,
-  fewer draw calls, a 30 fps target, and hand-optimizing individual hot
-  functions at the source level — which is portable, upstreamable, and
-  reviewable in a way `-O2` is not. If a specific TU is measured hot and
-  provably alignment-clean, a per-TU exception can be argued on evidence; the
-  `dc/Makefile` supports per-TU flags. It is not the plan.
-- **Alignment is still the residual class** even at `-O0`. The base repo's
-  ARM record: -O1 caused
-  a hard SIGBUS (unaligned LDRD/VFP) on the intro train scene; x86 never sees
-  this. SH-4 is also a strict-alignment ISA, so expect the same class.
-  Mitigation: SH-4 raises a CPU exception on unaligned access — install an
-  exception handler that logs PC + faulting address (the base port's SIGBUS
-  recovery pattern), triage per-TU exactly as the Anbernic repo did, fix the
-  misaligned casts at the source where found (upstreamable fixes).
-- **Budget arithmetic — now worse, state it plainly.** Single-thread
-  A53@1.5 GHz ≈ 10–20× SH-4@200 MHz scalar. The old arithmetic leaned on
-  `-O0`→`-O2` for ≥2–3× of that; **that term is gone.** What remains is the
-  30 fps target (2× the frame budget of 60), FTRV/XMTRX in the matrix layer,
-  and source-level work on whatever the profiler names. This does not
-  provably close the gap, and pretending otherwise would make the M3 gate
-  meaningless. **Go/no-go gate at M3:** measured game
-  logic time for a town frame must be ≤ 25 ms on hardware/Flycast-with-
-  realistic-timing before renderer perf work continues.
+- **Speed therefore has to come from elsewhere** … If a specific TU is measured
+  hot and provably alignment-clean, a per-TU exception can be argued on
+  evidence; the `dc/Makefile` supports per-TU flags. It is not the plan.
+  *(This bullet is the one that aged best: the exception mechanism it describes
+  is exactly what `dc/opt-lists.mk` became — it just runs in both directions.)*
+- **Budget arithmetic — now worse, state it plainly.** … The old arithmetic
+  leaned on `-O0`→`-O2` for ≥2–3× of that; **that term is gone.**
+  *(It was not gone. It was worth ~1.8×.)*
+
+**Why this is kept:** two documents — `kb/design-shelf-flags.md` §9 and §3.4 —
+had already measured the opposite and were overruled by the anecdote above.
+The failure mode to avoid repeating is not "we chose wrong", it is
+**"a measurement was overruled by a story from a different ISA and the
+disagreement was closed rather than tested."**
+
+</details>
 - **30 fps is the design target,** not degraded-60. Upstream's 2026-08-01
   wave of delta-time commits ("Fix fishing dt", NPC/event/animation timing —
   the unlocked-FPS work with Cuyler36) is exactly the frame-rate-independence
@@ -195,7 +287,9 @@ really 6 MB, the plan is 2 MB short.
 ### 3.3 Renderer: GX → PowerVR, no shaders
 
 Layering stays `game → emu64 → GX → platform`, same as every successful port
-of this codebase. emu64 is kept (it's decompiled, -O2-safe, and its quirks
+of this codebase. emu64 is kept (it's decompiled, `-O2`-safe on armhf and now
+carried at `-O3` on the DC hot list — and **clean of missing returns** in the
+2026-08-06 warnscan, which matters because it is compiled as C++; and its quirks
 are already handled by the base port's GX layer). The GX implementation is
 rewritten in two stages:
 
@@ -368,17 +462,23 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
   `crashtest.c:39`, `perf.sh` passes in-band and fails on a shifted baseline.*
 - **M1 — it links. ✅ MET 2026-08-01.** *Gate: ELF links; extractor output
   complete; save-compression numbers in kb.* **3917/3917 TUs compile for
-  sh-elf at `-O0`+guards** (the gate originally read "-O2+guards"; see §3.2 —
-  `-O0` is now the contract), zero exclusions, and `src/` was not modified:
+  sh-elf** — the gate originally read "`-O2`+guards", was met at `-O0`+guards
+  on 2026-08-01, and **as of 2026-08-06 is met in its original form**: the tree
+  builds at `-Os` + a 14-TU `-O3` hot list with the guard set (§3.2). Zero
+  exclusions, and `src/` was not modified:
   every compat fix lives in `dc/include/dc_prelude.h` as a force-include. It
   links and produces a 27 MB unpadded CDI.
 - **M2 — pixels. ← current milestone; RAM is the blocker.** Boots to title
   screen in Flycast on GLdc stage-A renderer; arena shrunk with boot-time
   memory ledger; assets load from `/cd`. `tev-map.md` written (all 101 configs
   classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
-  **The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
+  ~~**The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
   boot until ~14.45 MB comes out (§3.1 — the image budget is 8,035,072 B, not
-  16 MB), and `-O0` is mandatory. This is the gate.**
+  16 MB), and `-O0` is mandatory. This is the gate.**~~ **[STALE — this
+  paragraph is 2026-08-01 and both halves moved.]** The port boots on retail
+  hardware and walks the town; and `-O0` is not mandatory (§3.2, reversed
+  2026-08-06 — `.text` alone fell 5,506,964 → 2,753,700 B). Current image and
+  heap numbers live in `kb/STATE.md`, not here.
 - **M3 — vertical slice.** Load/create town, walk, enter buildings, talk,
   save/load on emulated VMU; audio stage A (rspsim @ 22 kHz). **CPU go/no-go
   gate:** town-frame game logic ≤ 25 ms. *This is the milestone that decides
@@ -395,10 +495,11 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 | Risk | Sev | Mitigation |
 |---|---|---|
-| RAM doesn't fit even after §3.1 | **fatal, and now ACTIVE** | measured at 22.5 MB vs 16 MB; levers are layout-class only (§3.2). Asset pack lands −15.68 MB of peak but exposes an 8.22 MB destination-array floor. If layout levers don't close it, the honest outcomes are: cut content, or the port doesn't fit — not "turn on -O2" |
-| Game logic too slow on SH-4 at `-O0` | fatal | M3 gate. The `-O2` term is **gone** (§3.2), so the budget is genuinely worse: 30 fps target, FTRV/XMTRX, store queues, source-level work on profiled hot functions |
-| Source-level hot-path rewrites diverge from upstream | med | keep them minimal and upstreamable; they're reviewable in a way `-O2` is not |
-| Alignment faults at `-O0` (residual class) | high | exception-handler triage (installed in `dc_main.c`), per-TU fallback, fix at source |
+| RAM doesn't fit even after §3.1 | **fatal, and now ACTIVE** | measured at 22.5 MB vs 16 MB; ~~levers are layout-class only (§3.2)~~ **[2026-08-06: not only — `-Os` on `src/` took `.text` from 5,506,964 to 2,753,700 B, the single largest cut the project has landed]**. Asset pack lands −15.68 MB of peak but exposes an 8.22 MB destination-array floor. If the remaining levers don't close it, the honest outcomes are: cut content, or the port doesn't fit. ~~not "turn on -O2"~~ — that one turned out to be real, and `DC_OPT_PROFILE=size` (flat `-Os`) is the reserve lever if the image stops fitting |
+| Game logic too slow on SH-4 | fatal | M3 gate. ~~The `-O2` term is **gone** (§3.2)~~ **[2026-08-06: the term is back, measured at ~1.8× on the town frame — 11.6 → 20.6 FPS — which is less than the 2–3× originally assumed and does not by itself close the gap]**. Remaining: 30 fps target, FTRV/XMTRX, store queues, source-level work on profiled hot functions. **Unmeasured on hardware.** |
+| Source-level hot-path rewrites diverge from upstream | med | keep them minimal and upstreamable. (The old rationale "they're reviewable in a way `-O2` is not" is void — the port ships optimized; the divergence risk is now just ordinary fork drift) |
+| Alignment faults (residual class, now with an optimizing compiler) | high | `-fno-store-merging` in `OPT_GUARDS`; exception-handler triage (installed in `dc_main.c`); per-TU quarantine via `DC_OPT_O0_EXTRA` / `tools/dcopt/bisect_o0.sh`; fix at source |
+| A TU miscompiles at `-Os`/`-O3` (new, 2026-08-06) | med | `DC_OPT_PROFILE=o0` is a byte-identical revert; `dc/opt-lists.mk` carries a quarantine list (currently empty); `bisect_o0.sh` finds the TU with both sanity gates. Unaddressed sub-case: the four `#pragma dont_inline` sites GCC silently ignores |
 | Save won't fit VMU | high | compression prototype at M1, 2-VMU spanning, converter tool preserves GCI interchange |
 | TEV configs that don't approximate | med | finite set (101); per-config table; worst cases get baked assets |
 | EFB-capture effects | med | enumerate call sites; per-case (pre-render, stub, or PVR RTT) |

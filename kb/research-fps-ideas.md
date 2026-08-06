@@ -1,5 +1,48 @@
 # Unbanked FPS concepts — ranked, each with a failure mode
 
+> ## 🔴 [2026-08-06] THE BIGGEST UNBANKED FPS IDEA WAS NOT ON THIS PAGE — IT WAS BANNED
+>
+> **`-O0` was reversed on 2026-08-06.** `src/` builds at `-Os` with a 14-TU
+> `-O3` hot list (`DC_OPT_PROFILE=perf`, the default) and `dc/src` moved
+> `-O2` → `-O3`. Measured on matched town windows:
+>
+> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
+> |---|---:|---:|---:|---:|
+> | town FPS | 11.6 | 18.5 | 20.0 | **20.6** |
+> | `draw` ms | 79.1 | 50.3 | 46.8 | **45.4** |
+> | logic tick ms | 6.6 | 3.3 | 2.8 | **2.8** |
+> | `xform` ms (`dc/`) | 13.1 | 12.9 | 12.4 | **9.9** |
+> | `us/v` | 4.05 | 4.05 | 4.05 | **3.11** |
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06.
+>
+> **Three things this does to this page, in order of importance:**
+>
+> 1. **The framing premise is void.** This document repeatedly says `src/` is
+>    "closed to editing and where compiler flags are banned", and every estimate
+>    on it is denominated in an ~78-90 ms `-O0` frame. `src/` is still closed to
+>    *editing*; it is no longer closed to *compiling well*. The frame is now
+>    45.4 ms.
+> 2. **G2's entire premise is gone.** G2 was "reimplement emu64's dispatch loop
+>    in `dc/` at `-O2` because `src/` is stuck at `-O0`". `emu64.c` is now on
+>    the `-O3` hot list (`dc/opt-lists.mk`). The compiler did G2's job, in the
+>    right place, with no interposition, no `objcopy --globalize-symbol`, no
+>    sign-off and no spirit-of-the-rules argument. See the decision-gate section.
+> 3. **Every millisecond estimate below is stale by construction**, because they
+>    were sized against `-O0` handlers. The *structural* facts (the dispatch
+>    table is writable, `gsSPCullDisplayList` appears twice in `src/`, 66.8 % of
+>    vertices are culled after staging, `emu64_set_aflags` is a plain extern C
+>    seam) are unaffected — those are facts about the code, not about its cost.
+>    **Re-run `DC_EMU64_HIST` at `DC_OPT_PROFILE=perf` before costing any idea
+>    here.** A full rebuild is 96 s and `DC_OPT_PROFILE=o0` is a byte-identical
+>    control, so the re-measurement is cheap.
+>
+> ⚠️ **And the new lever this page should have carried all along:** `-O3` on 14
+> TUs cost +48,476 B of `.text` and bought 3.5 ms. Tuning that list is now the
+> cheapest FPS experiment in the project — but it is bounded, because the
+> frameskipped tick runs ALL of `game_main` for 2.8 ms against the drawn tick's
+> 46.8, so every `src/` TU except `emu64.c` shares those 2.8 ms.
+
 Written 2026-08-04, from a deliberately out-of-the-box pass over the frame-time
 problem, then vetted against the code. The companion to `kb/perf-dc.md`, which
 records what has been *measured*; this file records what has not been *tried*.
@@ -13,6 +56,17 @@ tick — is not repeated here.
 
 ## The arithmetic that has to stay in front of any plan
 
+⚠️ **[STALE 2026-08-06] — and the clause that mattered is VOID.**
+~~The town frame is ~79-90 ms.~~ The town `draw` is **45.4 ms**. ~~emu64
+display-list traversal plus game logic is **77-80 %**, all in `src/`, which is
+closed to editing **and where compiler flags are banned**.~~ **Compiler flags
+are not banned. That was the wrong half of the sentence, and correcting it was
+worth more than every idea on this page combined.** `src/` remains closed to
+editing; it is compiled at `-Os` with a `-O3` hot list. The shares below have
+not been re-derived — the `src/` half fell 41 % while the `dc/` half moved
+little, so **the renderer's share is now LARGER than 19-27 %**, not smaller.
+Evidence: `kb/state-log.md`, 2026-08-06.
+
 The town frame is ~79-90 ms. The renderer (`gx=`, all of it in `dc/`) is
 **19-27 %** of it, at the median and at the tail alike. emu64 display-list
 traversal plus game logic is **77-80 %**, all in `src/`, which is closed to
@@ -20,7 +74,8 @@ editing and where compiler flags are banned.
 
 **Deleting the renderer entirely would take the worst 5 % of frames from 84.7 ms
 to 66.0 ms — 11.8 to 15.2 FPS.** Any plan that quotes a renderer optimisation as
-a route to 30 FPS in the town is wrong on arithmetic.
+a route to 30 FPS in the town is wrong on arithmetic. (The *conclusion* still
+holds at `-Os`; the numbers do not.)
 
 ⚠️ **G1 re-cut that split along a different axis, and the new one is the useful
 one (2026-08-05).** The `gx=` counter still says 19-27 %, but the per-opcode
@@ -32,12 +87,30 @@ than "19-27 % renderer" suggests, and the un-editable share is smaller** — whi
 is why the queue below starts with a `dc/` function and not with a sign-off
 request.
 
+⚠️ **[STALE 2026-08-06] The 65/35 split is void; the structural point is not.**
+The `src/` side of that bucket went `-O0` → `-O3` and the `dc/` side went
+`-O2` → `-O3`, so both terms moved and neither the 53 µs nor the 152 µs has
+been re-measured. What survives — and is now *more* true — is that a large
+fraction of the "emu64" bucket is code this project owns. What also survives is
+the conclusion drawn from it: **start with the `dc/` function, not with a
+sign-off request.** Re-run `DC_EMU64_HIST` at `DC_OPT_PROFILE=perf` before
+using any number in this paragraph.
+
 ---
 
 ## The ranked queue as of 2026-08-05 — READ THIS BEFORE PICKING AN IDEA BELOW
 
 The ideas on this page are ranked by their own merits; this is the order to
 actually work in, after G1's histogram. `kb/STATE.md` carries the same list.
+
+⚠️ **[STALE 2026-08-06] This ordering was derived from an `-O0` histogram and
+has not been re-derived.** Item 2 (per-slot `G_MTX` shadow) and item 3 (slot-60
+cull-only shadow) are both *interposition* ideas whose value came from running
+`dc/` `-O2` code in place of `src/` `-O0` code — and `src/` is no longer `-O0`.
+The cull half of item 3 keeps its value (it removes work rather than
+recompiling it); the "`-O2` instead of `-O0`" half of items 2 and 3 has largely
+been collected by the compiler already. **Re-run the histogram before working
+this queue.** Evidence: `kb/state-log.md`, 2026-08-06.
 
 | # | what | est | gate |
 |---|---|---|---|
@@ -58,10 +131,15 @@ exclusive by `#error` for the same reason (`dc/include/dc_platform.h:417`).
 
 ## The five facts these ideas rest on
 
-All verified in the tree, 2026-08-04.
+All verified in the tree, 2026-08-04. **Facts 2-5 are statements about the code
+and survive 2026-08-06 unchanged. Fact 1's ratio survives; its cost does not.**
 
 1. **66.8 % of the vertices emu64 produces are thrown away by our own AABB cull,
-   AFTER emu64 has paid full `-O0` price for them.** ⚠️ **Re-measured
+   AFTER emu64 has paid full ~~`-O0`~~ price for them.** ⚠️ **[2026-08-06]** —
+   `src/` is `-Os`/`-O3` now, so the price paid before the cull is lower and the
+   4.5-7.0 ms estimate below is an upper bound that has not been re-taken. The
+   **ratio** (`vcull=6042` vs `v=3002`) is a property of the scene and the cull's
+   position in the pipeline, not of codegen, so it stands. ⚠️ **Re-measured
    2026-08-05 and re-costed downward.** This fact used to read "60 % … at
    ~6.9 µs of emu64 work per vertex that is **~29 ms/frame**", derived across
    two differently-instrumented builds from `pc_gx_culled_draws`, which counts
@@ -183,8 +261,12 @@ next chunk still runs — which is *why* the split into sub-lists is mandatory. 
 current DL.
 
 **Why 8 synthetic verts and not the batch's own 30:** `dl_G_CULLDL` transforms
-every tested vertex through `-O0` `guMtxXFM1F_dol2`, so testing 30 real vertices
-on *visible* chunks would cost more than it saves.
+every tested vertex through ~~`-O0`~~ `guMtxXFM1F_dol2`, so testing 30 real
+vertices on *visible* chunks would cost more than it saves. ⚠️ **[2026-08-06]
+that function is now `-Os` and the margin is narrower** — the argument still
+points the same way (8 < 30 at any optimization level) but the *quantitative*
+case for it was `-O0`. F1 itself is unaffected: it removes commands, which is
+the one lever the compiler cannot take.
 
 Failure modes, all checkable mechanically:
 - A model DL executed as a root task or via `G_DL_NOPUSH`: a cull would set
@@ -292,11 +374,22 @@ SH7750's **8 KB** I-cache is direct-mapped (confirmed 2026-08-05; the D-cache is
 so a linker-script ordering block can place the dispatch loop, `dl_G_VTX`, the
 TRI handlers, `set_position`, `GXPosition*` and `PSMTX*` contiguously and remove
 *conflict* eviction between the interpreter and the GX layer it calls per
-vertex. Pure layout — "codegen is banned; layout is fair game".
+vertex. Pure layout — ~~"codegen is banned; layout is fair game"~~ **and as of
+2026-08-06 codegen is fair game too, so F5 no longer needs that defence at
+all.**
 
 Failure mode: the `-O0` hot set is likely 40-80 KB, far over 8 KB, so this only
 removes conflict misses, not capacity misses. **Flycast models no cache, so this
 cannot be measured in the emulator at all** — it costs a burn cycle to evaluate.
+
+✅ **[2026-08-06] F5 GOT BETTER, and it is the one idea on this page the `-O0`
+reversal HELPED.** `.text` fell from 5,506,964 B to 2,753,700 B — the whole
+image is now half the size it was — so the hot set that has to fit an 8 KB
+direct-mapped I-cache shrank by roughly the same factor. The "40-80 KB" estimate
+above was an `-O0` estimate and is stale in the favourable direction.
+`-Os` additionally optimises *for* code size, which is exactly what an I-cache
+wants. **Still hardware-only to measure.** Evidence: `kb/state-log.md`,
+2026-08-06.
 
 ### F6. OCRAM for the renderer's hot scratch
 
@@ -318,6 +411,14 @@ debug arrays (`dl_history`, `command_info`) got it under 8 KB, the *entire
 interpreter state* could live in 1-cycle scratch, and for `-O0` code that
 reloads `this->field` incessantly that could be the largest cache lever
 available anywhere in this project.
+
+⚠️ **[2026-08-06] That last sentence's premise is gone, and it cuts F6 down.**
+`emu64.c` is compiled at `-O3` now, so the "reloads `this->field` incessantly"
+behaviour — the entire reason OCRAM looked large here — is exactly what the
+optimizer removes by keeping those fields in registers. F6 is still legal and
+still unmeasured, but **it should be re-ranked downward**, and it must be
+re-argued from the `-O3` disassembly rather than from `-O0` behaviour.
+Evidence: `kb/state-log.md`, 2026-08-06.
 
 Verify KOS actually enables OC-RAM index mode before spending anything.
 
@@ -354,14 +455,56 @@ handler bodies are genuinely no-ops on a PVR backend.
 
 ## The decision gate: interposing on emu64 through its dispatch table
 
+> ## 🔴 [2026-08-06] THE GATE LARGELY DISSOLVED. READ THIS BEFORE THE TABLE.
+>
+> **This entire section exists because `src/` was frozen at `-O0` and `dc/` was
+> not.** Every line of it — the `objcopy` trickery, the "honesty flag", the
+> spirit-vs-letter argument, the request for a user sign-off — is downstream of
+> one sentence: *"`src/` stays unedited and stays at `-O0`; `dc/src/` already
+> builds at `-O2`."* **The second half of that sentence is no longer true.**
+> `src/` is `-Os` with a 14-TU `-O3` hot list, and **`emu64.c` is on that hot
+> list** (`dc/opt-lists.mk`).
+>
+> **What that does to each row:**
+>
+> - **G2 — premise GONE.** G2 was "reimplement `emu64_taskstart_r` in `dc/` at
+>   `-O2` so the dispatch loop stops being `-O0`". The compiler now compiles
+>   that exact function at `-O3`, in place, with no interposition, no symbol
+>   surgery, no dual maintenance and no sign-off. `dc_emu64_shadow.cpp` is
+>   built and in the tree; **its measured +0.8 FPS whole-run was taken against
+>   an `-O0` emu64 and is not evidence about the current build.** ⚠️ It may now
+>   be a net LOSS — a hand-written `-O3` dispatch loop calling `-O3` handlers is
+>   no longer obviously better than the `-O3` loop GCC emits, and it costs
+>   `.text`, a `#error` conflict with G1, and a 64-slot save/restore per frame.
+>   **A/B it against `DC_OPT_PROFILE=perf` with the shadow off before keeping
+>   it.** That A/B is a 96-second rebuild.
+> - **G3 — split in two, and only half survives.** G3's "`-O2` shadow handlers"
+>   half has the same dead premise as G2. **G3's *cull* half is untouched and is
+>   now the whole of G3's value**, because it removes work rather than
+>   recompiling it — no optimizer can invent a visibility test. That was already
+>   the recommendation ("build the cull half alone", queue item 3); it is now the
+>   *only* recommendation.
+> - **G1** was a measurement, it ran, and its findings stand as findings — but
+>   its milliseconds are `-O0` and must be re-taken.
+> - **The unnumbered fourth row (`dc_gx_backend_submit`) was always the right
+>   answer** and it needed no gate. It still needs no gate; `dc/src` is `-O3`.
+>
+> **The general lesson, and it is the expensive one:** this section spent
+> considerable design effort on an elaborate mechanism for running optimised
+> code in place of `src/` — while the direct route, *compile `src/` optimised*,
+> sat behind a `kb/closed.md` entry whose evidence was one unreproduced armhf
+> session. **Check what a ban actually rests on before engineering around it.**
+> Evidence: `kb/closed.md`'s `-O0` post-mortem and `kb/state-log.md`,
+> 2026-08-06.
+
 **This is the user's call, not engineering's, and it must be surfaced rather
 than buried.**
 
 Fact 5 means `dc/` can replace individual emu64 handlers without editing `src/`:
 `objcopy --globalize-symbol` on `emu64.c.o` (a Makefile post-step — layout, not
 codegen) exposes the table, and `objcopy --redefine-sym` can interpose any
-handler. `src/` stays unedited and stays at `-O0`; `dc/src/` already builds at
-`-O2`. Three escalating uses:
+handler. ~~`src/` stays unedited and stays at `-O0`; `dc/src/` already builds at
+`-O2`.~~ **[VOID 2026-08-06 — see the box above.]** Three escalating uses:
 
 ⚠️ **RE-COSTED 2026-08-05 against G1's histogram. Both wins shrank, and the
 biggest block in the frame turned out to need no gate at all.**
@@ -381,13 +524,24 @@ bucket the G-series proposed to attack is code this project owns and compiles at
 `-O2` today. Interposing on emu64's dispatch table buys much less than the
 decision assumed, and item 4 of the table costs nothing politically.
 
-**The honesty flag.** G2 and G3 do not violate the letter of the rules — `src/`
-unedited, `src/` still `-O0`, `dc/` already `-O2`, kill switch trivial. But they
-reimplement `src/` logic in optimised `dc/` code, which walks near the *spirit*
-of the `-O0` directive. The distinction from what failed before is real: the
-armhf failures were global `-O1`/`-O2` miscompiles of 3,917 TUs, where this is a
-hand-vetted rewrite of 2-6 functions behind the screenshot and regression gates.
-Real, but not engineering's to decide.
+~~**The honesty flag.** G2 and G3 do not violate the letter of the rules —
+`src/` unedited, `src/` still `-O0`, `dc/` already `-O2`, kill switch trivial.
+But they reimplement `src/` logic in optimised `dc/` code, which walks near the
+*spirit* of the `-O0` directive. The distinction from what failed before is
+real: the armhf failures were global `-O1`/`-O2` miscompiles of 3,917 TUs, where
+this is a hand-vetted rewrite of 2-6 functions behind the screenshot and
+regression gates. Real, but not engineering's to decide.~~
+
+🔴 **[MOOT 2026-08-06] There is no `-O0` directive left to walk near the spirit
+of.** The user reversed it. Note also that this paragraph's own defence —
+"the armhf failures were global `-O1`/`-O2` miscompiles of 3,917 TUs" —
+turned out to be the belief that needed auditing, not the premise that could be
+leaned on: the armhf `-O1` SIGBUS was never isolated from
+`-mcpu=cortex-a53 -mfpu=neon-vfpv4`, was never reproduced on SH-4, and was
+attributed to unaligned LDRD/VFP, **which cannot occur on SH-4**. The global
+`-Os` build of all 3,926 TUs walks the whole town with `crashes=0`,
+`ASSERT 0`, `ptdrop 0` and frame-matched screenshots. See `kb/closed.md`'s
+`-O0` post-mortem.
 
 G3's specific technical risk beyond the political one: the decal-Z path in
 `set_position` (`emu64.c:2724-2783`) is genuinely hairy, and divergence there
@@ -400,6 +554,17 @@ town on its own.**~~ **FALSIFIED 2026-08-05.** That claim rested on the ~48 ms
 reaches 20 FPS in the town on its own**: G3's cull half is 4.5-7.0 ms and its
 `-O2` half is inside an ~8.3 ms cap, against a 78.3 ms frame. Reaching 20 FPS
 needs several of these together, or content work (`kb/levers.md` L5).
+
+✅ **[2026-08-06] 20 FPS in the town was reached — by none of them.** The town
+is at **20.6 FPS** on a **45.4 ms** `draw`, from `DC_OPT_PROFILE=perf` alone: no
+idea on this page was built to get there. Two things follow. First, every
+estimate above is now denominated in the wrong frame and must be re-costed
+against 45.4 ms, where each one is worth proportionally *more* of the remaining
+budget than it was of 78.3 ms. Second — the honest one — **this page's ranking
+process failed at its stated job**, which is to surface the unbanked idea with
+the best win/(risk×effort). The winner was excluded from consideration by a
+`kb/closed.md` entry nobody re-audited. Evidence: `kb/state-log.md`,
+2026-08-06.
 
 ---
 
@@ -455,6 +620,16 @@ Probe-free numbers for the current build, for future comparison:
 `min 10.70, p1 11.56, p5 12.15, p50 24.30, max 29.90` (capped at `fps_target`).
 
 ## Where the worst frames are
+
+⚠️ **[STALE 2026-08-06] Every figure in this section, and both within-scene
+fits, are `-O0`.** The headline claim "**the town never exceeds 14.9 FPS**" is
+false as of 2026-08-06: matched town windows read **20.6 FPS**. The
+`12.31 µs/cmd` slope in particular is a per-command cost of `-O0` emu64 and is
+quoted in the 3DS-port table above as the justification for attacking `cmds` —
+that argument survives (fewer commands is still the one lever codegen cannot
+take) but its coefficient does not. **Re-fit both regressions at
+`DC_OPT_PROFILE=perf` before quoting a slope.** Evidence: `kb/state-log.md`,
+2026-08-06.
 
 **14 of the 17 worst probe-free windows are scene 9 — the outdoor town.** Scene
 9 probe-free: min 10.7, p1 11.3, p50 14.9, max 14.9. The town never exceeds

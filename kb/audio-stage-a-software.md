@@ -3,10 +3,65 @@
 §4 of `kb/audio-plan.md`, moved verbatim: the config changes, the effect-cut
 order with perceptual notes, the KOS output plumbing, expected cost and the
 stage-A main-RAM footprint. Read when implementing bring-up audio.
-**Stage A is the bring-up path and the oracle, not the shipping configuration —
-at the game's real 24-voice cap it does not fit the budget** (`kb/audio-plan.md`).
+~~**Stage A is the bring-up path and the oracle, not the shipping configuration —
+at the game's real 24-voice cap it does not fit the budget**~~
+🛑 **[STALE 2026-08-06 — see §0.]** Stage A is still the bring-up path and the
+oracle; whether it can also be the *shipping* configuration is an open question
+again (`kb/audio-plan.md`).
 
 ---
+
+## 🛑 0. READ FIRST — the premise of "stage A does not fit" is void (2026-08-06)
+
+### 0.1 `src/` is not `-O0` any more
+
+The `-O0` directive on `src/` was reversed on 2026-08-06. `src/` builds at
+`-Os` with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default);
+`DC_OPT_PROFILE=size` is `-Os` everywhere; `DC_OPT_PROFILE=o0` is a
+byte-identical revert. **Everything under `src/static/jaudio_NES/` —
+`internal/rspsim.c`, `driver.c`, `internal/jammain_2.c` — is `-Os` like the
+rest of the tree.**
+
+So the argument this document has carried since 2026-08-01 — *stage A costs
+N % of the SH-4, N is fixed because codegen is fixed, therefore stage A cannot
+ship* — **has lost its middle term.** §4.4's "13 % CPU (range 9–20 %) … at the
+full 24-voice cap it is 34 % and does not fit" is an `-O0` number and is stale.
+
+**Do not scale it.** No conversion factor is offered here, and none may be
+invented. The only measured proxy is the frameskipped game-logic tick — all of
+`game_main` with the draw skipped, i.e. general `src/` code, which `jaudio_NES`
+also is — which went **6.6 ms → 2.8 ms, a 58 % fall**. That is a proxy for the
+*class* of code, not a measurement of the mixer.
+
+**The re-measurement is one line:** an audio-on town smoke at
+`DC_OPT_PROFILE=perf` versus the same tree at `DC_OPT_PROFILE=o0`. Both
+profiles exist; a full rebuild is 96 s. **Until that pair exists, the CPU cost
+of software synthesis is an open question, not a fixed input, and the
+stage-A-vs-stage-B decision must not be taken.**
+
+Evidence: `kb/state-log.md`, entry **2026-08-06**.
+
+### 0.2 ⚠️ `jammain_2.c` is the first file to suspect the day audio starts
+
+The 2026-08-06 warnscan (`DC_TARGET=warnscan bash dc/build-dc.sh`, all 3,926
+TUs at `-O2` with the decomp's `-w` removed, reduced by
+`tools/dcopt/warnscan_report.py`) named **`jammain_2.c` the single riskiest file
+in the tree**: it is compiled as **C++**, it has a **missing return**, and it has
+**22 uninitialised reads — the most of any file in the tree**. In C++ a missing
+return is UB that G++ turns into `__builtin_unreachable` and deletes the path
+outright, which is exactly the shape of a boot-time wild-pointer crash.
+
+It is **not quarantined**, and the only reason it is not is that
+`DC_AUDIO=0` means it never ticks. **The day audio work starts, that changes.**
+If the audio-on `perf` build misbehaves and the `o0` build does not, the tools,
+in order:
+
+1. `DC_OPT_O0_EXTRA=src/static/jaudio_NES/internal/jammain_2.c` — quarantine it
+   alone.
+2. `DC_AUTOVAR_INIT=zero` — if the symptom vanishes, the bug is one of the 22
+   uninitialised reads, not the optimizer.
+3. `tools/dcopt/bisect_o0.sh` — binary-search the rest of the audio TUs.
+
 
 ## 4. Stage A — rspsim on SH-4, reduced rate, feeding `snd_stream`
 
@@ -31,7 +86,16 @@ and is not worth it.
 
 ### 4.2 Effect tiering — cut order, cost, and what it sounds like
 
-Ordered by **cycles saved per unit of perceptual loss**, cheapest loss first:
+Ordered by **cycles saved per unit of perceptual loss**, cheapest loss first.
+
+⚠️ **[2026-08-06] The ORDER survives; the URGENCY does not.** Every "saves ~N %"
+below is a fraction of an `-O0` cost (§0.1), and the ladder was written to be
+descended until stage A fit a budget it could not reach. It may now not need
+descending as far — cut 1 is free, and cuts 5 and 6 (output rate, then voice
+cap) are the ones that cost the player something. **Measure first (§0.1), then
+decide how far down this list to go.** Do not pre-commit to the 22 kHz decision
+or to a 12-voice cap on the strength of the old numbers.
+
 
 1. **Haas + Dolby** — free (already off in STEREO). Delete `Nas_Synth_Delay`,
    `Nas_DolbySurround`, `A_CMD_RESAMPLE_ZOH`, the headset pan tables.
@@ -80,11 +144,17 @@ Replace `pc_audio.c`'s SDL device with KOS:
   threshold the PC build uses (`AUDIO_PRODUCE_THRESHOLD 4480`), scaled.
 - Underrun handling must **drop** an audio frame, never block the game thread.
 
-### 4.4 Expected cost
+### 4.4 Expected cost — 🛑 **STALE 2026-08-06, see §0.1**
 
-**13% CPU (range 9–20%) at 10 voices / 22.05 kHz / reverb on / FIR+comb off**
+~~**13% CPU (range 9–20%) at 10 voices / 22.05 kHz / reverb on / FIR+comb off**
 = ~4.3 ms of a 33.3 ms frame. At the full 24-voice cap it is 34% (23–51%) and
-does not fit.
+does not fit.~~
+
+Both figures are modelled on `-O0` codegen and the "does not fit" conclusion
+falls with them. **There is no replacement number in this document and none may
+be derived here** — run the `perf`-vs-`o0` audio-on A/B in §0.1 and write the
+measured figure in. Until then the honest statement is: *the cost of stage A on
+the current build is unmeasured.*
 
 ### 4.5 Main-RAM footprint (stage A) **[measured sizes, summed]**
 

@@ -6,6 +6,35 @@ required cut, and the binding `.bss` constraint. Read before quoting any RAM
 total. **Contingent on bucket 6 = 4 MB, which is still [?]** — see
 `kb/research-budget-bucket6.md`.
 
+> ## ⚠️ [STALE 2026-08-06] — §1.4's binding constraint is VOID
+>
+> §1.4 concludes "**with `-O0` frozen `.text` cannot help**". `-O0` is no longer
+> frozen. The directive was reversed on 2026-08-06: `src/` builds at `-Os` with
+> a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os`
+> everywhere; `o0` = byte-identical revert); `dc/src` moved from `-O2` to
+> `-O3`. Measured on matched town windows of the shipping build: `.text`
+> **5,506,964 → 2,753,700 B** (2,680,676 at flat `-Os`), `.data` **2,337,980 →
+> 2,224,832 B**, `.bss` unchanged (3,945,356 → 3,945,484 B).
+>
+> **`.text` helped, by 2,826,288 B at flat `-Os`** — more than twice the
+> 1,349,044 B of `.bss` headroom §1.4 computes, and about as much as every
+> `.bss` lever the project has landed put together. Concretely:
+>
+> - §1.4's `8,957,420 = .text-equivalent + .data` is `-O0` arithmetic. Both
+>   terms fell. **The `.bss` headroom it derives is therefore much larger than
+>   1,349,044 B — recompute it from a current link; do not patch the number
+>   here, and do not subtract the shipping town figures from the full-asset
+>   figures, which are different build lines.**
+> - The **−89.1 % `.bss` requirement is likewise stale** for the same reason.
+> - §1.3's ~11.07 MB required cut and §1.2's fit inequality are stale in the
+>   same way. The *form* of the fit test — one inequality, never two pools — is
+>   still right and still the rule.
+> - Everything not derived from `.text`/`.data` stands: the bucket-1
+>   double-count, buckets 9/10/11 being `.bss`, the `s_assets[]` line, and the
+>   1,294,497 B of dead XFB/FIFO.
+>
+> Evidence: the 2026-08-06 entry of `kb/state-log.md`.
+
 ---
 
 ## 1. Corrected budget — the headline
@@ -75,7 +104,7 @@ simply that the 14.45 MB figure is stale.**
 came from the budget double-counting bytes. That is the good news; §1.4 is the
 bad news.
 
-### 1.4 What did NOT improve, and it is the binding constraint
+### 1.4 What did NOT improve, and it is the binding constraint ⚠️ [STALE 2026-08-06 — it improved; see the banner]
 
 The coordinator's arithmetic is correct and survives this audit:
 
@@ -91,7 +120,14 @@ image budget (corrected)                                  10,306,464  [D]
 So the corrected budget buys **1,349,044 B of `.bss` headroom instead of a
 negative number** — the port goes from arithmetically impossible to merely
 very hard. But `.bss` must still fall from 12,415,508 to ~1.35 MB, i.e.
-**−89.1 %**, and with `-O0` frozen `.text` cannot help.
+~~**−89.1 %**, and with `-O0` frozen `.text` cannot help.~~
+
+⚠️ **[2026-08-06] `.text` can help and did.** `-Os` + a 14-TU `-O3` hot list
+took `.text` from 5,506,964 to 2,753,700 B on the shipping town build, and
+`.data` from 2,337,980 to 2,224,832 B. Both terms of the 8,957,420 B line above
+fell, so the 1,349,044 B headroom and the −89.1 % `.bss` requirement are both
+`-O0`-era. **Recompute them from a current link — do not mix the town-build
+figures into this full-asset arithmetic.** `kb/state-log.md`, 2026-08-06.
 
 A useful decomposition of the 11.07 MB cut against the ranked plan in
 `kb/research-size-reduction.md` §6.2:
@@ -106,3 +142,11 @@ A useful decomposition of the 11.07 MB cut against the ranked plan in
 
 It closes with a 512,697 B margin (4.6 %) — thinner than it looks, because the
 largest line is unbuilt and the second-largest is unverified.
+
+⚠️ **[2026-08-06] this decomposition is missing its second-largest lever**,
+because that lever was banned when it was written: `-Os` + a 14-TU `-O3` hot
+list, worth 2,826,288 B of `.text` at flat `-Os` (2,753,700 B shipping figure
+vs 5,506,964 B at `-O0`), plus 113,148 B of `.data`. It would rank second in
+the table above, behind `src/data` demand residency and ahead of everything
+else. The required-cut side of the comparison moved too, so **rebuild the whole
+decomposition rather than inserting a row.** `kb/state-log.md`, 2026-08-06.

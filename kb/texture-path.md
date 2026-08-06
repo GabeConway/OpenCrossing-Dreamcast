@@ -57,8 +57,12 @@ per texture. 8:1 VRAM win, no quality win.
 two documents read as contradictory. They are not: an offline-converted texture
 needs only a codebook + index copy and the VQ bit in the poly header — it never
 goes near `PVR_TXRLOAD_VQ_LOAD`, and offline asset conversion is an explicitly
-legal layout lever (CLAUDE.md §1: "codegen is banned; layout is fair game"). Do
-not kill P2 by citing this paragraph. What is closed is generating a codebook on
+legal layout lever. ⚠️ **The clause this used to quote is gone** — CLAUDE.md §1
+said "codegen is banned; layout is fair game" until 2026-08-06, when the `-O0`
+directive was reversed and codegen became the project's biggest single lever
+(`kb/state-log.md`). That does not weaken the point here, it strengthens it:
+offline VQ never needed the exemption it was claiming. Do not kill P2 by citing
+this paragraph. What is closed is generating a codebook on
 the console.
 
 Formats handled: `I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, C4, C8, CMPR`.

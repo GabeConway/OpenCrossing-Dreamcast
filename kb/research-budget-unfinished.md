@@ -6,6 +6,18 @@ docs cite as "§6 lists what is unfinished"; `kb/levers.md` cites **§6.2** (the
 check it is not already a known-open question. **Nothing in the parent document
 was executed on hardware.**
 
+> ⚠️ **[2026-08-06] one thing this list does NOT contain is the question that
+> mattered most: "is the `-O0` ban actually justified on SH-4?"** It was not.
+> The directive was reversed on 2026-08-06; `src/` builds at `-Os` with a 14-TU
+> `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os`
+> everywhere; `o0` = byte-identical revert), and `dc/src` moved to `-O3`.
+> Measured on the shipping town build: `.text` **5,506,964 → 2,753,700 B**
+> (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**, `.bss`
+> unchanged (3,945,356 → 3,945,484). **Codegen was worth ~2.75 MB of `.text` —
+> roughly every `.bss` lever this project has landed put together.** All six
+> questions below remain open as written; item 3 gains a note. Evidence: the
+> 2026-08-06 entry of `kb/state-log.md`.
+
 ---
 
 ## 6. Not finished — numbered, with next steps
@@ -57,6 +69,13 @@ Their results are lost; the questions below are open.**
       initialised bytes per symbol, group). `--icf` is unavailable on SH but
       source-level dedup in the generator is allowed. **Completely unmeasured
       — could be zero, could be significant.**
+      ⚠️ **[2026-08-06]** the linker's `--icf` is still unavailable on `sh-elf`,
+      but GCC's own `-fipa-icf` became reachable when `src/` moved to `-Os`, and
+      it is deliberately switched **off** by `OPT_GUARDS` (`-fno-ipa-icf`) so
+      that crash addresses stay unambiguous. That is a debuggability choice, not
+      a correctness one — re-cost it if `.text` ever binds again. Also note this
+      item is about *data* dedup, which `-fipa-icf` does not do.
+      `kb/state-log.md`, 2026-08-06.
 
 4. **Bucket 8 (ARAM graph window, 512,000).** Still a guess. §3.5 shows the
    archives hold only 86 coarse files, which may make a small window unworkable

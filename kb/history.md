@@ -30,6 +30,11 @@
 - **2026-07-13** — Perf pass 2 (the -O0 discovery + -O2/NEON flags, NEON
   decoders, decode budget, draw-call merging), CI release workflow,
   noob-friendly README, BUILDING.md, kb/ knowledge split.
+  ⚠️ **This is the session the whole `-O0` ban came from, and it was reversed
+  on 2026-08-06** (see the Dreamcast entry below). The `-O2` and the
+  `-mcpu=cortex-a53 -mfpu=neon-vfpv4` change went in *together*, so the crash
+  it produced was never attributed; no log, commit or test case survives it —
+  only a comment in `pc/CMakeLists.txt:21-29`.
 - **2026-07-13 (later)** — Perf pass 3 shipped as **v0.2.0** (GX state
   dedup, per-program uniform shadowing, dynamic-fps upward probe, seed
   regrown to 101 configs). Post-release: streaming VBO (P3) v1
@@ -134,3 +139,44 @@
   at -O1 (it carries no -O at all) and pointed at a `build_pc.sh` that does not
   exist. Tier-1 native macOS build confirmed dead on Apple Silicon (32-bit
   guard, pc/CMakeLists.txt:41) — armhf Docker is the only compile check here.
+
+## Dreamcast port (2026-08-)
+
+*This file's entries above are armhf-era. The Dreamcast port's running record
+lives in `kb/state-log.md` (newest first) and its current numbers in
+`kb/STATE.md`; only decisions that changed the project's rules are recorded
+here.*
+
+- **2026-08-01** — `-O0` made a **standing directive** for `src/` after the
+  armhf history above was quoted into `PLAN.md` §3.2 ("the optimizations cause
+  problems and we cant use them without the port being broken"). It became a
+  fixed input to every RAM and perf plan the project then wrote: `kb/levers.md`
+  was restricted to layout-class levers, `kb/research-size-reduction.md` was
+  commissioned to close a 14.45 MB gap without touching codegen, and PLAN's
+  CPU budget dropped the 2–3× term it had been leaning on.
+- **⭐ 2026-08-06 — the `-O0` directive is REVERSED by user decision**, on
+  advice from the KOS/sh4zam maintainer: GCC's SH-4 output at `-O0` is not
+  "unoptimized" but pathological, and no Dreamcast port ships that way.
+  `src/` now builds at **`-Os` with a 14-TU `-O3` hot list**
+  (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os` everywhere; `o0` = a
+  byte-identical revert), `dc/src` moved `-O2` → `-O3`, lists live in
+  `dc/opt-lists.mk` and the guard set `OPT_GUARDS` in `dc/Makefile`.
+  Measured: `.text` **5,506,964 → 2,753,700**; town FPS **11.6 → 20.6**; draw
+  **79.1 → 45.4 ms**; µs/vertex **4.05 → 3.11**; full rebuild **96 s**.
+  New tooling: `make warnscan` (all 3,926 TUs at `-O2` with the decomp's `-w`
+  removed, 132 s) + `tools/dcopt/warnscan_report.py` — 35 missing returns in
+  30 files, 99 uninitialised reads, 8 array-bounds, 3 sequence-point, 0
+  strict-aliasing, with `emu64.c` **clean** on missing returns and
+  `jammain_2.c` the one C++-compiled TU that is not; plus
+  `tools/dcopt/bisect_o0.sh`, `tools/dcopt/predicate_town.sh` and
+  `DC_AUTOVAR_INIT=zero`.
+  **The lesson worth keeping:** the ban rested entirely on the 2026-07-13
+  entry above — one armhf session, never reproduced on SH-4, never isolated
+  from a simultaneous NEON/CPU-tuning change, and most likely caused by a
+  *link* bug (the decomp's missing `JUTRomFont::spFontHeader_` definition,
+  which upstream had to add for exactly this reason). `kb/design-shelf-flags.md`
+  §9 had called `-O2` "achievable, and probably mandatory" from measurements
+  and was overruled by that anecdote. ⚠️ `spFontHeader_` is **still undefined
+  in this tree, deliberately**, so an optimized build that references it fails
+  loudly at link instead of dereferencing NULL. Full write-up:
+  `kb/state-log.md` 2026-08-06 entry and `kb/closed.md`.

@@ -1,5 +1,14 @@
 # Known issues & leads
 
+⚠️ **2026-08-06 — every "per-TU `-O2`" lever below is armhf-era and now
+overtaken.** Those entries name per-TU `-O2` as the fix for work-dominated
+stutters in `-O0` decomp code. On the Dreamcast port `src/` is no longer at
+`-O0` at all: it builds at `-Os` with a 14-TU `-O3` hot list
+(`DC_OPT_PROFILE=perf`, `dc/opt-lists.mk`), which is the whole-tree version of
+that lever, and it is already spent — `.text` 5,506,964 → 2,753,700, town FPS
+11.6 → 20.6. Treat "per-TU `-O2`" in the entries below as **already applied**
+on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
+
 ## Open
 
 - **DC: the texture cache's content hash only samples the ends of a large
@@ -346,7 +355,16 @@
   recur, first suspect other cumulative-counter * constant multiplies.
   DEVICE-VERIFIED 2026-07-15: clock tracks real time through a full play
   session ("i think the clock is fixed too" — user, >10 min session).
-- Intro train black screen → decomp code must build unoptimized (kb/perf.md).
+- ~~Intro train black screen → decomp code must build unoptimized
+  (kb/perf.md).~~ ⚠️ **[STALE 2026-08-06 — the conclusion, not the symptom.]**
+  The symptom was real *on armhf*; "therefore decomp code must build
+  unoptimized" was never reproduced on SH-4, and the Dreamcast port reversed
+  it: `src/` builds at `-Os` with a 14-TU `-O3` hot list and its train scene
+  passes (`crashes=0`, screenshot-matched against an `-O0` build). The armhf
+  `-O2` attempt shipped together with `-mcpu=cortex-a53 -mfpu=neon-vfpv4`, so
+  neither level was ever tested alone, and the likeliest cause is a missing
+  `JUTRomFont::spFontHeader_` definition — a link bug, not a codegen one.
+  See `kb/state-log.md` 2026-08-06.
 - First-boot menu music stutter → shader seed warmup during splash.
 - No audio → 32-bit PipeWire env in launcher (kb/device.md).
 - Game running at 57% speed under load → fps_target must be dynamic (6);

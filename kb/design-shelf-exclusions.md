@@ -7,8 +7,15 @@ to `include/JSystem/JUtility/JUTFont.h`. **`src/` is never edited to make
 something compile** — every compat fix goes in `dc/include/dc_prelude.h`, which
 is force-included, and all 3917 TUs build that way today with zero exclusions.
 Read those steps as "here is the collision", not as "here is the fix".
-Similarly, §3.4 and §9 recommend building at `-O2`; codegen flags are banned by
-user directive. (Noted 2026-08-02 while splitting this document.)
+
+⭐ **2026-08-06 — the `-O2` ban is REVERSED, and §1.2 of this file is why.**
+The sentence that used to end the paragraph above read *"Similarly, §3.4 and §9
+recommend building at `-O2`; codegen flags are banned by user directive."*
+`src/` now builds at `-Os` + a 14-TU `-O3` hot list; `.text` **5,506,964 →
+2,753,700**, town FPS **11.6 → 20.6**. **§1.2's two confounds were re-derived
+independently and both held.** Evidence: `kb/state-log.md`, 2026-08-06 entry.
+The `src/`-editing half of the warning still stands in full — which is why
+Confound A's one-line fix is deliberately *not* applied (see §1.2).
 
 The headline compile result (§0), the full reading of `pc/CMakeLists.txt` and
 its two `-O2` confounds (§1), and the exact DC exclusion/fix list — the 12 TUs
@@ -47,8 +54,11 @@ tree. Items marked UNVERIFIED say so explicitly.
 >   `-Dlink=`, which renames both sides.
 > - **Char signedness (§2.x):** this image defaults to **SIGNED**, so
 >   `-fsigned-char` is belt-and-braces, not load-bearing.
-> - **Optimization flags anywhere below are moot** — `src/` builds at `-O0`
->   by user directive (CLAUDE.md, PLAN §3.2).
+> - ~~**Optimization flags anywhere below are moot** — `src/` builds at `-O0`
+>   by user directive (CLAUDE.md, PLAN §3.2).~~ **[STALE 2026-08-06 — the
+>   opposite is now true.]** `src/` builds at `-Os` plus a 14-TU `-O3` hot
+>   list (`dc/opt-lists.mk`). §0's "identical at `-O0` and `-O2`" result is
+>   therefore the live one, not the academic one. `kb/state-log.md` 2026-08-06.
 >
 > Treat the ABI facts as durable and every codegen-detail claim as unverified
 > until re-measured on GCC 15.2.
@@ -72,7 +82,12 @@ The *runtime* side (alignment) is the real risk and is analysed in §4.
 
 ### 1.1 The optimization-history comment block (lines 9–31)
 
-Reproduced because it is the single most load-bearing artifact in the base repo:
+Reproduced because it is the single most load-bearing artifact in the base repo.
+⚠️ **[STALE AS POLICY, 2026-08-06]** — and note *how* load-bearing: this comment
+block, with no log, no commit and no test case behind it, was the entire
+evidentiary basis of the project's `-O0` directive until it was audited and
+reversed. It remains an accurate quotation of an armhf build's history and
+nothing more; it says nothing about SH-4. `kb/state-log.md` 2026-08-06.
 
 ```
 # Decomp game code optimization level. History on the armhf device build:
@@ -125,6 +140,15 @@ music, addr=0xDC08093A"* (kb/perf.md). **The ARM `-O2` failure may have nothing
 to do with ARM.** Apply upstream's one-line fix before drawing any conclusion
 about `-O2` on SH-4.
 
+> ✅ **UPHELD 2026-08-06, and the advice is inverted.** This confound was
+> re-derived independently during the reversal audit and is now the leading
+> explanation for the armhf crash. **Do NOT apply upstream's one-line fix** —
+> `JUTRomFont::spFontHeader_` is still undefined in this tree *on purpose*.
+> Defining it would convert a loud link failure into a silent NULL deref. The
+> optimized image links today because `--gc-sections` drops the symbol's
+> callers; if an optimized build ever emits a reference, the linker is the
+> alarm. (Applying the fix would also require editing `src/`, which §1 forbids.)
+
 **Confound B — the `-O2` attempt was not isolated.** kb/perf.md #4: the change
 was *"-O2 in RELEASE flags **+ `-mcpu=cortex-a53 -mfpu=neon-vfpv4`** in
 build-armhf-docker.sh"*. VERIFIED in `pc/build-armhf-docker.sh:14`:
@@ -133,6 +157,12 @@ Enabling NEON simultaneously with `-O2` turns on auto-vectorization and
 64-bit VFP load/store forms — which is also the most likely origin of the
 separate `-O1` SIGBUS attributed to "unaligned LDRD/VFP". Neither `-O1` nor
 `-O2` was ever tested on ARM *without* the FPU/CPU change.
+
+> ✅ **UPHELD 2026-08-06.** Re-verified against `pc/build-armhf-docker.sh:14`
+> during the reversal audit. The LDRD/VFP mechanism **cannot occur on SH-4**
+> (max alignment 4, no 64-bit integer load — `kb/design-shelf-alignment.md`
+> §4.1), and the analogous SH-4 hazard is handled by a flag,
+> `-fno-store-merging`, not by a ban.
 
 ### 1.3 The exclusion filters (all 35, verbatim regex → 920 files removed)
 

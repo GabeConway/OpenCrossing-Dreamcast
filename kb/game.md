@@ -2,6 +2,30 @@
 
 - Game code: `src/` (decomp, gnu89 C, relies on UB — see the CMake UB-guard
   flags; treat as vendored, edit only for real bugs, keep upstream-diffable).
+  **On Dreamcast `src/` is never edited at all** — compat fixes go in
+  `dc/include/dc_prelude.h` (`CLAUDE.md` §1).
+- **What the decomp's UB actually is, measured (2026-08-06).** This was
+  folklore until `make warnscan` recompiled all 3,926 TUs at `-O2` with the
+  decomp's `-w` removed (132 s) and `tools/dcopt/warnscan_report.py` reduced
+  the 64,729 warnings to the classes an optimizer can act on: **35 missing
+  returns in 30 files, 99 uninitialised reads, 8 array-bounds, 3
+  sequence-point, 0 strict-aliasing.** Two things matter for anyone reasoning
+  about this code:
+  - **`emu64.c` — the hot file, and one of the four `.c` files compiled as
+    C++ — is CLEAN on missing returns.** That is the important one: in C++ a
+    missing return is UB that G++ turns into `__builtin_unreachable` and
+    deletes outright, whereas in ordinary C the caller merely gets garbage.
+  - **`jammain_2.c` is the one C++-compiled TU that is not clean** — C++ *and*
+    a missing return *and* 22 uninitialised reads, the most in the tree. It is
+    not quarantined because at `DC_AUDIO=0` it never ticks; it is the first
+    file to suspect the day audio work starts.
+  `DC_AUTOVAR_INIT=zero` A/Bs the 99 uninitialised reads. Detail:
+  `kb/state-log.md` 2026-08-06.
+- ⚠️ **The "decomp code cannot be optimized" rule is gone (2026-08-06).**
+  `src/` builds at `-Os` with a 14-TU `-O3` hot list on Dreamcast
+  (`dc/opt-lists.mk`); `.text` 5,506,964 → 2,753,700, town FPS 11.6 → 20.6.
+  The UB above is real, but it is handled with guard flags (`OPT_GUARDS`) and
+  a per-TU quarantine list, not with `-O0`.
 - **emu64** (`src/static/libforest/emu64/`): the game's own N64→GC graphics
   emulation layer — AC is an N64 game running on a GC shim. It emits GX
   calls; our pc_gx layer sits below it. It omits GXEnd (why

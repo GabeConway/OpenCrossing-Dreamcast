@@ -13,6 +13,36 @@ the real ELF: **every one was wrong, most by a lot, and two of the stated
 mechanisms were impossible.** Use `kb/levers.md` for numbers; use this
 document for the reasoning and the sources.
 
+> ## ⚠️ [STALE 2026-08-06] — §6.2's load-bearing sentence is VOID
+>
+> "**`.text` + `.rodata` + `.eh_frame` = 6,318,568 B and it does not move**" was
+> true only because `-O0` was mandated. **That directive was reversed on
+> 2026-08-06.** `src/` builds at `-Os` with a 14-TU `-O3` hot list
+> (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os` everywhere; `o0` =
+> byte-identical revert); `dc/src` moved to `-O3`. Measured on matched town
+> windows of the shipping build: `.text` **5,506,964 → 2,753,700 B**
+> (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**, `.bss`
+> unchanged (3,945,356 → 3,945,484 B).
+>
+> `.text` moved by 2,826,288 B at flat `-Os` — **more than any single line in
+> §6.2's closing table except #1, and more than every `.bss` lever the project
+> has landed put together.** Consequences, in order:
+>
+> - §6.2's `.text` row (−107,440 B "delete NES/texpack/viewer") is now the
+>   smallest part of what `.text` actually gave up. The table's total does not
+>   close as written; it is `-O0` arithmetic. **Do not patch the total — rebuild
+>   it from a current link.**
+> - §6.3's "there is no second technique of that magnitude available without
+>   touching codegen" is exactly right, and the answer was to touch codegen.
+> - §7's reserve item #12 (ScummVM-style overlays, "if `.text` becomes binding")
+>   is much further away than it was.
+> - §7 Step 0's three unknowns (KOS baseline, VRAM headroom, `__osMalloc` peak)
+>   are **still unmeasured** and still gate everything.
+>
+> ⚠️ The four numbers above are shipping-stubbed-town numbers; §6 is
+> full-asset-image arithmetic. Do not substitute one into the other. Evidence:
+> the 2026-08-06 entry of `kb/state-log.md`.
+
 ## 6. Does it add up? — the honest arithmetic
 
 ### 6.1 The target is not 6.5 MB. It is ~13.5 MB.
@@ -47,10 +77,12 @@ heap the ledger wants (buckets 6–12):
    REQUIRED CUT                            −14,451,476  [D]  (13.78 MiB)
 ```
 
-### 6.2 Where the 14.45 MB comes from, with `-O0` frozen
+### 6.2 Where the 14.45 MB comes from, with `-O0` frozen ⚠️ [STALE 2026-08-06 — `-O0` is not frozen; see the banner]
 
-`.text` + `.rodata` + `.eh_frame` = 6,318,568 B and **it does not move**, except
-for the ~890 KB of `pc_assets.c` strings that are data pretending to be rodata.
+~~`.text` + `.rodata` + `.eh_frame` = 6,318,568 B and **it does not move**~~,
+except for the ~890 KB of `pc_assets.c` strings that are data pretending to be
+rodata. **It moved: `.text` 5,506,964 → 2,753,700 B in the shipping profile.**
+The table below is `-O0` arithmetic, kept as history.
 
 | Bucket | Now | After | Δ | Technique |
 |---|---:|---:|---:|---|
@@ -77,6 +109,10 @@ Read that as "the plan closes on paper," not "the plan is safe."
 - **#1 is 57 % of the entire cut.** If the `src/data` demand-residency
   conversion lands at only half effectiveness, the whole thing fails. There is
   no second technique of that magnitude available without touching codegen.
+  ⚠️ **[2026-08-06] and touching codegen is what happened.** `-Os` + a 14-TU
+  `-O3` hot list took `.text` from 5,506,964 to 2,753,700 B. That is the second
+  technique of that magnitude, and this bullet named it correctly — it just was
+  not allowed at the time. `kb/state-log.md`, 2026-08-06.
 - **Bucket 6 (`JKRHeap` + `__osMalloc`, 4.0 MB) is still unmeasured.**
   `kb/mem-budget.md` §4.2 calls it "the single biggest unknown". Today the game
   hands the *entire* remaining system heap to `MallocInit`
@@ -187,7 +223,8 @@ Precedent ports
 - GameCube ARAM as paged virtual memory — <https://www.copetti.org/writings/consoles/gamecube/>
 
 Internal
+- `kb/state-log.md` — **2026-08-06 entry: the `-O0` reversal and the measured `.text`/`.data`/`.bss`/FPS table. Read it before quoting anything in §6**
 - `kb/mem-budget.md` — the 16 MB ledger, buckets 1–12, probes
-- `kb/design-shelf-hazards.md` §3.4 — the `-O2` size measurement this document withdraws
+- `kb/design-shelf-hazards.md` §3.4 — the `-O2` size measurement this document withdraws. ⚠️ **[2026-08-06] the withdrawal is withdrawn — §3.4 was right, and its recommendation is now the shipping build**
 - `dc/include/dc_mem_budget.h` — the ledger as constants
 - `dc/src/dc_aram.c` — the correct architectural template for a demand-resident tier

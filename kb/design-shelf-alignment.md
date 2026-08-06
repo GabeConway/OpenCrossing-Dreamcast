@@ -7,8 +7,18 @@ to `include/JSystem/JUtility/JUTFont.h`. **`src/` is never edited to make
 something compile** — every compat fix goes in `dc/include/dc_prelude.h`, which
 is force-included, and all 3917 TUs build that way today with zero exclusions.
 Read those steps as "here is the collision", not as "here is the fix".
-Similarly, §3.4 and §9 recommend building at `-O2`; codegen flags are banned by
-user directive. (Noted 2026-08-02 while splitting this document.)
+
+⭐ **2026-08-06 — the `-O2` ban is REVERSED, and §4.1 of this file is now
+LOAD-BEARING.** The sentence that used to end the paragraph above read
+*"Similarly, §3.4 and §9 recommend building at `-O2`; codegen flags are banned
+by user directive."* `src/` now builds at `-Os` + a 14-TU `-O3` hot list;
+`.text` **5,506,964 → 2,753,700**, town FPS **11.6 → 20.6**. §4.1's finding
+that GCC SH does not merge adjacent narrow stores was not left as a hope: it
+became a flag, **`-fno-store-merging`** in `OPT_GUARDS` (`dc/Makefile`),
+because SH-4 traps any misaligned store and GCC 15.2's store-merging pass is
+more aggressive than the GCC 9.3 this was probed on. §8's triage procedure is
+also live now — see the note on it. Evidence: `kb/state-log.md`, 2026-08-06
+entry. The `src/`-editing half of the warning still stands in full.
 
 SH-4 vs ARM alignment exposure, the KOS address-error triage hook, the ranked
 list of hazard sites in `src/`, and the fix idiom (§4); then the step-by-step
@@ -47,8 +57,11 @@ tree. Items marked UNVERIFIED say so explicitly.
 >   `-Dlink=`, which renames both sides.
 > - **Char signedness (§2.x):** this image defaults to **SIGNED**, so
 >   `-fsigned-char` is belt-and-braces, not load-bearing.
-> - **Optimization flags anywhere below are moot** — `src/` builds at `-O0`
->   by user directive (CLAUDE.md, PLAN §3.2).
+> - ~~**Optimization flags anywhere below are moot** — `src/` builds at `-O0`
+>   by user directive (CLAUDE.md, PLAN §3.2).~~ **[STALE 2026-08-06 — the
+>   opposite is now true.]** `src/` builds at `-Os` plus a 14-TU `-O3` hot
+>   list. This part in particular is no longer academic: §4's hazard list and
+>   §8's triage procedure are the live playbook. `kb/state-log.md` 2026-08-06.
 >
 > Treat the ABI facts as durable and every codegen-detail claim as unverified
 > until re-measured on GCC 15.2.
@@ -73,6 +86,13 @@ VERIFIED compiler facts (probe programs, `sh-elf-gcc -O2 -S`):
   not merge two adjacent `mov.w` loads into a `mov.l`, at `-O2`. It respects
   `STRICT_ALIGNMENT`. (ARM's store-merging under NEON is where the base port's
   `-O1` trouble plausibly came from.)
+  > ⚠️ **This bullet is why `-fno-store-merging` exists (2026-08-06).** It was
+  > measured on GCC 9.3; the shipping toolchain is GCC 15.2, whose
+  > store-merging pass is materially more aggressive, and it has **not** been
+  > re-probed. Rather than re-run the probe and bet on it, the optimized build
+  > carries `-fno-store-merging` in `OPT_GUARDS` (`dc/Makefile`). If someone
+  > re-probes GCC 15.2 and this bullet still holds, dropping the flag is a
+  > legitimate (small) size/speed lever — measure, do not assume.
 * `__builtin_memcpy(d,s,4)` with unknown alignment emits an out-of-line
   `memcpy` call — byte-safe.
 * `__attribute__((packed))` and `__attribute__((aligned(1)))` produce
@@ -88,6 +108,14 @@ tolerates everything. SH-4 raises a CPU address error on **any** misaligned
 > never been exercised by any existing port.** The base repo's clean ARM record
 > is *not* evidence that these sites are aligned. This is the single largest
 > unknown in M1/M2, larger than the `-O2` question.
+
+**Update 2026-08-06 — still the right ranking, and the `-O2` question is now
+settled the other way.** The port walks the whole town at `-Os` + `-O3` hot list
+with `crashes=0` and zero address-error panics in the runs logged in
+`kb/state-log.md` (2026-08-06 entry). That is evidence, but only Flycast
+evidence: the emulator's trapping behaviour for misaligned access is still the
+open question in §4.2, and **none of the optimized runs have been on hardware.**
+Read §4.3's hazard list as live, not historical.
 
 ### 4.2 Triage hook — VERIFIED available
 
@@ -195,15 +223,45 @@ the exception handler actually reports — do not pre-emptively pessimise #5
 
 ## 8. Triage procedure for a miscompile
 
+> ⭐ **LIVE AS OF 2026-08-06 — and Steps 3–5 are now scripted.** This section
+> was written as a contingency for a build that was then banned. `src/` is
+> optimized today, so this is the playbook. What exists in the tree, and
+> supersedes the hand instructions below:
+>
+> | this section says | what to actually run |
+> |---|---|
+> | Step 3, bisect the flag set | `DC_OPT_PROFILE=size` (flat `-Os`) then `DC_OPT_PROFILE=o0` (**byte-identical revert**) — two builds, ~96 s each |
+> | Step 4, bisect the TU set by directory | `tools/dcopt/bisect_o0.sh`, which binary-searches via `DC_OPT_O0_EXTRA` and enforces both sanity gates (the failure must reproduce with nothing quarantined, and vanish with everything quarantined) |
+> | Step 5, per-TU fallback list | `dc/opt-lists.mk` — the `-O3` hot list and the `-O0` quarantine list (currently empty), each entry carrying its evidence. **A stale path is a hard error, not a silent no-op.** |
+> | — (not anticipated here) | `DC_AUTOVAR_INIT=zero` A/Bs the 99 uninitialised reads `make warnscan` found; `tools/dcopt/predicate_town.sh` is the pass/fail predicate the bisect drives |
+>
+> Also new, and the thing to run *before* bisecting anything:
+> **`make warnscan`** recompiles all 3,926 TUs at `-O2` with the decomp's `-w`
+> removed (132 s) and `tools/dcopt/warnscan_report.py` reduces it. The standing
+> result: **35 missing returns in 30 files, 99 uninitialised reads, 8
+> array-bounds, 3 sequence-point, 0 strict-aliasing.** `emu64.c` — the hot
+> file, and one of the four compiled as C++ — is **clean** on missing returns;
+> `jammain_2.c` is the one C++-compiled TU that is not, and is the first
+> suspect the day audio is switched on. Full account: `kb/state-log.md`
+> 2026-08-06.
+
 You are not bisecting 4765 files. You are bisecting at most 3900, and in the
 common case you are not bisecting at all.
 
 ### Step 0 — before anything, apply the two known upstream fixes
-1. Add `OSFontHeader* JUTRomFont::spFontHeader_;` to
+⚠️ **[REVERSED 2026-08-06 — do NOT do either of these.]** Both edit `src/` or
+`include/`, which `CLAUDE.md` §1 forbids, and item 1 is now actively harmful:
+`JUTRomFont::spFontHeader_` is **deliberately left undefined** so that an
+optimized build referencing it fails loudly at link rather than dereferencing
+NULL. Item 2's real fix lives in `dc/include/dc_prelude.h`. Kept below as the
+description of the collision.
+
+1. ~~Add `OSFontHeader* JUTRomFont::spFontHeader_;` to
    `src/static/JSystem/JUtility/JUTFont.cpp` (upstream `4f428276`). Without
    this, `-O2` is *expected* to produce a wild-pointer crash and you will
-   waste a week bisecting a one-line bug.
-2. Add `#include <string.h>` to `include/JSystem/JUtility/JUTFont.h`.
+   waste a week bisecting a one-line bug.~~ The *diagnosis* is correct and is
+   the leading explanation for the armhf crash; the *fix* is not ours to apply.
+2. ~~Add `#include <string.h>` to `include/JSystem/JUtility/JUTFont.h`.~~
 
 ### Step 1 — make faults self-identifying (cost: ~1 hour, saves days)
 Install the address-error handler at boot, before anything else:

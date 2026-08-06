@@ -7,9 +7,49 @@ assembled from `kb/levers.md`, `kb/research-creative-ram.md`,
 the agreed S1→S4 order in `kb/STATE.md`; it details what S3's remainder and S4
 must contain, and what backs them up if their numbers erode.
 
-Rules honoured throughout: `-O0` on `src/` (layout levers only), no `src/`
+Rules honoured throughout: ~~`-O0` on `src/` (layout levers only)~~, no `src/`
 edits (scratch-tree rewrites + prelude only), every change gets a kill switch,
 stock 16 MB, and every idea was checked against `kb/closed.md` before listing.
+
+> ## 🔴 [2026-08-06] RULE 1 OF THIS PLAN NO LONGER EXISTS, AND IT WAS WORTH ~2.75 MB
+>
+> The `-O0` directive was reversed. `src/` builds at `-Os` with a 14-TU `-O3`
+> hot list (`DC_OPT_PROFILE=perf`, the default; `size` = flat `-Os`;
+> `o0` = byte-identical revert); `dc/src` moved `-O2` → `-O3`. Measured, matched
+> town windows:
+>
+> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
+> |---|---:|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,729,152 | **2,753,700** |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 | **2,224,832** |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 | **3,945,484** |
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06.
+>
+> **This is a plan whose §0 states "`.text`+`.data` cannot shrink (`-O0`); they
+> can only be *relocated*". That sentence is void.** `.text` fell 2,753,264 B
+> and `.data` fell 113,148 B by recompilation alone — no relocation, no
+> trampolines, no VRAM tier, no `src/` edit. For scale, that is comparable to
+> every `.bss` lever this project has landed put together.
+>
+> **What it does NOT change: `.bss` did not move (+128 B).** So **P1 is
+> untouched and is still the plan** — the 8.46 MB of asset destination `.bss` is
+> the binding term and no compiler flag reaches it. P2–P8 that attack `.bss`
+> stand. What changed is the *slack*: a large, cheap, kill-switched saving now
+> sits on the image-span side, so the ideas here justified purely by desperation
+> — and specifically anything proposing to relocate `.text` — should be
+> re-ranked rather than executed on the old arithmetic.
+>
+> ⚠️ **A new lever belongs in this plan's second rank and is not listed below:**
+> `DC_OPT_PROFILE=size` (flat `-Os`, hot list off) is `.text` 2,753,700 instead
+> of 2,680,676 — i.e. it gives back the hot list's bytes — at a measured cost of
+> 20.6 → 18.5 town FPS. It is a one-word build change with a kill switch, which
+> makes it the cheapest emergency image-span lever in the project and the right
+> thing to reach for before anything speculative here.
+>
+> ⚠️ **Every absolute figure in §0 below and in the closing table is from an
+> `-O0` link and is stale.** Do not re-derive a fit from them; re-link and read
+> the current map.
 
 ---
 
@@ -22,9 +62,17 @@ stock 16 MB, and every idea was checked against `kb/closed.md` before listing.
   over by       6,999,924
 ```
 
-`.text`+`.data` cannot shrink (`-O0`); they can only be *relocated* or their
-consumers moved. `.bss` must fall ~67% (ceiling 3,604,832). One inequality,
-never two pools — see `kb/STATE.md`.
+⚠️ **[STALE 2026-08-06] The numbers above are an `-O0` link.** `.text` and
+`.data` have both fallen (see the box at the top); `.bss` has not.
+
+~~`.text`+`.data` cannot shrink (`-O0`); they can only be *relocated* or their
+consumers moved.~~ 🔴 **[VOID 2026-08-06] — `.text` shrank 5,506,964 →
+2,753,700 B and `.data` 2,337,980 → 2,224,832 B by recompiling the same,
+unedited `src/`.** What replaces the claim: `.text`/`.data` are now a
+*codegen-sensitive* term with a live, kill-switched lever
+(`DC_OPT_PROFILE=size|perf|o0`), and relocation is the fallback rather than the
+only route. `.bss` must still fall (ceiling 3,604,832) and remains the binding
+term — no flag touched it. One inequality, never two pools — see `kb/STATE.md`.
 
 ---
 
@@ -277,7 +325,17 @@ Ordered by bytes-per-risk. None is required by §1's arithmetic.
 
 ## 5. Closed — do not resurface in this plan's name
 
-Per `kb/closed.md` and `kb/levers.md`: `-O1/-O2/-Os`/LTO/`-mrelax` (user
+🔴 **[2026-08-06] THE FIRST ENTRY IN THIS LIST WAS WRONG, AND IT IS THE ONE
+ENTRY THAT SHOULD HAVE BEEN RESURFACED.** `-O1/-O2/-Os` were reversed by the
+user on 2026-08-06 and were worth `.text` 5,506,964 → 2,753,700 B and town FPS
+11.6 → 20.6. The ban rested on a single unreproduced armhf session, never
+reproduced on SH-4. **Read `kb/closed.md`'s `-O0` post-mortem before treating
+any other row of this list as settled** — the general lesson is that a closed
+entry whose evidence came from another architecture is a claim, not a verdict.
+`-mrelax` and LTO are NOT covered by the reversal and remain closed.
+Evidence: `kb/state-log.md`, 2026-08-06.
+
+Per `kb/closed.md` and `kb/levers.md`: ~~`-O1/-O2/-Os`~~/LTO/`-mrelax` (user
 directive), MMU demand paging (DEAD — backing store costs ~4,000× the fault),
 AICA RAM as general storage / C arrays (DMA-only over 16-bit G2; it remains a
 *destination* for converted audio samples under stage B), `--icf` (no SH

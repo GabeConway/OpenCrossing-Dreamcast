@@ -1,26 +1,53 @@
 # RAM budget — the VOID 16 MB ledger (§4) and its open questions (§7)
 
 ⚠️ **This ledger does not close and cannot be used as written.** Killed
-2026-08-01 by two facts: (1) optimization was banned by user directive, so
+2026-08-01 by two facts: (1) ~~optimization was banned by user directive, so
 bucket 3's 2,600,000 B `.text` target is unreachable — the real `-O0` figure is
-6,318,568 B, 3.7 MB over a ledger whose entire margin was 1,750,608 B; and (2)
+6,318,568 B, 3.7 MB over a ledger whose entire margin was 1,750,608 B~~
+**[VOID 2026-08-06 — the ban was reversed; `.text` on the shipping build is
+2,753,700 B, i.e. bucket 3's target is reachable after all. Killing fact (1) no
+longer kills anything]**; and (2)
 the first real sh-elf link showed the 4 MB arena is *not* in `.bss`, so any
 ledger counting it there understates the overage by 4 MB (see
 `kb/mem-budget-m1-sh4.md` §8.1). The live replacement is `kb/ram-plan.md` +
 `kb/levers.md`, with current numbers in `kb/STATE.md`. Kept verbatim because
 other docs cite its bucket numbering (C1–C11, buckets 1–12), and because §7's
-open measurements — all except #2, which optimization policy closed — are
+open measurements — ~~all except #2, which optimization policy closed~~ **(#2
+was not closed by policy; it was ANSWERED on 2026-08-06 — see below)** — are
 still open. The corrections block below is the original document's own header.
+
+> ## ⚠️⚠️ CORRECTION TO THE CORRECTION (2026-08-06) — read this first
+>
+> **Correction 1 below is itself VOID.** The `-O0` directive was reversed on
+> 2026-08-06. `src/` builds at `-Os` with a 14-TU `-O3` hot list
+> (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os` everywhere; `o0` =
+> byte-identical revert); `dc/src` moved from `-O2` to `-O3`. Measured on
+> matched town windows of the shipping build: `.text` **5,506,964 →
+> 2,753,700 B** (2,680,676 at flat `-Os`), `.data` **2,337,980 →
+> 2,224,832 B**, `.bss` unchanged (3,945,356 → 3,945,484 B).
+>
+> So **this ledger's bucket 3 — `.text` 2,600,000 B via "`-O2` for hot TUs,
+> `-Os` for cold ones" — is the one line in it that was never wrong.** C1
+> described the shape of the change that shipped (the hot list is `-O3` rather
+> than `-O2`, and it is 14 TUs), and the shipping
+> `.text` is 2,753,700 B against that 2,600,000 B target: the same
+> neighbourhood, not the 3.7 MB miss the correction below claims. The ledger is
+> still void for the *other* reason (the 4 MB arena is not in `.bss`), and the
+> shipping numbers are from a different build line, so **do not re-close the
+> ledger by patching bucket 3 — rebuild it from a current link.** Likewise §7
+> open measurement **#2 is now ANSWERED**, not "closed by policy".
+> Evidence: the 2026-08-06 entry of `kb/state-log.md`.
 
 > ## ⚠️ Two corrections since this was written (2026-08-01, later same day)
 >
-> 1. **Every `-O2`/`-Os` remedy below is void.** Optimization is banned by
+> 1. ~~**Every `-O2`/`-Os` remedy below is void.** Optimization is banned by
 >    user directive (CLAUDE.md, PLAN §3.2) — `src/` builds at `-O0`, full
 >    stop. Wherever this document proposes `-O2` for hot TUs or `-Os` for cold
 >    ones (bucket 3, and the open-question list), read it as **"unresolved,
 >    must be closed by a layout-class lever instead"**: `--gc-sections`,
 >    `.bss` right-sizing, linker placement, moving data to `/cd`, or dropping
->    non-goal subsystems.
+>    non-goal subsystems.~~ **[VOID 2026-08-06 — see the block above. The
+>    `-O2`/`-Os` remedies are live again, and one of them shipped.]**
 > 2. **The real sh-elf link now exists**, so bucket 3 no longer needs an ARM
 >    proxy. Measured at `-O0`, all 3917 TUs, zero exclusions:
 >    **text 6,318,568 / data 2,638,852 / bss 13,526,548 = 22,483,968 B.**
@@ -102,6 +129,10 @@ Risks to the margin, honestly stated:
 - Bucket 3 (`.text` 2.6 MB) is a **[?]**. If SH-4 `-O2` output exceeds ARM
   `-O0` output, the whole 1.75 MB margin can evaporate on this one line.
   It is the first thing M1 must report.
+  ⚠️ **[ANSWERED 2026-08-06]** it does not. SH-4 at `-Os` + a 14-TU `-O3` hot
+  list gives `.text` **2,753,700 B** (2,680,676 B at flat `-Os`) against
+  5,506,964 B at `-O0`, on the shipping town build. This risk did not
+  materialise. `kb/state-log.md`, 2026-08-06.
 - Bucket 1 (KOS 1.0 MB) is quoted from `kb/research-dreamcast.md`'s "~2–4 MB
   practical", which we have **not verified** and which we believe is
   pessimistic because it likely folds in GLdc's own buffers (our bucket 11).
@@ -120,7 +151,7 @@ Risks to the margin, honestly stated:
 | # | Question | Decides | Milestone |
 |---|---|---|---|
 | 1 | Real `__osMalloc` + `JKRExpHeap` high-water over a full playthrough | bucket 6 (4.0 MB, 24 % of RAM) | M1, §6 probe 1+2 |
-| 2 | SH-4 `-O2`/`-Os` code size vs ARM `-O0` | bucket 3 (2.6 MB, 15 %) | M1, first link |
+| 2 | ~~SH-4 `-O2`/`-Os` code size vs ARM `-O0`~~ **ANSWERED 2026-08-06: `.text` 5,506,964 (`-O0`) → 2,680,676 (`-Os`) → 2,753,700 (shipping `-Os`+`-O3` hot list)** | bucket 3 (2.6 MB, 15 %) | ~~M1, first link~~ done |
 | 3 | Graph-ARAM 5 s working set | bucket 8 (512 KB) | M1, §6 probe 3 |
 | 4 | Distinct asset groups live per acre/room | bucket 7 (1.5 MB) | M1, §6 probe 4 |
 | 5 | KOS + GLdc real overhead on a hello-world | bucket 1 (1.0 MB) | M0 |
@@ -128,5 +159,8 @@ Risks to the margin, honestly stated:
 | 7 | `__osMalloc` fragmentation over a long session | the margin on bucket 6 | M3 |
 
 Until #1 and #2 report, treat the 10.4 % margin as provisional.
+⚠️ **[2026-08-06] #2 has reported (favourably); #1 has not.** The margin is
+still provisional, and the ledger is still void for the arena reason.
+Evidence: the 2026-08-06 entry of `kb/state-log.md`.
 
 ---

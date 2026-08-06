@@ -7,8 +7,16 @@ to `include/JSystem/JUtility/JUTFont.h`. **`src/` is never edited to make
 something compile** — every compat fix goes in `dc/include/dc_prelude.h`, which
 is force-included, and all 3917 TUs build that way today with zero exclusions.
 Read those steps as "here is the collision", not as "here is the fix".
-Similarly, §3.4 and §9 recommend building at `-O2`; codegen flags are banned by
-user directive. (Noted 2026-08-02 while splitting this document.)
+
+⭐ **2026-08-06 — the `-O2` ban is REVERSED.** The sentence that used to end the
+paragraph above read *"Similarly, §3.4 and §9 recommend building at `-O2`;
+codegen flags are banned by user directive."* `src/` now builds at `-Os` + a
+14-TU `-O3` hot list; `.text` **5,506,964 → 2,753,700**, town FPS **11.6 →
+20.6**. Two consequences inside this part: §5.4's `#pragma dont_inline` warning
+is now a real exposure rather than a note, and §10's third bullet (the ARM
+history is confounded, not explained) is the finding the reversal rests on.
+Evidence: `kb/state-log.md`, 2026-08-06 entry. The `src/`-editing half of the
+warning still stands in full.
 
 Inline asm, 32-bit `double`, `__attribute__`, CodeWarrior pragmas, endianness
 and `register` (§5); the libc/newlib gap list (§6); and the corrections this
@@ -47,8 +55,10 @@ tree. Items marked UNVERIFIED say so explicitly.
 >   `-Dlink=`, which renames both sides.
 > - **Char signedness (§2.x):** this image defaults to **SIGNED**, so
 >   `-fsigned-char` is belt-and-braces, not load-bearing.
-> - **Optimization flags anywhere below are moot** — `src/` builds at `-O0`
->   by user directive (CLAUDE.md, PLAN §3.2).
+> - ~~**Optimization flags anywhere below are moot** — `src/` builds at `-O0`
+>   by user directive (CLAUDE.md, PLAN §3.2).~~ **[STALE 2026-08-06 — the
+>   opposite is now true.]** `src/` builds at `-Os` plus a 14-TU `-O3` hot
+>   list. `kb/state-log.md` 2026-08-06.
 >
 > Treat the ABI facts as durable and every codegen-detail claim as unverified
 > until re-measured on GCC 15.2.
@@ -129,6 +139,14 @@ warning. **Note `#pragma dont_inline` is silently ignored** — if a TU depended
 on a function *not* being inlined for correctness, `-O2` will inline it. Worth
 remembering during triage.
 
+> ⚠️ **This is now a live exposure, and it is the one open item the 2026-08-06
+> reversal did NOT address.** `src/` builds at `-Os`/`-O3` today, so those four
+> `#pragma dont_inline` sites are being inlined. Nothing has misbehaved
+> (`crashes=0` across the optimized runs in `kb/state-log.md` 2026-08-06), but
+> nothing has *checked* either. If an optimized image misbehaves in a way the
+> warnscan classes do not explain, find the four sites and quarantine their
+> TUs with `DC_OPT_O0_EXTRA` before bisecting anything broader.
+
 ### 5.5 Endianness and struct layout
 
 SH-4 is little-endian ILP32, identical to the base port's targets. Every
@@ -205,6 +223,9 @@ headers** — the `JFWDisplay.cpp` failure in §2.4. That is the whole list.
 * **PLAN.md §3.2** frames the ARM `-O2`/`-O1` history as evidence about
   optimization on strict-alignment ISAs. §1.2 above shows both data points are
   confounded; treat them as *unexplained*, not as *explained by alignment*.
+  ✅ **ACCEPTED 2026-08-06 — this correction was right and PLAN §3.2 has been
+  rewritten around it.** The ban it argued against is gone; `src/` builds at
+  `-Os` + a 14-TU `-O3` hot list. `kb/state-log.md` 2026-08-06.
 * **New open question for PLAN §11:** `double` is 32-bit under
   `-m4-single-only`; `sys_matrix.c:Matrix_MtxtoMtxF` loses ~8 bits of
   fixed-point precision as a result (§5.2).

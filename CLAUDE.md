@@ -153,7 +153,7 @@ already produced two wrong numbers.
 | `kb/research-budget-evidence.md` | §3: the sourced numbers — KOS memory model, the bucket-1 double-count, `s_assets[]` |
 | `kb/research-budget-actions.md` | §4/§5/§7: revised ledger, ranked cheapest actions, bottom line |
 | `kb/research-budget-unfinished.md` | **§6: what is unfinished**, numbered, with next steps |
-| `kb/research-size-reduction.md` | **split index** — fitting in 16 MB without changing codegen; source of `kb/levers.md` L3, which re-costed every number here and found them all wrong. Parts: `-baseline`, `-techniques`, `-memory-map`, `-plan` |
+| `kb/research-size-reduction.md` | **split index** — fitting in 16 MB without changing codegen; source of `kb/levers.md` L3, which re-costed every number here and found them all wrong. Parts (⚠️ the files are `kb/research-size-*.md`, NOT `research-size-reduction-*`): `-baseline`, `-techniques`, `-memory-map`, `-plan` |
 | `kb/mem-budget.md` | **index** to the split ledger below. ⚠️ the §4 ledger itself is void |
 | `kb/mem-budget-m1-sh4.md` | **the part that is still true** — the real sh-elf link: section sizes, the `.bss` split, levers applied, dead ends, the boot-size gate |
 | `kb/mem-budget-armhf-working-set.md` | armhf-era: the 65 MB start, the 15.6 MB REL boot transient, boot residency, disc contents |

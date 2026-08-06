@@ -11,6 +11,17 @@ UNVERIFIED claim without re-measuring.
 section numbers are kept so existing citations (e.g. `BUILDING-DC.md` §2, §5.2)
 still resolve. For how to actually run a build, read `BUILDING-DC.md`.
 
+⚠️ **2026-08-06 — the optimization level these docs assume is gone.** Every
+file below was written while `src/` was pinned at `-O0`. It now builds at
+**`-Os` with a 14-TU `-O3` hot list** (`DC_OPT_PROFILE=perf`, the default;
+`size` = `-Os` everywhere; `o0` = byte-identical revert), and `dc/src` moved
+`-O2` → `-O3`. The per-TU lists live in `dc/opt-lists.mk` and the guard set
+`OPT_GUARDS` lives in `dc/Makefile`. Measured: `.text` **5,506,964 →
+2,753,700**, town FPS **11.6 → 20.6**, full rebuild **96 s**. Flag assembly is
+documented in `BUILDING-DC.md`, not here; the toolchain *facts* below (GCC
+15.2.0, newlib 4.6.0, KOS 2.3.0, `-m4-single-only`, float ABI, signed `char`)
+are unaffected. Reasoning: `kb/state-log.md`, 2026-08-06 entry.
+
 | file | old §§ | what it answers |
 |---|---|---|
 | `kb/toolchain-decision.md` | §0, §8, §9 | why build from source with `kos-chain`, what was rejected and why, fallbacks F1–F5, open items |

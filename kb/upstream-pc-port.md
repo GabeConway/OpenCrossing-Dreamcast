@@ -95,9 +95,46 @@ flip the default again without that number.
   `dc_pvr_texture.c` (1024×256 I8, 262,144 texels — 512 KB of `.bss` for an
   unlockable minigame on a target 7 MB over budget).
 
+## ⭐ Their "Compile everything at -O2" commit — the one that DID transfer
+
+**Added 2026-08-06.** This document previously ended by saying upstream
+optimises "with codegen enabled" and this port does not, so their perf work
+does not transfer. **Half of that is now wrong.** `src/` builds at `-Os` with a
+14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, `dc/opt-lists.mk`), and the win
+was the largest single result the project has had: `.text` **5,506,964 →
+2,753,700**, town FPS **11.6 → 20.6**, draw **79.1 → 45.4 ms**, µs/vertex
+**4.05 → 3.11** (`kb/state-log.md` 2026-08-06).
+
+The relevant upstream artifact is **`4f4282766de0f2be482b087207474a7e15beba3c`,
+"Compile everything at -O2" (2026-07-10)** — 9 lines in CMakeLists plus four in
+`JUTFont.cpp`. Two things in it are directly load-bearing here:
+
+1. **`-fno-strict-aliasing -fwrapv` are the whole guard set upstream needed.**
+   This port carries those plus four base-repo UB guards plus `OPT_GUARDS`
+   (`-fno-isolate-erroneous-paths-dereference`, `-fno-ipa-icf`, `-fno-ipa-sra`,
+   `-fno-store-merging`). If a DC-only optimizer problem ever appears, upstream
+   is the control: they run this same decomp optimized in production.
+2. ⚠️ **`OSFontHeader* JUTRomFont::spFontHeader_;` is the landmine.** The
+   decomp *declares* that static member and never defines it; `-O0` never
+   emits a reference and `-O2` does. Upstream's commit comment says exactly
+   that. It is the best explanation anyone has for the armhf "wild-pointer
+   crash loop from boot" that this project turned into a year-shaping `-O0`
+   ban — **a link bug, not a codegen bug.** **This tree still has no
+   definition, deliberately:** `--gc-sections` currently drops the symbol's
+   callers, and if an optimized build ever emits a reference the linker fails
+   loudly instead of the game dereferencing NULL. Do not port upstream's fix —
+   it would both silence the alarm and require editing `src/`, which
+   `CLAUDE.md` §1 forbids.
+
+Their *shader-variant* work (above) is still meaningless on a fixed-function
+PVR; that half of the old rule stands.
+
 ## The standing rule this reinforces
 
-Upstream optimises against a GPU and a modern CPU with codegen enabled. This
-port has a fixed-function GPU, an SH-4 at 200 MHz, and `-O0` mandatory on
-`src/`. **Their performance conclusions are not evidence about this target.**
-Their *correctness* fixes are worth reading; their perf work generally is not.
+Upstream optimises against a GPU and a modern CPU. This port has a
+fixed-function GPU and an SH-4 at 200 MHz. **Their GPU-side performance
+conclusions are not evidence about this target** — but "codegen is banned on
+`src/`" is **no longer part of that argument** (reversed 2026-08-06; the
+sentence here used to read "`-O0` mandatory on `src/`"). Their *correctness*
+fixes are worth reading; their *shader/GPU* perf work is not; their
+**build-flag** work is, and one line of it is a live landmine described above.

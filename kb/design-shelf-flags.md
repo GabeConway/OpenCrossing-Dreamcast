@@ -7,14 +7,52 @@ to `include/JSystem/JUtility/JUTFont.h`. **`src/` is never edited to make
 something compile** — every compat fix goes in `dc/include/dc_prelude.h`, which
 is force-included, and all 3917 TUs build that way today with zero exclusions.
 Read those steps as "here is the collision", not as "here is the fix".
-Similarly, §3.4 and §9 recommend building at `-O2`; codegen flags are banned by
-user directive. (Noted 2026-08-02 while splitting this document.)
+
+## ⭐ 2026-08-06 — §9 WAS RIGHT, AND IT WAS OVERRULED FOR NOTHING
+
+The sentence that used to sit here read: *"Similarly, §3.4 and §9 recommend
+building at `-O2`; codegen flags are banned by user directive. (Noted
+2026-08-02 while splitting this document.)"* **That ban is gone.** `src/` now
+builds at **`-Os`** with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the
+default; lists in `dc/opt-lists.mk`), and `dc/src` moved `-O2` → `-O3`.
+
+Measured on this tree, sh-elf GCC 15.2 (`kb/state-log.md`, 2026-08-06 entry):
+
+| | `-O0` | `-Os` + `-O3` hot list |
+|---|---:|---:|
+| `.text` | 5,506,964 | **2,753,700** |
+| town FPS | 11.6 | **20.6** |
+| `draw` ms | 79.1 | **45.4** |
+| µs/vertex | 4.05 | **3.11** |
+
+**This is the lesson, not a gloat.** §9 below concluded `-O2` was *"achievable,
+and probably mandatory"* and gave five arguments, two of which — the confounded
+ARM evidence (§1.2) and "SH-4 has no 64-bit load to merge" (§4.1) — are exactly
+what the 2026-08-06 audit re-derived from scratch. §3.4's extrapolation
+("`.text` ≈ 5.7 MB at `-O0` → ≈ 2.9 MB at `-O2` → ≈ 2.6 MB at `-Os`") was made
+from a 648-TU sample on GCC 9.3, and the GCC 15.2 whole-tree measurement landed
+squarely inside that bracket. The document was overruled by a single armhf session
+(2026-07-13) that was never reproduced on SH-4 and never isolated from a
+simultaneous `-mcpu=cortex-a53 -mfpu=neon-vfpv4` change. **When a measured
+recommendation is overridden by an anecdote from a different ISA, record the
+disagreement instead of deleting it** — that is the only reason this file was
+still here to be vindicated.
+
+⚠️ One thing §9 did *not* get right: it recommended plain `-O2` with a per-TU
+downgrade list. What shipped is `-Os` + a *hot* list, plus a guard set §9 never
+names — `OPT_GUARDS` = `-fno-isolate-erroneous-paths-dereference`,
+`-fno-ipa-icf`, `-fno-ipa-sra`, `-fno-store-merging`. The last one exists
+because of the store-merging/alignment analysis in §4.1
+(`kb/design-shelf-alignment.md`), read together with §7's alignment-trap
+semantics below: that analysis was measured on GCC 9.3 and never re-probed on
+GCC 15.2, so the flag is carried instead of the bet.
+
+---
 
 The per-flag justified compiler/linker flag set (§3), the consolidated SH-4
 GCC findings and probe output (§7), and the risk verdict on `-O2` (§9). Read
 before changing any flag in `dc/Makefile`.
-⚠️ §3.4's "ship `-O2`" recommendation is withdrawn as project policy — see
-`kb/research-size-reduction.md`. Part of `kb/design-shelf-hazards.md`, whose stub maps every § to its file.
+Part of `kb/design-shelf-hazards.md`, whose stub maps every § to its file.
 
 Written 2026-08-01. **Everything marked VERIFIED below was measured**, not
 reasoned about: `sh-elf-gcc 9.3.0` from the `einsteinx2/dcdev-kos-toolchain`
@@ -48,8 +86,12 @@ tree. Items marked UNVERIFIED say so explicitly.
 >   `-Dlink=`, which renames both sides.
 > - **Char signedness (§2.x):** this image defaults to **SIGNED**, so
 >   `-fsigned-char` is belt-and-braces, not load-bearing.
-> - **Optimization flags anywhere below are moot** — `src/` builds at `-O0`
->   by user directive (CLAUDE.md, PLAN §3.2).
+> - ~~**Optimization flags anywhere below are moot** — `src/` builds at `-O0`
+>   by user directive (CLAUDE.md, PLAN §3.2).~~ **[STALE 2026-08-06 — the
+>   opposite is now true.]** `src/` builds at `-Os` plus a 14-TU `-O3` hot
+>   list. Every optimization claim below is back in scope; re-measure it on
+>   GCC 15.2 rather than trusting the GCC 9.3 number. `kb/state-log.md`
+>   2026-08-06.
 >
 > Treat the ABI facts as durable and every codegen-detail claim as unverified
 > until re-measured on GCC 15.2.
@@ -77,6 +119,17 @@ All flags below were **individually VERIFIED to be accepted by `sh-elf-gcc
 | `-ffunction-sections -fdata-sections` (+ `-Wl,--gc-sections`) | KOS default. Directly attacks PLAN §3.1's ≤4 MB binary target. |
 | `-fsigned-char` | **Not strictly required.** VERIFIED: `sh-elf-gcc` defaults to **signed** char (`(char)-1 < 0` is true; `__CHAR_UNSIGNED__` is undefined). This **corrects PLAN §8 and kb/base-repo-map.md**, both of which state SH-4 GCC chars are unsigned. Keep the flag anyway — zero cost, documents intent, survives a toolchain swap. |
 | `-DTARGET_PC` **and** `-DTARGET_DC` | **Critical.** `#ifdef TARGET_PC` in `src/` guards the base port's little-endian correctness fixes — byte-wise texconv in `emu64.c:840-864`, the swapped `u16` pair ordering in `sys_matrix.c:_MtxF_to_Mtx`/`Matrix_MtxtoMtxF`, the overlap-safe `Jac_bcopy` in `sample.c:33`. `TARGET_PC` here means "not GameCube", not "PC". Dropping it silently reintroduces big-endian assumptions. Add `TARGET_DC` for genuinely DC-specific branches. |
+
+**Added 2026-08-06 — `OPT_GUARDS`, the flags this table could not have known
+it needed.** When `src/` stopped being `-O0`, four more went in (`dc/Makefile`):
+`-fno-isolate-erroneous-paths-dereference` (stops GCC turning a tolerated NULL
+deref into a trap — the "wild pointer" shape the armhf ban was blamed on),
+`-fno-ipa-sra` (the decomp calls 968 K&R `()`-declared functions, some *with*
+arguments), `-fno-store-merging` (§7: SH-4 traps any misaligned store —
+this is §4.1's analysis turned into a flag), `-fno-ipa-icf` (keeps crash
+addresses unambiguous during triage). The row above justifying
+`-fno-strict-aliasing`/`-fwrapv` by "upstream's `-O2` fix" is no longer a
+hypothetical: those two are now doing that job on this target too.
 
 ### 3.2 Explicitly NOT used
 
@@ -106,6 +159,13 @@ onto JKRHeap — with KOS this is fine (no interposition problem, so the base
 repo's `version_script.lds` hack is unnecessary on DC).
 
 ### 3.4 Optimization level — recommendation
+
+✅ **ADOPTED 2026-08-06, in the `-Os`-leaning form.** What shipped is `-Os`
+everywhere plus `-O3` on 14 measured-hot TUs, not `-O2` everywhere. The
+extrapolation below was made on GCC 9.3 from a 648-TU sample and proved
+accurate on GCC 15.2 over the whole tree: predicted ≈ 2.6 MB at `-Os`,
+measured **2,753,700 B** with the `-O3` hot list included (`kb/state-log.md`
+2026-08-06). The per-TU control that makes it safe is `dc/opt-lists.mk`.
 
 **Ship `-O2` for game code from day one, `-Os` for `src/data/` and cold TUs.**
 Rationale beyond speed — VERIFIED size measurement on a 648-TU representative
@@ -161,6 +221,21 @@ Re-run the §4.1 probe set against the M0 container.
 ---
 
 ## 9. Risk verdict on `-O2`
+
+> ✅ **CONFIRMED 2026-08-06.** Every "argument for" below survived contact with
+> the real toolchain; the "arguments against" were addressed with tooling
+> rather than with a ban. Specifically: (1) the whole tree still compiles, now
+> on GCC 15.2; (2) both ARM confounds were re-derived independently and one of
+> them — `JUTRomFont::spFontHeader_` — is **still undefined in this tree, on
+> purpose**, so an optimized build that starts referencing it fails at link
+> instead of dereferencing NULL; (3) argument 3 became a *flag*,
+> `-fno-store-merging`, rather than a bet; (5) `.text` fell 2,753,264 B.
+> Residual risk 1 (alignment) is covered by `-fno-store-merging` + the
+> address-error handler; residual risk 2 (`#pragma dont_inline`) is unaddressed
+> and remains the honest open item; residual risk 3 (newer GCC store-merging)
+> is what the flag exists for; residual risk 4 (Flycast) is unchanged —
+> **nothing in the 2026-08-06 measurement ran on hardware.**
+> Detail: `kb/state-log.md` 2026-08-06.
 
 **Achievable, and probably mandatory.** Confidence: moderate-high on
 "it compiles and links"; moderate on "it runs correctly without per-TU

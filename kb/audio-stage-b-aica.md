@@ -3,8 +3,53 @@
 §5 and §6 of `kb/audio-plan.md`, moved verbatim: the exact seam in the engine,
 the register mapping, the residency policy, and the `tools/` that must be built
 host-side. Read when starting the bank converter or the AICA backend.
-**Plan on stage B being required, not a fallback** — parent verdict unchanged:
-audio is a real risk, not a solved problem (`kb/audio-plan.md`).
+~~**Plan on stage B being required, not a fallback**~~ 🛑 **[STALE 2026-08-06 —
+see §0.]** Stage B is a fallback again until re-measured; audio is still a real
+risk, not a solved problem (`kb/audio-plan.md`).
+
+---
+
+## 🛑 0. "STAGE B IS REQUIRED" HAS LOST ITS EVIDENCE (2026-08-06)
+
+Stage B was never chosen on its merits. It was chosen because the software
+mixer's SH-4 cost was believed immovable: `src/` was frozen at `-O0` by
+directive, the modelled cost of stage A exceeded the frame budget at every
+voice count, and therefore the work had to move to hardware voices.
+
+**That directive was reversed on 2026-08-06.** `src/` now builds at `-Os` with
+a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default), with
+`DC_OPT_PROFILE=o0` retained as a byte-identical revert. `jaudio_NES` is `-Os`.
+**The premise is void, and with it the conclusion that stage B is required.**
+The CPU cost of software synthesis is now an **open question**, not a fixed
+input — and it moved in software's favour by an amount nobody has measured.
+
+**Do not scale the old audio numbers, here or anywhere else** — no honest
+factor exists. The only measured proxy is the frameskipped game-logic tick
+(all of `game_main`, draw skipped, general `src/` code — which `jaudio_NES` is
+too): **6.6 ms → 2.8 ms, a 58 % fall.** A proxy is not a result.
+
+**The decision gate:** an audio-on town smoke at `DC_OPT_PROFILE=perf` versus
+the same tree at `DC_OPT_PROFILE=o0`. Both profiles exist and a full rebuild is
+96 s, so this A/B is one line and it is cheap next to the tool chain in §6.
+**Do not take the stage-A-vs-stage-B decision until it has run.**
+
+### What this does and does not change about the work below
+
+- **Unaffected — the offline host-side tools (§6) and the bank format work.**
+  They are the same work whichever stage ships: `tools/vadpcm` and
+  `tools/audiocheck` are needed to validate *any* audio path, and stage A wants
+  the same extraction. Building them is still the right parallel task; what has
+  changed is that they are no longer racing a deadline.
+- **Unaffected — the sound-RAM findings.** Bank 153 missing usable AICA RAM by
+  70,472 B, the 1,900,544 B usable figure, the residency map: those are facts
+  about the hardware and the data, not about codegen.
+- **Reopened — everything scheduling-shaped.** Whether stage B is on the
+  critical path, whether `tools/bankconv` and `tools/aicapack` (§5.3, §6) are
+  needed at all, and whether the engine seam in §5.1 ever gets cut.
+- **Unaffected — the seam design itself (§5.1) is still correct if stage B is
+  built.** Nothing here needs redesigning; it may just not need doing.
+
+Evidence: `kb/state-log.md`, entry **2026-08-06**.
 
 ---
 

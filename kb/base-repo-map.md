@@ -77,17 +77,33 @@ lives at `0x8C000000` — re-derive (PLAN §11.6).
 ## Build system / flags
 
 - Hard 32-bit guard (`FATAL_ERROR` on 64-bit) — SH-4 is ILP32 ✅.
-- Game code today: **no -O** (`CMAKE_C_FLAGS_RELEASE` carries only NDEBUG +
-  UB guards). History in CMakeLists comments: **-O2 → wild-pointer crash loop
-  from boot; -O1 → hard SIGBUS intro train (unaligned LDRD/VFP)** on ARM.
-  Only emu64.c/emu64_utility.c proven -O2-safe. Platform code -O2,
+- Game code **in the base repo**: no -O (`CMAKE_C_FLAGS_RELEASE` carries only
+  NDEBUG + UB guards). History in CMakeLists comments: **-O2 → wild-pointer
+  crash loop from boot; -O1 → hard SIGBUS intro train (unaligned LDRD/VFP)**
+  on ARM. Only emu64.c/emu64_utility.c proven -O2-safe. Platform code -O2,
   `pc_gx_texture.c` -O3.
+  ⚠️ **DOES NOT TRANSFER — reversed 2026-08-06.** This row was read as a rule
+  for the DC port and it should not have been. On Dreamcast `src/` builds at
+  **`-Os` with a 14-TU `-O3` hot list** (`DC_OPT_PROFILE=perf`,
+  `dc/opt-lists.mk`) and `dc/src` at `-O3`: `.text` **5,506,964 → 2,753,700**,
+  town FPS **11.6 → 20.6**, draw **79.1 → 45.4 ms**, µs/vertex **4.05 →
+  3.11**. The ARM history above is one unreproduced session that also changed
+  `-mcpu`/`-mfpu` in the same commit, and its LDRD/VFP mechanism cannot occur
+  on SH-4. `kb/state-log.md` 2026-08-06.
 - UB guards: global `-fno-strict-aliasing -fwrapv`; release adds
   `-fno-delete-null-pointer-checks -fno-lifetime-dse
   -fno-aggressive-loop-optimizations -fno-strict-overflow`.
 - **Upstream flyngmt moved to -O2 everywhere** (commit `4f428276`,
   2026-07-10) with `-fno-strict-aliasing -fwrapv` — x86 only; the ARM/SH-4
   alignment class is untested there. See PLAN §3.2.
+  ⭐ **Re-read 2026-08-06: that commit is 9 CMake lines plus ONE definition,**
+  `OSFontHeader* JUTRomFont::spFontHeader_;` — a static member the decomp
+  declares and never defines, which `-O0` never references and `-O2` does. It
+  is the best available explanation for the armhf "wild-pointer crash loop",
+  i.e. a **link** bug wearing a codegen bug's clothes. ⚠️ The symbol is
+  **still undefined in this tree, deliberately**: an optimized build that
+  emits a reference fails loudly at link instead of dereferencing NULL. Do not
+  "fix" it (and it would mean editing `src/`, which §1 forbids).
 - `-fsigned-char` required (PPC chars signed; ARM GCC defaults unsigned).
   ⚠️ **CORRECTED 2026-08-02:** this used to say SH-4 GCC also defaults to
   unsigned `char`. It does not — confirmed on the GCC 15.2.0 in our SDK image
@@ -107,6 +123,13 @@ game speed. **Bottleneck is CPU game logic (at -O0), not GPU.** All 75
 remaining stutters work-dominated (median 24 ms, max 114 ms). Known open
 levers: per-TU -O2 triage, ISO read-ahead thread, CPU pre-transform. Kill-
 switch env vars exist for every optimization (`PC_NO_*`) — keep the pattern.
+
+⚠️ **These numbers are armhf and measured at `-O0`; do not scale them to the
+DC port's current state.** "Per-TU -O2 triage" is no longer an open lever
+here — DC spent it wholesale on 2026-08-06 (`-Os` + a 14-TU `-O3` hot list;
+town FPS 11.6 → 20.6, draw 79.1 → 45.4 ms). The kill-switch pattern survived
+the change and is the reason it was safe: `DC_OPT_PROFILE=o0` is a
+byte-identical revert.
 
 ## Game code stats
 

@@ -13,16 +13,25 @@ shipping build line (town keep list, `DC_ASSET_STUB=1`, `DC_SRC_SHRINK=1`,
 
 Matched town windows — same acre, `v` within 2 %, `cmds` within 3 %:
 
-| | `-O0` | `-Os` | `-Os` + `-O3` hot list |
-|---|---:|---:|---:|
-| `.text` | 5,506,964 | 2,680,676 | 2,729,152 |
-| `.data` | 2,337,980 | 2,224,832 | 2,224,832 |
-| `.bss` | 3,945,356 | 3,945,484 | 3,945,484 |
-| town FPS | 11.6 / 11.4 | 18.5 / 17.9 | **20.0 / 19.7** |
-| `draw` ms | 79.1 / 80.8 | 50.3 / 51.9 | **46.8 / 47.5** |
-| logic tick (`skip`) ms | 6.6 / 6.5 | 3.3 / 3.4 | **2.8 / 2.7** |
-| `xform` ms (`dc/`, already `-O2`) | 13.1 / 14.4 | 12.9 / 14.3 | 12.4 / 13.6 |
-| whole-run FPS p50 | 24.5 | 29.8 | 29.8 (at the cap) |
+| | `-O0` | `-Os` | `-Os` + `-O3` hot | **+ `dc/src` `-O3`** |
+|---|---:|---:|---:|---:|
+| `.text` | 5,506,964 | 2,680,676 | 2,729,152 | **2,753,700** |
+| `.data` | 2,337,980 | 2,224,832 | 2,224,832 | 2,224,832 |
+| `.bss` | 3,945,356 | 3,945,484 | 3,945,484 | 3,945,484 |
+| town FPS | 11.6 / 11.4 | 18.5 / 17.9 | 20.0 / 19.7 | **20.6 / 20.2** |
+| `draw` ms | 79.1 / 80.8 | 50.3 / 51.9 | 46.8 / 47.5 | **45.4 / 46.3** |
+| logic tick (`skip`) ms | 6.6 / 6.5 | 3.3 / 3.4 | 2.8 / 2.7 | 2.8 / 2.8 |
+| `xform` ms (`dc/`) | 13.1 / 14.4 | 12.9 / 14.3 | 12.4 / 13.6 | **9.9 / 10.9** |
+| `us/v` | 4.05 | 4.05 | 4.05 | **3.11** |
+| whole-run FPS p50 | 24.5 | 29.8 | 29.8 | 28.7 |
+
+⚠️ **The fourth column is a SEPARATE change** — `DC_OPT`, which governs
+`dc/src` and was never part of the `-O0` directive — landed the same day and
+screenshot-gated separately (`smoke-oc-dc-shot-dcO3-20260806-131303`). It is in
+this table because every later document quotes the end-to-end figure, and a
+table that stopped at column three would make those look wrong. Its own
+`run_report --vs` also shows `pvr_dropped 1,300 -> 0` on the autowalk path,
+which is unexplained and recorded, not claimed.
 
 **`xform` is the control and it did not move.** That is what proves the win is
 decomp code and not measurement drift: the phase this work could not touch —

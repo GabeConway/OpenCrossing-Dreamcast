@@ -67,6 +67,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake meson ninja-build pkg-config libisofs-dev \
  && rm -rf /var/lib/apt/lists/*
 
+> **Note on the `-O2` in `KOS_CFLAGS` below (clarified 2026-08-06).** That
+> `-O2` builds **KOS, newlib and kos-ports**, and always has. It was never the
+> level `src/` was compiled at, so it was not covered by — and did not violate
+> — the old `-O0` directive. Since the reversal, `src/` builds at `-Os` + a
+> 14-TU `-O3` hot list and `dc/src` at `-O3`; the game build assembles its own
+> `-O` and appends it *after* `$KOS_CFLAGS`, so this line still does not decide
+> it. Do not "fix" this line to match the game's level: changing it means
+> rebuilding the SDK image (~27 min cold) and re-validating the prebuilt
+> libraries. See `dc/opt-lists.mk`, `BUILDING-DC.md`, and `kb/state-log.md`
+> 2026-08-06.
+
 # environ.sh — KOS_*FLAGS must be "" before environ_base.sh, which appends.
 RUN printf '%s\n' \
   'export KOS_ARCH="dreamcast"' \

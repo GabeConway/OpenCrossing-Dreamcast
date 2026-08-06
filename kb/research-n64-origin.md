@@ -294,6 +294,14 @@ None of these are compiler optimizations. Right-sizing a static array,
 changing an `#ifdef`, and moving eager loads to demand loads are all source
 changes with no effect on codegen, so the `-O0` constraint is untouched.
 
+> ⚠️ **[2026-08-06] The `-O0` constraint is gone**, so this paragraph's
+> defensive framing is no longer needed — `src/` builds at `-Os` with a 14-TU
+> `-O3` hot list (`.text` 5,506,964 → 2,753,700). **The rankings below are
+> unaffected**: they are all `.bss`/`.data` residency items, and `-Os` moves
+> `.text` only. Nothing here competes with, or is made redundant by, the
+> optimization change; item 1 is still the milestone. `kb/state-log.md`
+> 2026-08-06.
+
 | # | Action | Saving | Confidence | Effort |
 |--:|---|---:|---|---|
 | 1 | **Demand-page `src/data/**` instead of reserving it in BSS.** Replace the `#ifdef TARGET_PC` empty-array placeholders + eager `pc_assets_init()` with a bounded, disc-backed pool keyed on scene/acre residency, using `tools/dcasset` output as the "cartridge". Natural granularity is already there: 2,080 object files, ~2.5 KB median group. | **≈ −7,000,000** (8,519,191 BSS reduced to a ~1.5 MB resident pool) | High on the size, medium on the residency set — needs a per-scene working-set trace | Large. This is a milestone, and it is the only thing that closes the gap. |

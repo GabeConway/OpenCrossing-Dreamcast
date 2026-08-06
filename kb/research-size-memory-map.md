@@ -14,6 +14,18 @@ mechanisms were impossible.** Use `kb/levers.md` for numbers; use this
 document for the reasoning and the sources.
 Sources cited here are indexed in `kb/research-size-plan.md` §8.
 
+> ⚠️ **[STALE 2026-08-06] the parent document's `-O0` premise is VOID.** `src/`
+> builds at `-Os` + a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` is
+> `-O3`. Measured on the shipping town build: `.text` **5,506,964 →
+> 2,753,700 B** (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**,
+> `.bss` unchanged (3,945,356 → 3,945,484). **Codegen was worth ~2.75 MB of
+> `.text`, roughly every `.bss` lever this project has landed put together.**
+> Nothing in §5 is falsified — VRAM, AICA, store queues and OCRAM behave exactly
+> as described — but the *deficit* these options were ranked against is now
+> megabytes smaller, so the case for the high-risk ones (a hand-placed
+> `.vram_bss`, reclaiming the low 64 KB) is correspondingly weaker. Evidence:
+> the 2026-08-06 entry of `kb/state-log.md`.
+
 ## 5. What else the Dreamcast memory map offers
 
 ### 5.1 VRAM (8 MB) as a store — real, with sharp edges

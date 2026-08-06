@@ -4,6 +4,32 @@ Produced 2026-08-01 by a dedicated creative pass, after six agents had already
 re-costed every known lever. Its brief was explicitly *not* to re-measure
 `kb/levers.md` — only to invent mechanisms absent from it.
 
+> ## ⚠️ [2026-08-06] THE INEQUALITY MOVED BY ~2.75 MB. RE-RANK BEFORE ACTING.
+>
+> The `-O0` directive was reversed. `src/` builds at `-Os` with a 14-TU `-O3`
+> hot list; `dc/src` moved `-O2` → `-O3`. Measured, matched town windows:
+>
+> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
+> |---|---:|---:|---:|---:|
+> | `.text` | 5,506,964 | 2,680,676 | 2,729,152 | **2,753,700** |
+> | `.data` | 2,337,980 | 2,224,832 | 2,224,832 | **2,224,832** |
+> | `.bss` | 3,945,356 | 3,945,484 | 3,945,484 | **3,945,484** |
+>
+> **`.text` fell 2,753,264 B and `.data` fell 113,148 B — the image-span side of
+> the fit inequality, which every idea here is denominated against.** `.bss` did
+> not move (+128 B), so **nothing on this page has been made redundant** — these
+> are all `.bss`/pool/second-tier ideas and they attack a term the compiler did
+> not touch. What changed is the *pressure*: the ranking here was written when
+> the gap was much wider, so ideas justified purely by "we are desperate for
+> bytes" (T5, T7, T8) deserve re-ranking against their risk. T1 is untouched and
+> still the strongest idea here.
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06. ⚠️ Read `kb/closed.md`'s
+> `-O0` post-mortem too — this page's "read `kb/closed.md` before acting"
+> instruction is still right, but the file it points at now records that a
+> closed entry resting on another architecture's evidence is a claim, not a
+> verdict.
+
 ⚠️ **These are CONCEPTS, not measurements.** Each carries its own confidence and
 its own cheapest-experiment line. Nothing here is banked. Treat every number as
 a claim until the named experiment runs. Read `kb/closed.md` before acting on
@@ -104,6 +130,16 @@ project.
 
 ## T3. The audio stage-B dividend — ~450–650 KB nobody has credited
 
+⚠️ **[2026-08-06] T3 IS CONTINGENT ON A VERDICT THAT HAS REOPENED.** This item's
+entire delivery condition is "stage B happens". `kb/audio-plan.md` §9's
+conclusion that AICA hardware voices are *required* rests on a software-mixing
+CPU cost measured and modelled against `-O0` code; jaudio is now `-Os` and that
+cost has **not** been re-measured. If software mixing turns out to fit, stage B
+may not happen — or may happen later — and **T3's 450–650 KB does not arrive**.
+Its closing sentence below ("The risk is *when*, not *whether*") is no longer
+supported: whether is open again. Do not bank T3 in any ledger until the audio
+re-measurement runs. Evidence: `kb/state-log.md`, 2026-08-06.
+
 `kb/audio-plan.md` §9 concludes AICA hardware voices are effectively *required*
 (software synthesis costs ~34% CPU even trimmed). The RAM ledger never banks
 what stage B **releases**. Measured from the ELF:
@@ -170,6 +206,15 @@ Measured floor: `_pc_load_src_*` = **87,736 B** (768 functions), `pc_assets.c`
 remaining text 10,088, one-shot `*bswap*` passes 4,824 → **102,648 B measured**,
 plausibly 150–300 KB with curated one-shot init (`sound_initial`,
 `initial_menu_init`, hardware init).
+
+⚠️ **[STALE 2026-08-06] Those are `-O0` `.text` sizes and T5 shrank with the
+image.** Whole-image `.text` went 5,506,964 → 2,753,700 B, so a `.text`-derived
+reclaim of this shape is roughly *halved* — call the floor unknown until
+re-measured from the current map, and do not carry 102,648 B forward. **T5's
+risk did not shrink with its payoff** (a "boot-only" function called later jumps
+into pool data, silently), so this item should be re-ranked *down*: the same
+danger for half the bytes, against a gap that is 2.75 MB less desperate.
+Evidence: `kb/state-log.md`, 2026-08-06.
 
 Moves the **image-span** side *and* hands the bytes to the pool — dual credit.
 

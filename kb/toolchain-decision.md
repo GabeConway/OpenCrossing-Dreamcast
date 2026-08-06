@@ -109,10 +109,21 @@ nondeterministically, set `--build-arg JOBS=1` and accept the wall clock.
    time in this document was measured at 4 cores.
 6. ~~Evaluate kos-ports `sh4zam` against `PLAN.md` §3.2's hand-rolled FTRV/FIPR
    plan before writing SH-4 math by hand.~~ ✅ **DONE 2026-08-05 — PASS.** The
-   hand-rolled path shipped and sh4zam would be compiled at `-O0` from `src/`.
+   hand-rolled path shipped. ⚠️ The clause that used to end this line —
+   "and sh4zam would be compiled at `-O0` from `src/`" — is **VOID as of
+   2026-08-06**: `src/` builds at `-Os` + a 14-TU `-O3` hot list, so header
+   `inline`s do inline now. The PASS still holds on its other grounds
+   (`kb/perf-dc.md` §3.7 measured this class at zero; sh4zam has no FSQRT).
    Reasons: `kb/closed.md`.
-7. Decide the GCC-15.2.0-vs-decomp question at M1. `PLAN.md` §3.2 documents this
-   codebase's history of optimizer breakage; fallback F3 (profile `14.4.0`,
-   matching sm64-dc's GCC 14) is one ARG change away.
+7. ~~Decide the GCC-15.2.0-vs-decomp question at M1. `PLAN.md` §3.2 documents
+   this codebase's history of optimizer breakage; fallback F3 (profile
+   `14.4.0`, matching sm64-dc's GCC 14) is one ARG change away.~~
+   ✅ **ANSWERED 2026-08-06 — GCC 15.2.0 stays.** The whole tree builds
+   optimized on it and the port walks the town: `src/` at `-Os` with a 14-TU
+   `-O3` hot list, `.text` **5,506,964 → 2,753,700**, town FPS **11.6 → 20.6**,
+   full rebuild 96 s. The "history of optimizer breakage" this item deferred to
+   was one armhf session, never reproduced on SH-4 and never isolated from a
+   simultaneous NEON/CPU-tuning change. Fallback F3 is not needed and is not
+   scheduled. Evidence: `kb/state-log.md` 2026-08-06.
 
 ---

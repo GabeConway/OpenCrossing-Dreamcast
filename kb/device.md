@@ -1,5 +1,12 @@
 # Target device & deployment
 
+⚠️ **armhf-era (Anbernic H700 handhelds, muOS/Knulli). Not the Dreamcast
+port.** Accurate on those devices; nothing here describes retail Dreamcast
+hardware, which is `CLAUDE.md` §1's hardware contract plus `kb/research-
+dreamcast.md`. Checked 2026-08-06 during the `-O0` reversal sweep
+(`kb/state-log.md`, 2026-08-06 entry): this file makes no optimization-level
+claims, so nothing in it needed correcting.
+
 ## Community-confirmed devices (beyond the dev device)
 
 - **RG28XX on Knulli** (2026-07-14 user report): "played for an hour,

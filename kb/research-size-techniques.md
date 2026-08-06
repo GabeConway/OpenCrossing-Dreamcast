@@ -14,10 +14,31 @@ mechanisms were impossible.** Use `kb/levers.md` for numbers; use this
 document for the reasoning and the sources.
 Sources cited here are indexed in `kb/research-size-plan.md` §8.
 
+> ## ⚠️ [STALE 2026-08-06] — the "Codegen? YES ⇒ DISQUALIFIED" column is VOID
+>
+> The `-O0` directive was reversed on 2026-08-06. `src/` builds at `-Os` with a
+> 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os`
+> everywhere; `o0` = byte-identical revert); `dc/src` moved to `-O3`. Measured
+> on matched town windows of the shipping build: `.text` **5,506,964 →
+> 2,753,700 B** (2,680,676 at flat `-Os`), `.data` **2,337,980 → 2,224,832 B**,
+> `.bss` unchanged (3,945,356 → 3,945,484 B).
+>
+> **Row 20 was the winner of this table and it was ranked out of it by policy.**
+> `.text` fell 2,826,288 B at flat `-Os` — larger than every row here except #1,
+> and larger than every `.bss` lever the project has actually landed put
+> together. Rows 19–22 are kept below with their reasoning; the *verdicts* are
+> history. A row is no longer disqualified for changing instruction selection —
+> it must be argued on its own merits, and rows 19/21/22 have not been re-argued
+> or measured on this target, so treat them as **open, unmeasured**, not as
+> adopted. ⚠️ The four numbers above are shipping-stubbed-town numbers; the rest
+> of this file is full-asset-image numbers. Do not mix them. Evidence: the
+> 2026-08-06 entry of `kb/state-log.md`.
+
 ## 2. Ranked technique table
 
 Ordered by **saving ÷ (risk × cost)**. "Codegen?" = does it alter instruction
-selection for `src/` decomp code.
+selection for `src/` decomp code. **[STALE 2026-08-06] a "YES" in that column is
+no longer a verdict** — see the banner above.
 
 | # | Technique | Codegen? | Expected saving | Cost | Risk |
 |---|---|---|---:|---|---|
@@ -39,10 +60,10 @@ selection for `src/` decomp code.
 | 16 | Compress `1ST_READ.BIN` | **No** | **0 RAM** (disc + load time only) | low | low |
 | 17 | Avoid KOS `romdisk`; read from `/cd` | **No** | 0 (not currently used) — but *never* regress into it | — | — |
 | 18 | Reclaim `0x8c000000`–`0x8c010000` by lowering `LOAD_OFFSET` | **No** | +64 KB | low | **high — BIOS/vector area** |
-| 19 | `-Wl,--relax` / `-mrelax` | **YES** | ~1–3 % `.text` [?] | low | **DISQUALIFIED** |
-| 20 | `-mspace`, `-Os`, `-O1`, `-O2`, LTO, `optimize` pragmas | **YES** | −48 % `.text` (2.5 MB) | low | **DISQUALIFIED by policy** |
-| 21 | `-mbigtable` | **YES** | *negative* (default is already 16-bit) | — | **DISQUALIFIED** |
-| 22 | `-mdalign`, `-mfmovd`, `-mpadstruct` | **YES** + ABI change | — | — | **DISQUALIFIED** |
+| 19 | `-Wl,--relax` / `-mrelax` | **YES** | ~1–3 % `.text` [?] | low | ~~DISQUALIFIED~~ **[2026-08-06] reopened, unmeasured** |
+| 20 | `-mspace`, `-Os`, `-O1`, `-O2`, LTO, `optimize` pragmas | **YES** | −48 % `.text` (2.5 MB) | low | ~~DISQUALIFIED by policy~~ **[2026-08-06] ADOPTED — `-Os` + `-O3` hot list. Measured `.text` 5,506,964 → 2,753,700 B** |
+| 21 | `-mbigtable` | **YES** | *negative* (default is already 16-bit) | — | **still no** — not policy, it makes things bigger |
+| 22 | `-mdalign`, `-mfmovd`, `-mpadstruct` | **YES** + ABI change | — | — | **still no** — ABI change, not a policy call |
 | 23 | `-fno-exceptions` / `-fno-asynchronous-unwind-tables` | partly | ≤ 7.4 KB total | low | not worth it |
 | 24 | Small-data / `-G` / `.sdata` | — | **does not exist on SH** | — | N/A |
 | 25 | `--icf` identical code folding | — | **not available for `sh-elf`** | — | N/A |
@@ -87,12 +108,27 @@ Two honest caveats about the flags, since they are already on:
   symbols. Verified on the host toolchain: a TU with `static int unused(){}` and
   `static const int unused_table[256]` produced neither symbol at `-O0`. **[M]**
   This is why 292 KB, not 2 MB — the decomp's dead code is mostly already gone.
+  ⚠️ **[2026-08-06]** the whole discard table above was measured on an `-O0`
+  build; the shipping build is `-Os` + `-O3`, so the 522,150 B figure and the
+  29,471-section count are `-O0`-era and have not been re-measured. The
+  conclusion ("`--gc-sections` is already spent, it is not the answer") is
+  unaffected. `kb/state-log.md`, 2026-08-06.
 
 Sources: <https://www.vidarholen.net/contents/blog/?p=729>,
 <https://gitlab.com/simulant/simulant/-/issues/160>,
 <https://fossies.org/linux/mruby/build_config/dreamcast_shelf.rb>
 
-### 3.2 Toolchain knobs that change codegen — **all DISQUALIFIED**
+### 3.2 Toolchain knobs that change codegen — ~~**all DISQUALIFIED**~~
+
+⚠️ **[STALE 2026-08-06] "it changes codegen" is no longer a verdict.** The
+`-O0` directive was reversed; see the banner at the top of this file. Each row
+below now stands or falls on its own argument, and only the `-Os`/`-O3` row has
+actually been measured on this target. `-mrelax` in particular is **reopened but
+unmeasured** — the reason given below for rejecting it ("it is exactly the class
+of change the `-O0` rule exists to forbid") no longer exists, but its stated
+interaction with `--gc-sections` diagnosis does. Do not turn it on without a
+measurement. Evidence for the reversal: the 2026-08-06 entry of
+`kb/state-log.md`.
 
 I read `gcc/config/sh/sh.opt` from GCC master directly rather than trusting the
 manual. **[S]** <https://github.com/gcc-mirror/gcc/blob/master/gcc/config/sh/sh.opt>
@@ -119,6 +155,14 @@ either. **[M]/[S]**
 Decomp code is a plausible ICF candidate (many near-identical actor
 constructors), but it is simply not reachable on this target. Rebuilding a
 gold SH backend is not a size-reduction project.
+
+⚠️ **[2026-08-06] there is now a second, compiler-side ICF and it is
+deliberately OFF.** GCC's own `-fipa-icf` is available once `src/` builds at
+`-Os`/`-O2`+, but `OPT_GUARDS` in `dc/Makefile` passes **`-fno-ipa-icf`** on
+purpose: folding identical functions makes a crash address ambiguous, and this
+port debugs by symbolising faults. That is a *debuggability* trade, not a
+correctness one — if `.text` ever becomes binding again it is a legitimate
+knob to re-cost. `kb/state-log.md`, 2026-08-06.
 
 ### 3.4 Debug info and symbol tables — **0 RAM, do it anyway for sanity**
 
@@ -226,6 +270,13 @@ are legal under the rule. But:
 
 **Verdict: keep on the shelf.** It is the right answer if, after §7's plan
 lands, `.text` is still the binding constraint. It is the wrong first move.
+
+⚠️ **[2026-08-06] and it just moved much further down the shelf.** The
+"aggressive carve is under 1 MB" bound above was measured against a 5.26 MB
+`-O0` `.text`. Optimization alone took `.text` to 2,753,700 B in the shipping
+profile — several times what any realistic overlay carve was ever going to buy,
+at none of the risk. Overlays are now a last resort behind a lever that is
+already banked. `kb/state-log.md`, 2026-08-06.
 
 Precedent for the *other* half of the technique — carving content so it never
 has to be resident — is the standard Dreamcast port answer: the DC ports of

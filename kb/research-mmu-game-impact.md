@@ -18,6 +18,10 @@ does not have to leave RAM. Read if you are tempted to relocate a section.
 **Mechanically yes.** A linker-script rule placing `*src/data/*(.bss .bss.*)`
 into an output section at a P0 VMA is a layout change, not a codegen change, and
 needs no edit to `src/`. It is legal under the `-O0` directive. [R]
+(⚠️ The `-O0` directive was **reversed 2026-08-06** — `src/` builds at `-Os`
+with a 14-TU `-O3` hot list; `kb/state-log.md` 2026-08-06. That only *widens*
+what is legal, so this clause is now redundant rather than wrong. **The MMU
+verdict is DEAD on its own grounds** and nothing here reopens it.)
 
 **Semantically it breaks in five places**, in rough order of severity: [R]
 
@@ -52,6 +56,14 @@ Raised mid-research: `.text`+`.rodata`+`.eh_frame` = 6,318,568 B and
 `+ .data` = 8,957,420 B **already exceeds the 8,035,072 B image budget with
 `.bss` at zero**, so if `-O0` freezes `.text`, does code have to leave RAM?
 
+> ⚠️ **The premise of that question is VOID as of 2026-08-06.** `-O0` no longer
+> freezes `.text`: `src/` builds at `-Os` with a 14-TU `-O3` hot list and
+> `.text` measures **2,753,700 B**, down from 5,506,964. The section's answer
+> ("no, and it probably doesn't need to") is *more* true than when it was
+> written, and the 6,318,568 / 8,957,420 B figures below are `-O0`-era and
+> stale. `kb/state-log.md` 2026-08-06. **The MMU verdict remains DEAD** for the
+> reasons in `kb/research-mmu-paging.md`, none of which involve optimization.
+
 **Two answers, and the second one matters more.**
 
 **(a) MMU paging cannot move `.text` either.** [R] Same blocker, worse case:
@@ -77,7 +89,9 @@ fits.** [M, from `kb/research-size-reduction.md` §1] The 8,957,420 B figure
 counts `.rodata` (1,053,740) and `.data` (2,638,852), and the existing plan
 already evicts **2,827,080 B of exactly those** — `s_assets[]` name strings
 −888,740 (§6.2 #3) and `src/data` tables to disc −1,938,340 (#2), neither of
-which is a codegen change. The plan's post-cut targets are `.text` 5,150,000 +
+which is a codegen change. **[2026-08-06: `.text` 5,150,000 is an `-O0` target
+and is stale — the measured figure is 2,753,700 B. Do not re-derive a budget
+from the line below.]** The plan's post-cut targets are `.text` 5,150,000 +
 `.rodata` 165,000 + `.data` 700,000 + `.eh_frame` 7,388 = **6,022,388 B**,
 leaving ~2.01 MB of the image budget for all remaining `.bss`.
 

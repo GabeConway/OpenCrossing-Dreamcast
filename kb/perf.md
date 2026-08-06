@@ -1,5 +1,17 @@
 # Performance knowledge & playbook
 
+⚠️ **armhf-era (RG-34XX SP / Cortex-A53 / Mali-G31). Not the Dreamcast port.**
+Accurate on game and decomp facts; every hardware and flag conclusion applies
+to a 1 GB handheld with a shader GPU, not to a 16 MB SH-4 with a
+fixed-function PVR. The Dreamcast port's perf record is `kb/perf-dc.md`.
+
+⚠️ **The "-O2 regression (IMPORTANT)" section below is the origin of a project
+directive that was REVERSED on 2026-08-06. Read this before quoting it.** Its
+observations stand as armhf observations; its conclusion — "game code is
+therefore pinned at no -O" — was carried onto Dreamcast where it was never
+reproduced, and it cost 2.8 MB of `.text` and ~9 FPS. See the labelled note on
+that section, and `kb/state-log.md` 2026-08-06.
+
 ## Current state (2026-07-13, post-P4, v0.3.0)
 
 Device log (P4 build, 183 gameplay PERF samples): **avg 56.4 fps, median
@@ -47,7 +59,34 @@ read-ahead, CPU pre-transform (see #14 findings).
    and persists driver binaries. Regenerate seed: copy a well-traveled
    shader_cache.bin and strip blobs (see kb/build-test.md).
 
-## -O2 regression (IMPORTANT)
+## -O2 regression (IMPORTANT) — ⚠️ [STALE AS A RULE, 2026-08-06]
+
+> **This section is the entire evidentiary basis of the `-O0` ban, and the ban
+> is gone.** Kept verbatim because the project keeps its wrong turns. What is
+> still true: these two failures were observed on armhf. What is not: the
+> inference "therefore decomp code cannot be optimized".
+>
+> - It is **one session** (2026-07-13). No log, no commit, no test case
+>   survives it — only the `pc/CMakeLists.txt:21-29` comment block.
+> - The `-O2` attempt was **never isolated**: it shipped together with
+>   `-mcpu=cortex-a53 -mfpu=neon-vfpv4` (`pc/build-armhf-docker.sh:14`), i.e.
+>   auto-vectorisation and 64-bit VFP load/store in the same change. Neither
+>   `-O1` nor `-O2` was ever tested on ARM without it.
+> - The `-O1` SIGBUS was attributed to "unaligned LDRD/VFP", which **cannot
+>   happen on SH-4** — max alignment 4, no 64-bit integer loads.
+> - The likeliest real cause of the `-O2` wild pointer is a **link** bug, not
+>   codegen: the decomp has no definition for `JUTRomFont::spFontHeader_`, and
+>   `-O2` starts emitting references to it. Upstream's "Compile everything at
+>   -O2" commit is one CMake hunk plus that one definition.
+> - Item 8 above contradicts this section on its own terms: `-O2` on
+>   `emu64.c` was **device-verified safe on armhf, on this same intro train
+>   scene**.
+>
+> Reversed 2026-08-06. On Dreamcast `src/` builds at `-Os` with a 14-TU `-O3`
+> hot list: `.text` **5,506,964 → 2,753,700**, town FPS **11.6 → 20.6**, draw
+> **79.1 → 45.4 ms**, µs/vertex **4.05 → 3.11**. Full account:
+> `kb/state-log.md` 2026-08-06. **If anyone resumes armhf work, the honest
+> status of the two failures below is "unexplained", not "explained".**
 
 -O2 on decomp game code: wild-pointer crash loop on device from frame 1
 (log: "CRASH #N in game frame ... addr=0xDC08093A", black screen with

@@ -134,6 +134,11 @@
 #endif
 #if DC_MTX_USE_FIPR
 #include <dc/fmath.h>      /* fipr, frsqrt, fsqrt */
+/* Vendored, pinned, MIT — dc/third_party/sh4zam/VENDORING.md says why it is
+ * here rather than taken from kos-ports. Used for shz_vec4_dot3 only: three
+ * FIPRs sharing one pinned left vector, which the KOS fipr() macro cannot
+ * express. */
+#include <sh4zam/shz_vector.h>
 #endif
 
 /* Types, copied from pc_mtx.c. Deliberately local to this translation unit,
@@ -216,6 +221,54 @@ static void dc_mtx_transpose44(const MtxP src, dc_mtx44 dst) {
 #define DC_MTX_XMTRX_CACHE 1
 #else
 #define DC_MTX_XMTRX_CACHE 0
+#endif
+
+/* ==========================================================================
+ * DC_MTX_FIPR_MULTVEC — the MultVec family through FIPR. MEASURED FLAT.
+ *                       DEFAULT 0. Turn on with -DDC_MTX_FIPR_MULTVEC=1.
+ * ==========================================================================
+ * ⚠️ THE RESULT FIRST, because the reasoning below is a good argument for a
+ * change that does not pay: matched town windows, 2026-08-06, this flag the
+ * only difference —
+ *
+ *      us/v      3.11 -> 3.12        draw   45.4 -> 45.5 ms
+ *      town FPS  20.6 -> 20.4        (run smoke-oc-dc-shz-20260806-133743)
+ *
+ * i.e. inside noise, and if anything slightly worse. The compiled function
+ * really did become 3 FIPRs and nothing else (verified with objdump: zero
+ * fmul, zero fadd, down from 9 and 9) — it simply is not where the frame is.
+ * The estimate that motivated it assumed ~13,900 calls/frame from the G_VTX
+ * source-vertex count; the backend only ever sees ~3,000 vertices, and at -O3
+ * the scalar form was already cheap.
+ *
+ * ⚠️ SO IT IS OFF, and the reason is precision, not speed: FIPR accumulates
+ * four products with a single final rounding and carries up to ~2^-21
+ * relative error where the scalar path is four correctly-rounded operations.
+ * That is a real risk on VERTEX POSITIONS, and a real risk buys nothing here.
+ * (The renderer accepts the same trade for LIGHTING at dc_pvr.c:188-191,
+ * where an error of that size cannot move a pixel.)
+ *
+ * KEPT REGARDLESS, and this is the part that was worth the trip: the
+ * residency branch this replaced is DEAD CODE, and the #else path below no
+ * longer pays a 12-word compare to discover that. Traced against
+ * dc/build/AnimalCrossing.map —
+ *
+ *   dc_xm_claim(..., DC_XM_KIND_TRANSPOSE) has exactly ONE call site, inside
+ *   PSMTXMultVecArray — which this file's own header already lists as
+ *   DISCARDED by --gc-sections, at address 0x00000000. Nothing in this game
+ *   calls it, and the header noted that while the code went on probing for it.
+ *   Therefore dc_xm_resident(m, DC_XM_KIND_TRANSPOSE) could never return 1,
+ *   the FTRV at the top of PSMTXMultVec had never once executed, and every
+ *   call ran 12 loads + 12 compares + a branch to reach the scalar fallback.
+ *
+ * AND WHY NOT XMTRX HERE, EVER. dl_G_VTX calls this twice per vertex with TWO
+ * DIFFERENT matrices — position_mtx at emu64.c:4709, model_view_mtx at :4711
+ * — alternating every iteration. SH-4 has one XF bank, so any resident design
+ * reloads it twice per vertex. The scalar path was the right call all along;
+ * only the compare in front of it was waste.
+ */
+#ifndef DC_MTX_FIPR_MULTVEC
+#define DC_MTX_FIPR_MULTVEC 0
 #endif
 
 #define DC_XM_KIND_NONE       0
@@ -383,13 +436,19 @@ void PSMTXInverse(const MtxP src, MtxP inv) {
  *
  * Kill switch: -DDC_MTX_NO_XMTRX_CACHE restores the unconditional reload. */
 void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
-#if DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
-    if (dc_xm_resident(m, DC_XM_KIND_TRANSPOSE)) {
-        float x = src->x, y = src->y, z = src->z, w = 1.0f;
-        mat_trans_nodiv(x, y, z, w);
-        dst->x = x; dst->y = y; dst->z = z;
-        return;
-    }
+#if DC_MTX_FIPR_MULTVEC
+    /* src and dst alias on every emu64 call site — compute all three
+     * components before storing any. */
+    const shz_vec3_t r = shz_vec4_dot3(
+        shz_vec4_init(src->x, src->y, src->z, 1.0f),
+        shz_vec4_init(m[0][0], m[0][1], m[0][2], m[0][3]),
+        shz_vec4_init(m[1][0], m[1][1], m[1][2], m[1][3]),
+        shz_vec4_init(m[2][0], m[2][1], m[2][2], m[2][3]));
+    dst->x = r.x; dst->y = r.y; dst->z = r.z;
+#elif DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
+    /* No residency probe: DC_XM_KIND_TRANSPOSE is never claimed in this image
+     * (see the block above). The probe could only ever fail, at 12 loads and
+     * 12 compares a call, twice per vertex. */
     {
         f32 x = m[0][0]*src->x + m[0][1]*src->y + m[0][2]*src->z + m[0][3];
         f32 y = m[1][0]*src->x + m[1][1]*src->y + m[1][2]*src->z + m[1][3];
@@ -414,13 +473,15 @@ void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
 
 /* Scale/Rotate only — the translation column is skipped. Same XMTRX, w = 0. */
 void PSMTXMultVecSR(const MtxP m, const Vec* src, Vec* dst) {
-#if DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
-    if (dc_xm_resident(m, DC_XM_KIND_TRANSPOSE)) {
-        float x = src->x, y = src->y, z = src->z, w = 0.0f;
-        mat_trans_nodiv(x, y, z, w);
-        dst->x = x; dst->y = y; dst->z = z;
-        return;
-    }
+#if DC_MTX_FIPR_MULTVEC
+    const shz_vec3_t r = shz_vec4_dot3(
+        shz_vec4_init(src->x, src->y, src->z, 0.0f),
+        shz_vec4_init(m[0][0], m[0][1], m[0][2], m[0][3]),
+        shz_vec4_init(m[1][0], m[1][1], m[1][2], m[1][3]),
+        shz_vec4_init(m[2][0], m[2][1], m[2][2], m[2][3]));
+    dst->x = r.x; dst->y = r.y; dst->z = r.z;
+#elif DC_MTX_USE_XMTRX && DC_MTX_XMTRX_CACHE
+    /* Same as PSMTXMultVec: the probe is provably dead here too. */
     {
         f32 x = m[0][0]*src->x + m[0][1]*src->y + m[0][2]*src->z;
         f32 y = m[1][0]*src->x + m[1][1]*src->y + m[1][2]*src->z;
