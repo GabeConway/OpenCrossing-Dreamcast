@@ -55,7 +55,66 @@ changes instruction selection is banned:
 
 ---
 
+## ⚠️ 2026-08-05 — THE RULE THAT INVALIDATES HALF THE POOL ARITHMETIC IN THIS FILE
+
+**In a stubbed image, an asset class's resident cost is what the KEEP LIST
+kept, not what the class totals.** `DC_ASSET_STUB` already dropped the rest: an
+unkept asset is a 1-byte `.bss` symbol and its load is suppressed. Every "pool
+X and free N bytes" claim written before this date costed N against the
+**non-stub** total, i.e. against bytes that have not been resident since S1.
+
+Consequence, and it inverts the purpose of a pool: **a pool converts MISSING
+into PRESENT at a bounded resident cost.** It usually does not save anything.
+Cost one against **the alternative — keeping the class — never against the
+class total.** Measured, on the two pools that landed:
+
+| | non-stub total | resident before | pool `.bss` | net | delivers |
+|---|---:|---:|---:|---:|---|
+| R2 villager textures | 1,154,944 | **90,464** | 78,872 | ~−4,700 | 21 species → 236 |
+| R3 villager models | 438,640 | **5,536** | 120,956 | **+115,424** | 1 species → 32 |
+
+R3 is justified only because keeping the same 32 species costs 194,400 B, so
+the pool is 73,568 B cheaper than the content it delivers.
+
+**The exception is the acres**, and it is the only one: all 242 summer acre TUs
+really are kept, so **815,024 B of `grd_s_*` `*_v` vertex arrays is genuinely
+resident** (measured off `dc/build/AnimalCrossing.map`, whose `.bss` sums
+exactly to the ELF's 4,059,052 B section). An acre pool would free real RAM.
+Full derivation: `kb/state-log.md`, 2026-08-05.
+
+---
+
 ## Applied
+
+### A5. R2 + R3 — the villager pools. **Content restoration, +110,724 B `.bss` net** (2026-08-05)
+
+`dc/src/dc_npctex.c` (236 villager texture sets out of 16 × 4,832 B slots,
+`DC_NPCTEX_POOL=0`) and `dc/src/dc_npcmdl.c` (32 villager model species out of
+16 × 7,552 B slots, `DC_NPCMDL_POOL=0`). Listed here because they are applied,
+**not because they are savings** — see the rule above.
+
+```
+R2   keep list removed  -90,464 | pool +78,872 | .rodata +~6,900 | net  ~-4,700
+R3   keep list removed   -5,536 | pool +120,956 | .rodata +~4,600 | net +115,424
+```
+
+Two mechanisms worth reusing, both the same trick R1 (A4) proved: the stub
+rewriter leaves each unkept asset as a **1-byte `.bss` symbol with a unique
+address**, so the pointer already sitting in a table is a unique *key* naming
+which asset the slot wants. R2 needs nothing more — villager textures reach the
+RDP through N64 segment registers bound per draw (`ac_npc_draw.c_inc:269-278`),
+so a load is 16 pointer writes into `npc_draw_data_tbl[]` (writable `.data`).
+R3 does, because a `Vtx` array is named by a linker-resolved `R_SH_DIR32` word
+baked into an initialised `Gfx`, and `emu64::seg2k0` returns any `0x8Cxxxxxx`
+address unchanged — so moving the array means moving 933 words across the 32
+species.
+
+⚠️ **The seam is NOT `--wrap`.** `--wrap=mNpc_SetNpcList` matches nothing on
+sh-elf and is not diagnosed — see `kb/traps.md`.
+
+⚠️ **16 fixed max-sized slots waste 15,248 B** against the 16 largest species
+packed end to end (105,584 B). A bump arena recovers it at the cost of a second
+failure axis; `DC_NPCMDL_SLOTS` / `DC_NPCTEX_SLOTS` are the knobs to cut first.
 
 ### A4. R1 — acre ground textures demand-loaded. **−81,856 B `.bss`** (2026-08-05)
 

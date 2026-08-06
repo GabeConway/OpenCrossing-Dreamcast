@@ -504,6 +504,15 @@ static int          s_alpha_env_texel;
 static unsigned int s_env_texel_batches;  /* how often it fired (cumulative)  */
 #endif
 
+#if !defined(DC_PVR_NO_TEVCONST) && !defined(DC_PVR_NO_TEVCONST_ALPHA) && \
+    !defined(DC_PVR_NO_TEVALPHA_LAST)
+/* Batches whose LAST TEV stage was `APREV * <constant>` and so contributed a
+ * constant factor to the vertex alpha. Same family as s_tex1_batches: without a
+ * count, a screenshot pair cannot be attributed to this path rather than to
+ * anything else that moved in the same build. */
+static unsigned int s_tevalpha_last_batches;
+#endif
+
 /* One 32-byte TA record into the deferred stream. Records are uniform, so once
  * the buffer is full it stays full for the rest of the frame — which is what
  * makes "drop the whole triangle" implementable as a position rollback. */
@@ -1236,6 +1245,30 @@ static int tev_fold_color(float* k0, float* k1) {
  * Kill switch: -DDC_PVR_NO_TEVCONST_ALPHA. -DDC_PVR_NO_TEVCONST kills both
  * halves, as before. */
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
+/* Non-zero if an alpha combiner arg names a CPU-known constant, and if so
+ * writes it to *out.
+ *
+ * GX_CA_A0/A1/A2 are 1/2/3 and index tev_colors[] directly: [0] is GX_TEVPREV,
+ * [1..3] are GX_TEVREG0..2. emu64 parks the N64 primitive colour in GX_TEVREG1
+ * and the environment colour in GX_TEVREG2 (emu64.c:3171,3180), so a PRIMITIVE
+ * alpha arg lands on tev_colors[2][3] — the alpha gDPSetPrimColor set.
+ *
+ * GX_CA_APREV is 0 and is NOT a constant; the `>= GX_CA_A0` test excludes it,
+ * which is the alpha-side twin of the GX_CC_CPREV trap in tev_creg_of(). */
+static int tev_aarg_const(const DCGXTevStage* ts, int arg, float* out) {
+    if (arg >= GX_CA_A0 && arg <= GX_CA_A2) {
+        *out = g_gx.tev_colors[arg][3];
+        return 1;
+    }
+    if (arg == GX_CA_KONST) {
+        int k = ts->k_alpha_sel;   /* GX_TEV_KASEL_K0_A..K3_A are 0x1C..0x1F */
+        if (k < 0x1C || k > 0x1F) return 0;
+        *out = g_gx.tev_k_colors[k - 0x1C][3];
+        return 1;
+    }
+    return 0;
+}
+
 static int tev_const_alpha(float* out) {
     const DCGXTevStage* ts;
     int konst;
@@ -1324,23 +1357,117 @@ static int tev_const_alpha(float* out) {
         return 0;
     }
 
-    /* GX_CA_A0/A1/A2 are 1/2/3 and index tev_colors[] directly: [0] is
-     * GX_TEVPREV, [1..3] are GX_TEVREG0..2. emu64 parks the N64 primitive
-     * colour in GX_TEVREG1 and the environment colour in GX_TEVREG2
-     * (emu64.c:3171,3180), so a PRIMITIVE alpha arg lands on tev_colors[2][3]
-     * — the alpha gDPSetPrimColor set. */
-    if (konst >= GX_CA_A0 && konst <= GX_CA_A2) {
-        *out = g_gx.tev_colors[konst][3];
-        return 1;
-    }
-    if (konst == GX_CA_KONST) {
-        int k = ts->k_alpha_sel;   /* GX_TEV_KASEL_K0_A..K3_A are 0x1C..0x1F */
-        if (k < 0x1C || k > 0x1F) return 0;
-        *out = g_gx.tev_k_colors[k - 0x1C][3];
-        return 1;
-    }
-    return 0;
+    /* Register indexing and the GX_CA_KONST selector both live in
+     * tev_aarg_const() above; this call is that code verbatim. */
+    return tev_aarg_const(ts, konst, out);
 }
+
+/* --- The LAST TEV stage: `alpha = APREV * <constant>` ----------------------
+ *
+ * tev_const_alpha() above reads STAGE 0 and nothing else, so a constant that
+ * the combiner applies at the END of the chain is dropped. The shape that
+ * matters is `A = APREV * PRIM.a`: emu64 emits it as the final stage of seven
+ * combine_manual cases (emu64.c:1574,1588,1602,1616,1630,1644,1658 — all
+ * 3-stage, all `GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_APREV,
+ * GX_CA_A1, GX_CA_ZERO)`), and combine_auto reproduces it for any two-cycle
+ * combiner whose cycle-1 alpha is `COMBINED, 0, PRIMITIVE, 0` and whose
+ * cycle-0 alpha does not touch TEXEL1 (emu64.c:1306; the TEXEL1 reject that
+ * sends the rest to combine_manual is emu64.c:1197-1207). Under GX's
+ * `d + (1-c)*a + c*b` with a = d = ZERO that is exactly APREV * konst.
+ *
+ * COUNTED, not guessed: 28 of the 5,512 16-argument gsDPSetCombineLERP sites in
+ * src/ end their alpha with `COMBINED, 0, PRIMITIVE, 0`, and 3 of those reach
+ * combine_auto. So this is a narrow fix by construction, and the counter below
+ * is how it is judged rather than this paragraph.
+ *
+ * PRIM.a is where the game keeps the per-frame fade of an effect. The named
+ * instance is the outdoor character shadow: `ef_shadow_out.c:34-35` is
+ *     gsDPSetCombineLERP(0,0,0,PRIMITIVE, TEXEL0,0,TEXEL1,0,
+ *                        0,0,0,COMBINED,  COMBINED,0,PRIMITIVE,0)
+ *     gsDPSetRenderMode(G_RM_FOG_SHADE_A, G_RM_ZB_CLD_SURF2)
+ * — RGB is a flat dark PRIMITIVE with no texture at all, so the ALPHA is the
+ * entire shape of the primitive, and gDPSetPrimColor's `a` is
+ * play->kankyo.shadow_alpha (m_actor_shadow.c:54,262-271), the thing that makes
+ * a shadow faint rather than opaque. Drop any alpha factor and a flat dark quad
+ * is painted instead: kb/tev-map-table.md config #007.
+ *
+ * ⚠️ AND THIS DOES NOT FIRE ON #007. Read against emu64 rather than against the
+ * combiner, #007 is TWO stages, not three (emu64.c:1888-1897):
+ *     stage0 alpha = (ZERO, TEXA,  A1,    ZERO) = TEXEL0.a * PRIM.a
+ *     stage1 alpha = (ZERO, TEXA,  APREV, ZERO) = APREV * TEXEL1.a
+ * The constant is on stage 0 in the MIRRORED spelling, where tev_const_alpha()
+ * above finds it and then discards it at its `konst != GX_CA_A0` narrowing —
+ * and the last stage is APREV * TEXEL1.a, not APREV * konst, so
+ * tex1_alpha_active()'s (ZERO, APREV, TEXA, ZERO) test misses it too. #007 is
+ * therefore losing BOTH of its alpha factors today, and neither loss is this
+ * function's to repair: the first wants -DDC_PVR_TEVCONST_ALPHA_WIDE (or a
+ * narrower A1 arm), the second wants the mirrored shape in tex1_alpha_active().
+ * Both are already-documented, already-regressed widenings and both want their
+ * own screenshot pair.
+ *
+ * MULTIPLIES, never overwrites. GX chains the stages, so a stage-0 constant and
+ * a last-stage constant are two factors of one product; taking the last one
+ * alone would silently delete the first. When stage 0 declined, the constant
+ * REPLACES the shade alpha, exactly as the stage-0 path already does, because
+ * the shade alpha is not an opacity in this game (see the punch-through block
+ * in dc_gx_backend_submit) — the one thing that would make that a loss is a
+ * RASA anywhere earlier in the chain, and that is guarded below.
+ *
+ * DELIBERATE LIMITS, each failing CLOSED:
+ *   - the last stage only, and only when there IS a last stage other than 0.
+ *     APREV on stage 0 reads whatever GX_TEVPREV was left holding.
+ *   - `(a,b,c,d) == (ZERO, APREV, <const>, ZERO)` and nothing else. The
+ *     mirrored `(ZERO, <const>, APREV, ZERO)` is the same product but has zero
+ *     sites (checked across all 33 combine_manual cases), so it is not
+ *     accepted on speculation.
+ *   - alpha_op must be GX_TEV_ADD. emu64::combine() resets every stage's op to
+ *     ADD before each combine (emu64.c:1974-1976) and combine_auto re-arms SUB
+ *     (emu64.c:1314), so a SUB here is a real subtract and not stale state.
+ *   - no earlier stage may reference GX_CA_RASA. combine_manual has one such
+ *     case (emu64.c:1552) and combine_auto can emit it from an N64 SHADE term
+ *     (the tbla row at emu64.c:324); there the rasterised alpha this is about
+ *     to overwrite is a term GX really wanted.
+ *
+ * NOT in header_key(): this changes the vertex colour bytes, not one field that
+ * compile_header() reads, so a batch that takes this path and one that does not
+ * compile to the same poly header and must keep sharing the cache entry.
+ *
+ * Kill switch: -DDC_PVR_NO_TEVALPHA_LAST restores today's behaviour exactly.
+ * -DDC_PVR_NO_TEVCONST_ALPHA and -DDC_PVR_NO_TEVCONST still kill it with the
+ * rest of the family. Counter: `tevalpha_last batches=` in dc_pvr_report(). */
+#ifndef DC_PVR_NO_TEVALPHA_LAST
+static int tev_const_alpha_last(float* out) {
+    const DCGXTevStage* ts;
+    int ns, si;
+
+    ns = g_gx.num_tev_stages;
+    if (ns < 2)                       /* stage 0 belongs to tev_const_alpha */
+        return 0;
+    /* Clamp to the ARRAY bound, not DC_GX_MAX_TEV_STAGES — that constant is an
+     * observation (kb/tev-map-table.md §2), and indexing past 16 would be a
+     * read out of g_gx.tev_stages[]. */
+    if (ns > (int)(sizeof g_gx.tev_stages / sizeof g_gx.tev_stages[0]))
+        return 0;
+
+    ts = &g_gx.tev_stages[ns - 1];
+    if (ts->alpha_op != GX_TEV_ADD)
+        return 0;
+    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_d != GX_CA_ZERO)
+        return 0;
+    if (ts->alpha_b != GX_CA_APREV)
+        return 0;
+    if (!tev_aarg_const(ts, ts->alpha_c, out))
+        return 0;
+
+    for (si = 0; si < ns - 1; si++) {
+        const DCGXTevStage* p = &g_gx.tev_stages[si];
+        if (p->alpha_a == GX_CA_RASA || p->alpha_b == GX_CA_RASA ||
+            p->alpha_c == GX_CA_RASA || p->alpha_d == GX_CA_RASA)
+            return 0;
+    }
+    return 1;
+}
+#endif /* !DC_PVR_NO_TEVALPHA_LAST */
 #endif /* !DC_PVR_NO_TEVCONST_ALPHA */
 #endif /* !DC_PVR_NO_TEVCONST */
 
@@ -2616,6 +2743,21 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 #endif
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
     have_tevalpha = tev_const_alpha(&tevalpha);
+#ifndef DC_PVR_NO_TEVALPHA_LAST
+    {
+        float klast;
+        if (tev_const_alpha_last(&klast)) {
+            /* PRODUCT, not replacement. GX chains its stages, so a stage-0
+             * constant and a last-stage constant are two factors of one alpha;
+             * assigning here instead of multiplying would delete the first.
+             * Both are per-batch — the TEV stages and the TEV registers cannot
+             * change inside one batch. */
+            tevalpha = have_tevalpha ? (tevalpha * klast) : klast;
+            have_tevalpha = 1;
+            s_tevalpha_last_batches++;
+        }
+    }
+#endif
 #endif
 #endif
 
@@ -2862,7 +3004,13 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
              * -DDC_PVR_TEVCONST_ALPHA_RESCUE_ONLY narrows this to the vertices
              * that are currently fully invisible. Use it to separate "the font
              * came back" from "hundreds of world batches changed alpha" in one
-             * build, without giving up the fix. */
+             * build, without giving up the fix.
+             *
+             * `tevalpha` is now the PRODUCT of stage 0's constant and the last
+             * stage's, either of which may be absent — tev_const_alpha_last()
+             * above carries why they multiply. Nothing here changes: one
+             * constant or two, the vertex alpha it writes is still a single
+             * CPU-known scalar. */
             /* ⚠️ NEVER on a punch-through batch. The PT block above forces the
              * vertex alpha opaque so the comparator sees the texel alpha
              * alone; letting a constant land here afterwards would put a
@@ -3033,6 +3181,14 @@ void dc_pvr_report(void) {
             s_tris_dropped, s_prim_unsupported);
 #ifndef DC_PVR_NO_TEX1ALPHA
     DC_LOGE("[DC/PVR] tex1alpha batches=%u of %u\n", s_tex1_batches, s_batches);
+#endif
+#if !defined(DC_PVR_NO_TEVCONST) && !defined(DC_PVR_NO_TEVCONST_ALPHA) && \
+    !defined(DC_PVR_NO_TEVALPHA_LAST)
+    /* How many batches had a constant recovered from their LAST TEV stage. 0
+     * means the shape stopped matching (a dc_gx.c recording change, or emu64
+     * taking a different combine path) and a screenshot change is NOT this. */
+    DC_LOGE("[DC/PVR] tevalpha_last batches=%u of %u\n",
+            s_tevalpha_last_batches, s_batches);
 #endif
 #ifndef DC_PVR_NO_PUNCHTHRU
     /* Emitted next to [PERF] (dc_vi.c calls this straight after it, every 30

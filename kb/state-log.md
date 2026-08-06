@@ -161,6 +161,117 @@ Two hazards banked with it:
   [UNMEASURED]. The follow-up is a sorted batch helper mirroring
   `dc_keep_sweep()`.
 
+### R2 and R3 landed — and building them exposed an accounting error that runs
+### through the whole RAM plan, and INVERTS what a pool is for
+
+`dc/src/dc_npctex.c` (R2, villager textures, 16 slots) and `dc/src/dc_npcmdl.c`
+(R3, villager models, 16 slots) are in the tree. The interesting result is not
+either pool; it is what costing them revealed.
+
+**Every pool claim in the kb was costed against the NON-STUB total, as if those
+bytes were resident today.** `kb/STATE.md`'s "the RAM plan from here is a POOL"
+section, `kb/levers.md` L1, `kb/ram-plan.md` P1/P2, `kb/plan-stages.md` S4 and
+`kb/research-creative-ram.md` T1 all read "villager textures 1,154,944 B",
+"~992 KB of NPC textures", "60 of 72 villager models are still stubbed" — and
+then present a pool as **freeing** that. It does not. `DC_ASSET_STUB` already
+dropped those bytes: an unkept asset is a **1-byte `.bss` symbol** and its load
+is suppressed, so what a stubbed image pays for an asset class is what the
+**keep list kept**, not what the class totals.
+
+Measured in the shipping tree (`dc/build/AnimalCrossing.map`, keep list
+`tools/dcstub/keeplist-town.txt`):
+
+| class | non-stub total | RESIDENT before R2/R3 | why |
+|---|---:|---:|---|
+| villager textures | 1,154,944 B / 276 sets | **90,464 B** | 21 of the 236 villager sets were kept (37 of 276 files, the other 16 being special NPCs); 215 villager species had **no texture at all** |
+| villager models | 438,640 B / 72 files | **5,536 B** | `cbr_1` alone. The other 11 kept `mdl/*.c` are special-NPC skeletons, not villagers, so 31 of the 32 villager species had **no vertices** |
+
+**So the pools do not free RAM. They convert MISSING into PRESENT at a bounded
+resident cost.** The honest ledgers:
+
+```
+R2 — villager textures, 16 x 4,832 B
+  keep-list entries removed            -90,464 B .bss
+  pool + zero block + bookkeeping      +78,872 B .bss   (measured off the map)
+  generated map                        +~6,900 B .rodata
+  net                                   ~-4,700 B
+  content delivered:  21 species with textures  ->  236
+
+R3 — villager models, 16 x 7,552 B
+  resident villager-model .bss before     5,536 B   (cbr_1, and only cbr_1)
+  pool + bookkeeping                   +120,956 B   (measured; the file's
+                                                     header rounds it to
+                                                     120,960)
+  generated .rodata                      +~4,600 B
+  keep list given back                    -5,536 B
+  net                                  +115,424 B .bss, +~4.6 KB .rodata
+  content delivered:  1 villager species with geometry  ->  32
+```
+
+**R3 SPENDS bytes.** The comparison that justifies the pool's *shape* is not
+"today", it is "the alternative": keeping all 32 villager `mdl/*.c` costs
+194,400 B, so the pool is **73,568 B cheaper than the content it delivers**.
+That is the only arithmetic a pool proposal is entitled to make.
+
+Also worth stating once, since it is the obvious follow-up lever: **16
+max-sized slots waste 15,248 B** against the 16 largest species packed end to
+end (105,584 B). A bump arena recovers that, at the price of a second failure
+axis ("slots free but bytes exhausted"). `DC_NPCMDL_SLOTS` / `DC_NPCTEX_SLOTS`
+are the knobs to cut first — 32 models serve 236 texture sets, so 16 villagers
+collide often and the pools rarely fill.
+
+**The rule, which applies to every remaining pool idea (acres, structures,
+interiors):** *in a stubbed image, an asset class's resident cost is what the
+KEEP LIST kept, not what the class totals. A pool is worth building when it
+delivers content the keep list cannot afford — not when it "frees" bytes the
+stub system already dropped.* Corrected in place in `kb/STATE.md`,
+`kb/levers.md`, `kb/ram-plan.md`, `kb/plan-stages.md`,
+`kb/research-creative-ram.md` and `kb/RESUME.md`.
+
+#### The one place the OLD framing is still right: the acre pool
+
+The 371 summer acre TUs really **are** kept — that is what `keeplist-town.txt`
+bought on 2026-08-04 — so acre bytes really are resident and an acre pool really
+would free RAM. Measured from the linked map rather than assumed:
+
+| | `.bss` | TUs |
+|---|---:|---:|
+| **summer acres (`grd_s_*`), 100 % of it `*_v` vertex arrays** | **815,024** | 242 |
+| the rest of `src/data/field/bg/acre/` (interiors, `grd_player_select`, `rom_train_in` 23,504, `police_indoor` 19,792) | 54,837 | 25 |
+| whole acre tree resident today | 869,861 | 267 |
+
+242, not 371: the keep list has 391 acre entries, **144 of them `*_evw_anime.c`
+which carry no `.bss` at all**, and the 242 that do are exactly the 242
+`grd_s_*` directories in the tree — i.e. every summer acre is kept, one `.bss`
+section each. **Quote 815,024 B, not "~1.1 MB"** — the acre lever is real
+but it is a fifth smaller than the round number suggests. (Cross-check: the
+map's `.bss` sums to 4,059,052 B, which is exactly the ELF's `.bss` section
+size, so this parse is not dropping sections.)
+
+#### Three smaller corrections found in the same pass
+
+- **`--wrap` does not work as spelled anywhere in this kb.** sh-elf uses a
+  leading-underscore user label prefix — `dc/build/dedup/syms.txt` has
+  `8c35f384 00000318 T _mNpc_SetNpcList` — so the linker symbol is
+  `_mNpc_SetNpcList` and `--wrap=mNpc_SetNpcList` matches nothing. **Silently**:
+  `--wrap` on an unknown symbol is not diagnosed. Now in `kb/traps.md`; the two
+  kb sites that propose `--wrap` seams (`kb/STATE.md`'s villager section,
+  `kb/research-ram-tiers.md` R2's `--wrap=malloc`) carry the caveat.
+- **There are only 32 distinct villager MODELS — not 72, not 236.** The 382
+  `npc_draw_data_tbl[]` rows resolve through `model_skeleton` to 72 distinct
+  skeletons: **32 villager-only, 40 special-only, ZERO shared**. The 236
+  villager texture sets share those 32 models. "60 of 72 villager models are
+  stubbed" was counting the whole `mdl/` directory as if every file were a
+  villager with its own pooled model.
+- **`gsDPLoadTextureBlock_4b_Dolphin` expands to TWO `Gfx`**, not one — it is a
+  comma pair at `include/libforest/gbi_extensions.h:1133` — and there are
+  **1,619** of them in `src/data/npc/model/mdl/`. Any tool that counts `Gfx` by
+  counting macros is wrong by that much. Related, and the reason R3 uses a
+  generated table instead of a runtime display-list walk: a `gsSPNTriangles_5b`
+  packet's top byte is vertex-index data and **reads as `G_VTX` (0x01) whenever
+  `v11 == 0` and `v10` is 4..7**, which is ordinary geometry. Both in
+  `kb/traps.md`.
+
 ### Corrections banked this session, each verified against the tree
 
 - **The vertex memo is 128 slots (`dc_pvr.c:1955`), not 32**, and its hit rate

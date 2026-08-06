@@ -17,6 +17,20 @@
 # ⚠️ The mFM_grd_* ground textures are absent on purpose: R1 reads
 # them off the disc (dc/src/dc_bgtex.c), both seasons, for no .bss.
 # Adding them back costs 80,736 B and buys nothing.
+#
+# ⚠️ So are the VILLAGER npc/model/tex sets: R2 serves all 236 of
+# them out of 16 slots (dc/src/dc_npctex.c). Re-adding one makes the
+# pool skip that set, so the .bss returns for nothing. The SPECIAL
+# NPC sets below (Tom Nook, the raccoons, end_1, kab_1, ...) are NOT
+# pooled and MUST stay.
+#
+# ⚠️ And so are the VILLAGER npc/model/mdl species: R3 serves all 32
+# out of 16 slots and relocates the 933 display-list words that name
+# them (dc/src/dc_npcmdl.c). Same rule -- re-adding one makes the
+# pool skip that species. The SPECIAL NPC models below are NOT
+# pooled (their skeletons appear in no villager row) and MUST stay.
+# ⚠️ R3, unlike R1 and R2, COSTS ~115,296 B of .bss: it restores
+# geometry 31 species never had rather than freeing anything.
 
 # ---- censused opening/train/town working set (keeplist-opening.txt) ----
 src/actor/ac_field_draw.c
@@ -116,19 +130,13 @@ src/data/model/rst_win.c
 src/data/model/structure/palette/structure_pal_data.c
 src/data/model/tim_win.c
 src/data/model/tol_keitai_1.c
-src/data/npc/model/mdl/cbr_1.c
 src/data/npc/model/mdl/end_1.c
 src/data/npc/model/mdl/hgh_1.c
 src/data/npc/model/mdl/kab_1.c
 src/data/npc/model/mdl/mnk_1.c
 src/data/npc/model/mdl/xct_1.c
 src/data/npc/model/tex/end_1.c
-src/data/npc/model/tex/flg_1.c
-src/data/npc/model/tex/flg_10.c
-src/data/npc/model/tex/flg_11.c
 src/data/npc/model/tex/kab_1.c
-src/data/npc/model/tex/kal_1.c
-src/data/npc/model/tex/kal_2.c
 src/data/npc/model/tex/mnk_1.c
 src/data/npc/model/tex/mob_1.c
 src/data/npc/model/tex/mol_1.c
@@ -164,24 +172,8 @@ src/data/model/int_sum_oldclk01.c
 src/data/model/int_sum_sofe01.c
 src/data/model/int_tak_shuttle.c
 src/data/model/int_yos_turkey_watch.c
-src/data/npc/model/tex/cat_6.c
-src/data/npc/model/tex/cat_7.c
-src/data/npc/model/tex/cbr_5.c
-src/data/npc/model/tex/cbr_9.c
-src/data/npc/model/tex/chn_6.c
-src/data/npc/model/tex/crd_2.c
-src/data/npc/model/tex/dog_4.c
-src/data/npc/model/tex/dog_8.c
-src/data/npc/model/tex/duk_11.c
-src/data/npc/model/tex/duk_8.c
-src/data/npc/model/tex/goa_1.c
-src/data/npc/model/tex/goa_3.c
-src/data/npc/model/tex/goa_6.c
 src/data/npc/model/tex/wip_1.c
 src/data/npc/model/tex/wls_1.c
-src/data/npc/model/tex/wol_1.c
-src/data/npc/model/tex/wol_4.c
-src/data/npc/model/tex/wol_6.c
 src/game/m_common_data.c
 src/static/jaudio_NES/game/game64.c
 src/system/sys_dynamic.c

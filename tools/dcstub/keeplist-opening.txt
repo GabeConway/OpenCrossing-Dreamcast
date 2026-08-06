@@ -171,19 +171,31 @@ src/data/model/rst_win.c
 src/data/model/structure/palette/structure_pal_data.c
 src/data/model/tim_win.c
 src/data/model/tol_keitai_1.c
-src/data/npc/model/mdl/cbr_1.c
+# ⚠️ VILLAGER models are absent from this file on purpose and must NOT be
+# added back. R3 serves all 32 of them (194,400 B) out of 16 resident slots
+# read off the disc, relocating the 933 gsSPVertex words that name them
+# (dc/src/dc_npcmdl.c). Re-adding one makes the pool see the keep-list entry,
+# decline to pool that species, and pay up to 7.5 KB of .bss for nothing.
+# cbr_1 is the only one that was ever here; it is in make_stub_data.py's
+# NPCMDL_KEEP_RESTORE and comes back automatically at --npcmdl-pool=0.
+# SPECIAL NPC models (skeletons only rows >= ALL_NPC_NUM use) are NOT pooled
+# and DO belong here — the five below, plus the six raccoons in
+# make_keeplist_town.py's EXTRA_SOURCES.
 src/data/npc/model/mdl/end_1.c
 src/data/npc/model/mdl/hgh_1.c
 src/data/npc/model/mdl/kab_1.c
 src/data/npc/model/mdl/mnk_1.c
 src/data/npc/model/mdl/xct_1.c
+# ⚠️ VILLAGER tex sets are absent from this file on purpose and must NOT be
+# added back. R2 serves all 236 of them (993,984 B) out of 16 resident slots
+# read off the disc (dc/src/dc_npctex.c), so every species is textured and none
+# of them costs .bss. Re-adding one does not just waste ~4.6 KB — the pool sees
+# the keep-list entry, declines to pool that set, and the .bss comes back for
+# nothing. The 21 that used to be here are in make_stub_data.py's
+# NPCTEX_KEEP_RESTORE and come back automatically at --npctex-pool=0.
+# SPECIAL NPC tex sets (rows >= ALL_NPC_NUM) are NOT pooled and DO belong here.
 src/data/npc/model/tex/end_1.c
-src/data/npc/model/tex/flg_1.c
-src/data/npc/model/tex/flg_10.c
-src/data/npc/model/tex/flg_11.c
 src/data/npc/model/tex/kab_1.c
-src/data/npc/model/tex/kal_1.c
-src/data/npc/model/tex/kal_2.c
 src/data/npc/model/tex/mnk_1.c
 src/data/npc/model/tex/mob_1.c
 src/data/npc/model/tex/mol_1.c
@@ -237,24 +249,13 @@ src/data/model/int_sum_oldclk01.c
 src/data/model/int_sum_sofe01.c
 src/data/model/int_tak_shuttle.c
 src/data/model/int_yos_turkey_watch.c
-src/data/npc/model/tex/cat_6.c
-src/data/npc/model/tex/cat_7.c
-src/data/npc/model/tex/cbr_5.c
-src/data/npc/model/tex/cbr_9.c
-src/data/npc/model/tex/chn_6.c
-src/data/npc/model/tex/crd_2.c
-src/data/npc/model/tex/dog_4.c
-src/data/npc/model/tex/dog_8.c
-src/data/npc/model/tex/duk_11.c
-src/data/npc/model/tex/duk_8.c
-src/data/npc/model/tex/goa_1.c
-src/data/npc/model/tex/goa_3.c
-src/data/npc/model/tex/goa_6.c
+# The 18 villager tex sets this scene censused (cat_6/7, cbr_5/9, chn_6, crd_2,
+# dog_4/8, duk_8/11, goa_1/3/6, wol_1/4/6) are gone for the reason above: R2
+# pools them. wip_1 and wls_1 stay — they are SPECIAL NPCs, not villagers.
+# The one villager MODEL it censused (mdl/cbr_1) is gone for the same reason
+# with R3 in its place.
 src/data/npc/model/tex/wip_1.c
 src/data/npc/model/tex/wls_1.c
-src/data/npc/model/tex/wol_1.c
-src/data/npc/model/tex/wol_4.c
-src/data/npc/model/tex/wol_6.c
 src/game/m_common_data.c
 src/static/jaudio_NES/game/game64.c
 src/system/sys_dynamic.c

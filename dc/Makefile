@@ -32,6 +32,16 @@
 #                    (R1, -150,880 B of keep list). 0 restores the bcopy and
 #                    the 27 keep-list entries. MUST match the --bgtex-demand=
 #                    that BOTH tools/dcstub scripts were run with.
+#   DC_NPCTEX_POOL=1 villager textures served out of 16 disc-backed slots,
+#                    DEFAULT ON (R2, -993,984 B of keep list). 0 restores the
+#                    21 censused keep-list entries and pools nothing. MUST
+#                    match the --npctex-pool= that BOTH scripts were run with.
+#   DC_NPCMDL_POOL=1 villager MODELS served out of 16 disc-backed slots, with
+#                    their 933 baked gsSPVertex words relocated. DEFAULT ON
+#                    (R3). ⚠️ COSTS ~115,296 B of .bss — it restores geometry
+#                    31 species never had, it does not save bytes. 0 restores
+#                    cbr_1 to the keep list and pools nothing. MUST match the
+#                    --npcmdl-pool= that BOTH scripts were run with.
 #   DC_AUDIO=0       sound. DEFAULT OFF — it costs ~45 % of the frame rate
 #                    (dc/src/dc_audio.c). Also selects the S8 half of the
 #                    shrink tree, so it MUST match the --audio= that
@@ -86,6 +96,18 @@ ifeq ($(DC_ASSET_STUB),1)
   ifeq ($(wildcard $(STUBDIR)/dc_bgtex_map.inc),)
     $(error DC_ASSET_STUB=1 but $(STUBDIR)/dc_bgtex_map.inc is missing — the \
             stub tree predates R1. Run: python3 \
+            $(ROOT)/tools/dcstub/make_stub_data.py)
+  endif
+  # R2's map, checked here for the same reason as R1's above.
+  ifeq ($(wildcard $(STUBDIR)/dc_npctex_map.inc),)
+    $(error DC_ASSET_STUB=1 but $(STUBDIR)/dc_npctex_map.inc is missing — the \
+            stub tree predates R2. Run: python3 \
+            $(ROOT)/tools/dcstub/make_stub_data.py)
+  endif
+  # R3's map, checked here for the same reason as R1's and R2's above.
+  ifeq ($(wildcard $(STUBDIR)/dc_npcmdl_map.inc),)
+    $(error DC_ASSET_STUB=1 but $(STUBDIR)/dc_npcmdl_map.inc is missing — the \
+            stub tree predates R3. Run: python3 \
             $(ROOT)/tools/dcstub/make_stub_data.py)
   endif
   # A source is stubbed iff the generator produced a file for it. $(wildcard)
@@ -352,6 +374,140 @@ endif
 # source is full size and resident) degrades to a plain memmove with no flag.
 DC_BGTEX_DEMAND ?= 1
 DEFINES += -DDC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND)
+
+# =============================================================================
+# DC_NPCTEX_POOL — the villager textures, out of a 16-slot pool (R2). DEFAULT ON.
+# =============================================================================
+# src/data/npc/model/tex/*.c is 1,154,944 B of .bss in 276 sets, 993,984 B of
+# it the 236 VILLAGER sets. A town holds at most ANIMAL_NUM_MAX=15 villagers
+# plus one islander, so at most 16 of those 236 can ever be wanted at once —
+# the rest is .bss a given save cannot draw. The keep list was paying 90,464 B
+# for the 21 sets a census run happened to see and leaving the other 215
+# species with no texture at all. With this on, a set is read off the disc into
+# one of 16 static slots at the moment an actor snapshots its
+# npc_draw_data_tbl[] row, and neither the 21 nor the 215 cost anything.
+#
+# ⚠️ The SPECIAL NPCs are NOT pooled. Rows at or above ALL_NPC_NUM — Tom Nook,
+# Rover, K.K., Porter, the raccoons — stay resident through the keep list, and
+# dc/src/dc_npctex.c refuses to touch them. Dropping them silently has already
+# cost this project a session (kb/RESUME.md, session 3 item 2).
+#
+# Three parts and they must agree, which is why this is ONE number:
+#   tools/dcstub/make_stub_data.py --npctex-pool   emits dc_npctex_map.inc, and
+#                                                  at 0 puts the 21 villager
+#                                                  tex files back on the keep
+#                                                  list
+#   tools/dcstub/make_src_shrink.py --npctex-pool  inserts the load + the two
+#                                                  reset calls (S11)
+#   this -D                                        is what the generated TUs
+#                                                  check themselves against
+#
+# Both scratch trees survive a flag flip and flags.stamp cannot regenerate
+# them, so all three rewritten TUs carry an #error for a mismatch in EITHER
+# direction. Do not delete those guards — re-run the generators (dc/build-dc.sh
+# does both for you).
+#
+# The define is unconditional so both sides always see the same literal. It is
+# read by the shrink tree's three TUs only; dc/src/dc_npctex.c keys off the
+# generated map's own set count instead, so a non-stub build (where every
+# villager texture is full size and resident) degrades to a pair of empty
+# functions with no flag.
+# ⚠️ DEFAULTS TO 0, AND THE REASON IS NOT THAT IT IS BROKEN — IT IS UNEXERCISED.
+# The pool loads on aNPC_dma_draw_data_proc, which is reached only when an NPC
+# actor is constructed for a VILLAGER, and MEASURED 2026-08-05: the port never
+# constructs one. mNpc_SetNpcList reads the save's Animal_c animals[]
+# (m_start_data_init.c:559), the VMU path is unwired, `[PC] No save file found`,
+# so the town has ZERO villagers. Two 900 s runs that reach scene 9 and walk
+# around print not one [DC/NPCTEX] line.
+#
+# Turning it on would therefore ship a keep-list removal (21 files, 90,464 B)
+# whose replacement has never once executed, on the strength of a screenshot
+# pair that cannot show a villager because there are none. Off until the save
+# path (PLAN N2b) makes villagers exist; then set =1 and read the log.
+DC_NPCTEX_POOL ?= 0
+DEFINES += -DDC_NPCTEX_POOL=$(DC_NPCTEX_POOL)
+
+# DC_NPCTEX_SLOTS=<N> — the pool's slot count, default 16 (ANIMAL_NUM_MAX + the
+# islander), 4,832 B of .bss each. Raise it only against a
+# "[DC/NPCTEX] POOL FULL" line in the log: that is an event or mask NPC whose
+# texture_id resolved to a villager row (ac_npc_ctrl.c_inc:158-176), which the
+# 15+1 ceiling does not count. A villager the pool cannot serve renders
+# untextured and says so; it is never another animal's skin.
+ifneq ($(DC_NPCTEX_SLOTS),)
+DEFINES += -DDC_NPCTEX_SLOTS=$(DC_NPCTEX_SLOTS)
+endif
+
+# =============================================================================
+# DC_NPCMDL_POOL — the villager MODELS, out of a 16-slot pool (R3). DEFAULT ON.
+# =============================================================================
+# ⚠️ THIS ONE COSTS .bss. Read the ledger before turning it on in a build that
+# is already tight.
+#
+# src/data/npc/model/mdl/*.c is 438,640 B in 72 species, 194,400 B of it the 32
+# reachable from a VILLAGER row of npc_draw_data_tbl[] and 244,240 B the 40
+# reachable only from a SPECIAL row. Exactly ONE villager model was resident
+# before R3 — cbr_1, 5,536 B, because a census run saw it — so the other 31
+# species drew as a black spiky mess no matter how good the texture R2 painted
+# on them (an unkept asset loses its VERTICES, kb/traps.md).
+#
+#     resident before      5,536 B      pool           120,832 B  (16 x 7,552)
+#     keep list returned  -5,536 B      bookkeeping        128 B
+#     .rodata              4,372 B      ------------------------------
+#                                       net           +115,296 B of .bss
+#
+# R3 is a CONTENT RESTORATION, not a saving. What makes the POOL the right
+# shape is the alternative: keeping all 32 costs 194,400 B, so this is 73,568 B
+# cheaper than the geometry it delivers. Cut DC_NPCMDL_SLOTS, or set this to 0,
+# if the image cannot afford it.
+#
+# ⚠️ The SPECIAL NPCs are NOT pooled, and here that is structural rather than a
+# rule: the 40 skeletons only special rows use have no entry in the map, so the
+# lookup cannot find them. Verified 2026-08-05 that the villager and special
+# skeleton sets do not intersect at all; the generator hard-errors if that
+# changes.
+#
+# Unlike R1 and R2 this one RELOCATES. 933 gsSPVertex words are R_SH_DIR32
+# relocations the linker baked into .data and emu64::seg2k0 passes an
+# 0x8Cxxxxxx address through untouched, so moving a vertex array means
+# rewriting them. dc/src/dc_npcmdl.c carries the argument for why the patch
+# table is generated offline and re-checked at runtime rather than walked.
+#
+# Three parts and they must agree, which is why this is ONE number:
+#   tools/dcstub/make_stub_data.py --npcmdl-pool   emits dc_npcmdl_map.inc, and
+#                                                  at 0 puts cbr_1 back on the
+#                                                  keep list
+#   tools/dcstub/make_src_shrink.py --npcmdl-pool  inserts the load + the two
+#                                                  reset calls (S12)
+#   this -D                                        is what the generated TUs
+#                                                  check themselves against
+#
+# Both scratch trees survive a flag flip and flags.stamp cannot regenerate
+# them, so all three rewritten TUs carry an #error for a mismatch in EITHER
+# direction. Do not delete those guards — re-run the generators (dc/build-dc.sh
+# does both for you).
+#
+# The define is unconditional so both sides always see the same literal. It is
+# read by the shrink tree's three TUs only; dc/src/dc_npcmdl.c keys off the
+# generated map's own species count instead, so a non-stub build (where every
+# vertex array is full size and every baked word already correct) degrades to a
+# pair of empty functions with no flag.
+# ⚠️ DEFAULTS TO 0 for exactly the reason DC_NPCTEX_POOL does — see that comment.
+# It shares the same seam, so it has never executed either. It is also the one
+# of the two that SPENDS bytes (+115,424 B .bss for a 16-slot pool), so there is
+# no argument for carrying it on by default while it does nothing.
+DC_NPCMDL_POOL ?= 0
+DEFINES += -DDC_NPCMDL_POOL=$(DC_NPCMDL_POOL)
+
+# DC_NPCMDL_SLOTS=<N> — the pool's slot count, default 16 (ANIMAL_NUM_MAX + the
+# islander, matching DC_NPCTEX_SLOTS so a species that gets a texture slot can
+# get a model slot), 7,552 B of .bss each. This is the FIRST knob to cut if the
+# image is short: only 32 distinct villager models exist for 236 texture sets,
+# so 16 villagers collide often and a smaller pool usually still serves them
+# all. A villager the pool cannot serve keeps its stub geometry and says so; it
+# is never another animal's limbs.
+ifneq ($(DC_NPCMDL_SLOTS),)
+DEFINES += -DDC_NPCMDL_SLOTS=$(DC_NPCMDL_SLOTS)
+endif
 
 # DC_DIAG=1 turns on PC_DIAG() — the decomp's own rate-limited bring-up tracer
 # (pc/include/pc_diag.h), which is compiled out unless PC_VERBOSE_DIAG is
@@ -992,9 +1148,14 @@ endif
 # dc/build/shrinksrc diagnosable from the stamp instead of from a link error.
 # DC_BGTEX_DEMAND is here for exactly the same reason, and it keys BOTH scratch
 # trees at once (shrinksrc's copy loop and stubsrc's map + keep list).
+# DC_NPCTEX_POOL keys both trees too (shrinksrc's three TUs and stubsrc's map +
+# keep list), so it is spelled out alongside them. DC_NPCMDL_POOL keys the same
+# three shrinksrc TUs and its own stubsrc map, for the same reason.
 FLAGSTAMP := $(BUILD)/flags.stamp
 FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DC_AUDIO=$(DC_AUDIO) DC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND) \
+             DC_NPCTEX_POOL=$(DC_NPCTEX_POOL) \
+             DC_NPCMDL_POOL=$(DC_NPCMDL_POOL) \
              DECOMP_OPT=$(DECOMP_OPT) \
              DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
 

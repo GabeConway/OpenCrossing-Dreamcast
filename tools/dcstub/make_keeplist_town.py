@@ -40,6 +40,34 @@ That also retires the December time bomb this header used to carry: the season
 fork at `m_field_make.c:1120` picks `l_bg_w_tex_segment_table` from the
 console RTC, and until R1 the winter half was simply unaffordable.
 
+VILLAGER textures are absent for the same reason and must NOT be added back
+either. R2 serves all 236 `src/data/npc/model/tex/` villager sets (993,984 B)
+out of 16 resident slots read off the disc (dc/src/dc_npctex.c), which is why
+the 21 that keeplist-opening.txt used to name are gone from it. Re-adding one
+makes the pool decline to pool that set, so the `.bss` comes back and nothing
+is gained. ⚠️ The SPECIAL NPCs are the exception in both directions: rows at
+or above ALL_NPC_NUM are never pooled, so Tom Nook and the raccoons in
+EXTRA_SOURCES below -- and the ten `end_1`/`kab_1`/`mnk_1`/`mob_1`/`mol_1`/
+`mos_1`/`wip_1`/`wls_1`/`xct_1`/`xsq_1` sets in keeplist-opening.txt -- have to
+stay on this list or they draw untextured.
+
+VILLAGER MODELS are absent for the third time, and must NOT be added back
+either. R3 serves all 32 villager species in `src/data/npc/model/mdl/`
+(194,400 B) out of 16 resident slots read off the disc, relocating the 933
+`gsSPVertex` words that name them (dc/src/dc_npcmdl.c), which is why the one
+this list used to name — cbr_1 — is gone from keeplist-opening.txt. Re-adding
+one makes the pool decline to pool that species and the `.bss` comes back for
+nothing. ⚠️ Again the SPECIAL NPCs are the exception: the 40 skeletons only
+rows >= ALL_NPC_NUM use are never pooled, so the six raccoon models in
+EXTRA_SOURCES below -- and end_1/hgh_1/kab_1/mnk_1/xct_1 in
+keeplist-opening.txt -- have to stay or Tom Nook loses his geometry.
+
+⚠️ R3 COSTS BYTES, unlike R1 and R2. Only 5,536 B of villager model was ever
+resident, so the 16-slot pool is a NET +115,296 B of `.bss` that buys 31
+species the geometry they never had. The number that makes the pool the right
+shape is the alternative, not today: keeping all 32 is 194,400 B.
+`DC_NPCMDL_SLOTS=<N>` cuts it without turning it off.
+
 ⚠️⚠️ COST — THE FULL LIST DOES NOT FIT TODAY. MEASURED 2026-08-04.
 ------------------------------------------------------------------
 Built and run: `.bss` 3,296,236 -> 4,804,620, image span 11,084,460 ->
@@ -174,6 +202,13 @@ def structure_sources():
 #                                            set is the shop staff. Unkept, an
 #                                            NPC model loses its VERTEX array
 #                                            and draws as a black spiky mess.
+#                                            ⚠️ These six mdl/ entries are NOT
+#                                            made redundant by R3: all six
+#                                            skeletons are named ONLY by rows
+#                                            >= ALL_NPC_NUM, so R3's map has no
+#                                            entry for them and the pool cannot
+#                                            serve them. Deleting them here is
+#                                            deleting Tom Nook.
 # ---------------------------------------------------------------------------
 EXTRA_SOURCES = (
     # START map overlay
@@ -301,6 +336,20 @@ def main():
     print("# ⚠️ The mFM_grd_* ground textures are absent on purpose: R1 reads")
     print("# them off the disc (dc/src/dc_bgtex.c), both seasons, for no .bss.")
     print("# Adding them back costs 80,736 B and buys nothing.")
+    print("#")
+    print("# ⚠️ So are the VILLAGER npc/model/tex sets: R2 serves all 236 of")
+    print("# them out of 16 slots (dc/src/dc_npctex.c). Re-adding one makes the")
+    print("# pool skip that set, so the .bss returns for nothing. The SPECIAL")
+    print("# NPC sets below (Tom Nook, the raccoons, end_1, kab_1, ...) are NOT")
+    print("# pooled and MUST stay.")
+    print("#")
+    print("# ⚠️ And so are the VILLAGER npc/model/mdl species: R3 serves all 32")
+    print("# out of 16 slots and relocates the 933 display-list words that name")
+    print("# them (dc/src/dc_npcmdl.c). Same rule -- re-adding one makes the")
+    print("# pool skip that species. The SPECIAL NPC models below are NOT")
+    print("# pooled (their skeletons appear in no villager row) and MUST stay.")
+    print("# ⚠️ R3, unlike R1 and R2, COSTS ~115,296 B of .bss: it restores")
+    print("# geometry 31 species never had rather than freeing anything.")
     print("")
     print("# ---- censused opening/train/town working set (keeplist-opening.txt) ----")
     n_open = emit(opening)

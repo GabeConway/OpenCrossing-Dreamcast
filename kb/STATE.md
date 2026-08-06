@@ -46,10 +46,17 @@ rewrite of one `bcopy`, `src/` untouched, kill switch `DC_BGTEX_DEMAND=0`.
 unchanged, `fps_p50` 24.1 → 24.2. ⚠️ **Screenshot verification was still in
 flight — this is a counter result, not a verdict** (rule 2).
 
+**R2 and R3 landed too** — the villager texture and model pools, 16 slots each
+(`dc/src/dc_npctex.c`, `dc/src/dc_npcmdl.c`). They are **content restoration,
+not a saving**: see the corrected pool section below, and read the rule there
+before costing any further pool.
+
 **Next, ranked:** (1) the `gap=7.92 ms`; (2) `dc_gx_backend_submit`'s 12.2 ms;
 (3) the distinct-reference count that settles the memo ceiling; (4) a sorted
-batch helper for R1's 27 scattered seeks (0.5-2.7 s [UNMEASURED]); (5) the
-villager pool. Evidence for all of it: `kb/state-log.md`, top entry.
+batch helper for R1's 27 scattered seeks (0.5-2.7 s [UNMEASURED]); (5) the acre
+pool — the one class where "a pool frees RAM" is still true, **815,024 B of
+summer acre vertex arrays measured resident**. Evidence for all of it:
+`kb/state-log.md`, top entry.
 
 ## ⭐ 2026-08-04 session 3 — EVERY SUMMER STRUCTURE NOW RENDERS, and it cost
 ## nothing, because the keep list had been buying WINTER
@@ -100,25 +107,53 @@ file is regenerated**, it is two lines of python.
 The generator's acre glob also sweeps in building interiors and the developers'
 scratch rooms (`rom_*`, `room01`, `tmp*`, `myr_etc`, `grd_post_office`,
 `grd_yamishop`) — **+269,312 B**, which does not fit next to the structures.
-They are excluded by default; `--interiors` turns them on. Switch them on when
-the villager pool frees the room.
+They are excluded by default; `--interiors` turns them on. ⚠️ **Do not wait for
+"the villager pool to free the room" — it does not free any.** R2 is roughly
+break-even and R3 costs +115,424 B (see the corrected pool section below).
+Interiors need either their own pool, costed against the 269,312 B of *keeping*
+them, or headroom from somewhere else.
 
 ### The RAM plan from here is a POOL, not a bigger keep list
 
-`kb/RESUME.md` §4's 60 stubbed villager models + ~992 KB of villager textures do
-not fit and never will. The design is fixed-slot demand loading, and it is much
-cheaper than S4 assumed:
+⚠️ **CORRECTED 2026-08-05 — a pool does not FREE bytes in a stubbed image, and
+this section used to say it did.** The rule, which governs every remaining pool
+idea (acres, structures, interiors):
+
+> **In a stubbed image, an asset class's resident cost is what the KEEP LIST
+> kept, not what the class totals.** `DC_ASSET_STUB` already dropped the rest —
+> an unkept asset is a 1-byte `.bss` symbol with its load suppressed. A pool is
+> worth building when it **delivers content the keep list cannot afford**, not
+> when it "frees" bytes the stub system dropped long ago. Cost a pool against
+> the *alternative* (keeping the class), never against the class total.
+
+Measured, and this is what the villager pools actually did:
+
+| | non-stub total | resident before | pool | net `.bss` | content delivered |
+|---|---:|---:|---:|---:|---|
+| **R2** villager textures | 1,154,944 | **90,464** (21 of 236 sets) | 78,872 (16 × 4,832) | **~−4,700** | 21 species with textures → **236** |
+| **R3** villager models | 438,640 | **5,536** (`cbr_1` only) | 120,956 (16 × 7,552) | **+115,424** | 1 species with geometry → **32** |
+
+R3 **spends** bytes. It is justified because the only other way to get those 31
+species is keeping all 32 `mdl/*.c` at 194,400 B, so the pool is 73,568 B
+cheaper than its content. Follow-up lever: 16 max-sized slots waste 15,248 B
+against the 16 largest packed (105,584 B) — a bump arena, or just cut
+`DC_NPCMDL_SLOTS` / `DC_NPCTEX_SLOTS`.
+
+The mechanism notes that survive the correction:
 
 - villager **textures need no patching at all** — they are bound through
   segment registers at draw time (`ac_npc_draw.c_inc:269-278`), so a load is 16
   pointer writes into `npc_draw_data_tbl[]`, which is an ordinary global;
-- villager **vertices need ~26 patched `Gfx` words** per species, reachable from
-  the global skeleton `cKF_bs_r_<species>`, and the display lists are in
-  `.data`, i.e. writable;
-- the seam is `mNpc_SetNpcList` (`m_npc.c:2799`, an extern, `--wrap`-able) or
-  just polling `common_data.npclist[]`;
-- 9 slots ≈ **+40 KB** net; 15 slots (town-scoped, no eviction, no pinning
-  invariant) ≈ +120 KB net but needs the acre pool first.
+- villager **vertices need ~29 patched `Gfx` words** per species (933 across the
+  32, min 21, max 37), reachable from the global skeleton `cKF_bs_r_<species>`,
+  and the display lists are in `.data`, i.e. writable;
+- the seam is `mNpc_SetNpcList` (`m_npc.c:2799`) or just polling
+  `common_data.npclist[]`. ⚠️ **NOT `--wrap`** — sh-elf prefixes user labels
+  with `_`, so the symbol is `_mNpc_SetNpcList` and `--wrap=mNpc_SetNpcList`
+  matches nothing, without a diagnostic (`kb/traps.md`).
+- **there are 32 distinct villager models, not 72 and not 236.** 382
+  `npc_draw_data_tbl[]` rows → 72 skeletons: 32 villager-only, 40 special-only,
+  zero shared; the 236 villager texture sets share those 32 models.
 
 ⚠️ **`mFM_DecideAcre` DOES NOT EXIST.** Four kb files cite it. The real
 generator is `mRF_MakeRandomField` (`m_random_field.c:9`), and it writes the
@@ -203,7 +238,9 @@ sharp instrument.
    this file; it moved the answer from `G_VTX` to `G_TRIN_INDEPEND`.
 2. **Measure G2** — built, self-check fixed, run not yet read. ⚠️ Its ceiling is
    now known: ~8.3 ms, expect 2-4 ms.
-3. **The villager pool** (above).
+3. ✅ **DONE 2026-08-05 — the villager pools shipped** (R2 textures, R3 models).
+   ⚠️ Read the corrected pool section above before quoting what they bought:
+   they restore content, they do not free RAM.
 4. **Tom Nook's apron is missing.** Not a keep-list gap: his draw data points
    only at `tuk_1_tmem_txt` + palette + eyes, all kept, and all five of his
    model parts are in the kept TU. Next step is a `DC_TEX_LOG=1` run to see
@@ -228,7 +265,9 @@ margin=3237956 OK`, no OOM, `ASSET MISSING 0`.
 
 Human verdict: *"the mountain texture works now"*, *"the textures overall look
 excellent, significantly improved"*. Read `kb/RESUME.md` §3 for the mechanism
-and §4 for what is still stubbed (60 villager models, 74 structures, winter).
+and §4 for what is still stubbed. ⚠️ That list said "60 villager models"; the
+real figure was **31 of 32 villager species**, and R2/R3 have since restored
+them out of pools (74 structures and winter still stand).
 
 1. **"Missing and weird textures" is mostly MISSING GEOMETRY — and the obvious
    fix does not fit.** The keep list covers 18 of 268 acres and 11 of 84

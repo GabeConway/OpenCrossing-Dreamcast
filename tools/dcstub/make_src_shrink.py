@@ -123,6 +123,48 @@ S10 acre ground textures off the disc (R1)                     -150,880 of keep
     DC_BGTEX_DEMAND and make_stub_data.py's own flag. The rewritten TU carries
     an #error for the mismatch, in both directions.
 
+S11 villager textures out of a 16-slot pool (R2)               -993,984 of keep
+    `src/actor/npc/ac_npc_ctrl.c_inc` (shadow), `src/game/m_start_data_init.c`
+    and `src/game/m_trademark.c` (swaps). Not a shrink either — two inserted
+    calls, no code deleted. `src/data/npc/model/tex/*.c` is 1,154,944 B of
+    .bss, 993,984 B of it the 236 VILLAGER sets, and a town holds at most 15
+    villagers plus an islander. So `dc_npctex_ensure()` goes into
+    `aNPC_dma_draw_data_proc` — the one choke point every texture snapshot
+    passes through — and reads the wanted set off the disc into one of 16
+    static slots, and `dc_npctex_pool_reset()` goes into the only two
+    npclist-rebuilding sites that are provably free of live NPC actors.
+    Worth 90,464 B of keep list today AND it is what makes 215 villager
+    species stop rendering untextured. The special NPCs (rows >= ALL_NPC_NUM —
+    Tom Nook, Rover, K.K., Porter, the raccoons) are NOT pooled and stay on
+    the keep list. dc/src/dc_npctex.c carries the whole argument, including
+    why --wrap=mNpc_SetNpcList would have been a silent no-op.
+    Kill switch: --npctex-pool=0, matching dc/Makefile's DC_NPCTEX_POOL and
+    make_stub_data.py's own flag. The rewritten TUs carry an #error for the
+    mismatch, in both directions.
+
+S12 villager models out of a 16-slot pool (R3)                  +115,296 .bss
+    The same three TUs as S11, riding the same three seams — two more inserted
+    calls, no code deleted. `src/data/npc/model/mdl/*.c` is 438,640 B of .bss
+    in 72 species, of which 32 (194,400 B) are reachable from a VILLAGER row of
+    npc_draw_data_tbl[] and 40 (244,240 B) only from a SPECIAL row; the two
+    sets are disjoint, which is what lets R3 pool by skeleton pointer and still
+    be unable to touch Tom Nook. `dc_npcmdl_ensure()` goes in beside
+    `dc_npctex_ensure()` and `dc_npcmdl_pool_reset()` beside
+    `dc_npctex_pool_reset()`.
+    ⚠️ THIS ONE COSTS BYTES. Only cbr_1 (5,536 B) of the 32 was ever resident,
+    so R3 is a content restoration: 120,832 B of pool for 31 villager species
+    that drew as a black spiky mess no matter how good R2's texture was. The
+    comparison that justifies the POOL is against keeping all 32 (194,400 B),
+    not against today.
+    Unlike every other rule here it needs RELOCATION: 933 `gsSPVertex(&<sp>_v[N])`
+    words are R_SH_DIR32 relocations the linker baked into .data, and
+    emu64::seg2k0 passes an 0x8Cxxxxxx address through untouched. dc/src/
+    dc_npcmdl.c carries the whole argument, including why the patch table is
+    generated rather than walked at runtime.
+    Kill switch: --npcmdl-pool=0, matching dc/Makefile's DC_NPCMDL_POOL and
+    make_stub_data.py's own flag. The rewritten TUs carry an #error for the
+    mismatch, in both directions.
+
 S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
     `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
     of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
@@ -183,6 +225,8 @@ USAGE
 -----
     python3 tools/dcstub/make_src_shrink.py [--out DIR] [--audio 0|1]
                                             [--bgtex-demand 0|1]
+                                            [--npctex-pool 0|1]
+                                            [--npcmdl-pool 0|1]
                                             [--dry-run] [--quiet]
 
 Default --out is dc/build/shrinksrc.  Files are written only when their content
@@ -282,59 +326,11 @@ RULES = [
          "    aINS_overlay_entry_dcshrink_c* overlay_p; " + MARK),
     ]),
 
-    # -- S1c: aNPC_{n,s,k,e}_overlay ----------------------------------------
-    # SHADOW.  ac_npc_ctrl.c_inc is #included exactly once, from
-    # src/actor/npc/ac_npc.c:130 as "../src/actor/npc/ac_npc_ctrl.c_inc".  That
-    # relative path cannot resolve against the includer's own directory, so it
-    # falls through to -I and lands in the shrink tree.  VERIFIED with -H:
-    #   . /…/shrinksrc/include/../src/actor/npc/ac_npc_ctrl.c_inc
-    # Both the struct definitions and the arrays live in this one file, so the
-    # shadow is self-contained and cannot half-apply.
-    #
-    # aNPC_actor_class_overlay_c::buf[0x9D0] is deliberately NOT touched: it is
-    # REAL storage — aNPC_keep_actor_class() hands its address out as a
-    # NPC_ACTOR* (ac_npc_ctrl.c_inc:733) and aNPC_get_actor_area_proc returns
-    # it for allocations up to 0x9D0 B.
-    # The LAST rule here is NOT a shrink -- see the block comment above it.
-    ("src/actor/npc/ac_npc_ctrl.c_inc", "shadow", [
-        (1, r"^    u8 buf\[0x800\];$",  "    u8 buf[0x10]; " + MARK),
-        (1, r"^    u8 buf\[0x2000\];$", "    u8 buf[0x10]; " + MARK),
-        (1, r"^    u8 buf\[0x3000\];$", "    u8 buf[0x10]; " + MARK),
-        (1, r"^    u8 buf\[0x2800\];$", "    u8 buf[0x10]; " + MARK),
-
-        # -- CORRECTNESS, not size. The one exception in this file. ----------
-        # aNPC_setupActor_proc is `static int` and FALLS OFF ITS END: its last
-        # statement is an unused call to aNPC_setupActor_sub, which does return
-        # an int. Reading the result of a function that returned nothing is
-        # undefined, and four call sites read it -- through the
-        # npc_clip->setupActor_proc pointer this function is installed in at
-        # :818 and :1075:
-        #
-        #   m_post_office.c:399,416   spawned_postman  (the postman)
-        #   ac_groundhog_control.c:134 spawned_actor   (the shrine groundhog)
-        #   ac_shrine_move.c_inc:317   made_hem
-        #   ac_birth_control.c:213     was_born        (VILLAGER BIRTH)
-        #
-        # It happens to work at -O0 on SH-4 because aNPC_setupActor_sub's
-        # return value is already in r0 and this epilogue does not clobber it.
-        # That is an accident of codegen, not a guarantee, and it is exactly
-        # the class of bug that appears when something unrelated moves.
-        # Upstream ACGC-PC-Port hit it as a hard softlock and fixed it in
-        # 3b650ae1 ("Fix Nook not spawning softlock"); this is that commit's
-        # first hunk, and the ONLY part of it that applies to us -- the rest of
-        # 3b650ae1 enlarges aNPC_actor_class_overlay_c::buf from 0x9D0 to 0xA40
-        # for a 64-bit ABI, and sizeof(NPC_GUIDE_ACTOR) is exactly 0x9D0 here.
-        #
-        # ⚠️ COUPLING: this rides the DC_SRC_SHRINK tree, so DC_SRC_SHRINK=0
-        # turns the fix off along with the shrinks. That is acceptable only
-        # because the -O0 codegen accident above makes the unfixed form work
-        # today; if this ever becomes load-bearing, move it to its own
-        # rewriter with its own switch.
-        (1,
-         r"^    aNPC_setupActor_sub\(play, idx, name, profile, &pos, mvlist_no, arg\);$",
-         "    return aNPC_setupActor_sub(play, idx, name, profile, &pos, mvlist_no, arg); "
-         + MARK),
-    ]),
+    # -- S1c: aNPC_{n,s,k,e}_overlay -----------------------------------------
+    # NOT HERE.  src/actor/npc/ac_npc_ctrl.c_inc is built by _s1c_rules() below
+    # because S11 (R2) rides in the same entry and needs the --npctex-pool flag,
+    # and this tool refuses two rule entries for one path.  Same arrangement as
+    # S10 riding in _s7_rules()'s src/game/m_field_make.c entry.
 
     # -- S1d: aGYO_overlay ---------------------------------------------------
     # SWAP: ac_gyoei.c is compiled directly, so -I cannot reach it.  The type
@@ -830,6 +826,387 @@ def _s10_rules(demand):
             " l_bg_tex_common_dummy[i].data,\n"
             "                          l_bg_tex_common_dummy[i].size); " + MARK))
     return rules
+
+
+# ===========================================================================
+# S11 (R2) — the villager texture pool's two seams.
+# ===========================================================================
+# WHAT IT REPLACES.  Nothing: S11 inserts two calls and deletes no code.
+#
+#   LOAD    aNPC_dma_draw_data_proc (ac_npc_ctrl.c_inc:688) gains one statement
+#           before its mem_copy.  That is the ONE choke point every villager
+#           texture snapshot goes through — ac_npc_ct.c_inc:255 calls it
+#           directly and m_actor.c:135 reaches it through
+#           Common_Get(clip).npc_clip->dma_draw_data_proc — so a pool load
+#           placed there is correct by construction.
+#   RESET   the two mNpc_SetNpcList() call sites that rebuild the WHOLE
+#           npclist: m_start_data_init.c:559 (mSDI_StartInitAfter, i.e.
+#           player-select / game start) and m_trademark.c:76
+#           (set_npc_4_title_demo, before its GAME_GOTO_NEXT into PLAY).
+#
+# ⚠️ WHY THE RESET CANNOT GO ANYWHERE ELSE.  The pool never evicts, because an
+# actor takes a PRIVATE COPY of the 16 texture pointers at construct time
+# (ac_npc_ct.c_inc:256) and reusing a slot under a live actor puts another
+# animal's skin on it silently.  The two sites above are the only points in the
+# tree that rebuild the npclist AND are provably between scene teardowns, i.e.
+# where no NPC actor can exist.  The other two mNpc_SetNpcList() callers —
+# ac_boat_demo_move.c_inc:29 and ac_npc_ctrl.c_inc:878, both the islander, both
+# count 1 — run mid-play and are deliberately left alone; the islander just
+# takes the 16th slot.
+#
+# WHY NOT --wrap=mNpc_SetNpcList.  It would be a silent no-op.  sh-elf uses a
+# leading-underscore user label prefix — `sh-elf-nm` on the linked image gives
+# `T _mNpc_SetNpcList` and `T _main` (dc/build/dedup/syms.txt) — so ld would
+# need `--wrap=_mNpc_SetNpcList` against an asm name of `__wrap__mNpc_SetNpcList`,
+# and --wrap on a symbol that does not exist is ignored without a diagnostic.
+# A rewrite here is anchored, so drift is a hard error instead.
+#
+# WHY THE ASSERT BLOCK IS NOT OPTIONAL.  dc/src/dc_npctex.c reaches
+# npc_draw_data_tbl[] as raw bytes — it must not include ac_npc.h — so the row
+# stride and the four member offsets are literals over there.  This TU has the
+# header, so it is where they get pinned.  Every constant dc_npctex.c hardcodes
+# is in the assert.
+NPCTEX_LAYOUT_ASSERT = (
+    "sizeof(aNPC_draw_data_c) == 0x6C && "
+    "sizeof(aNPC_draw_tex_data_c) == 0x4C && "
+    "__builtin_offsetof(aNPC_draw_data_c, tex_data) == 0x08 && "
+    "__builtin_offsetof(aNPC_draw_tex_data_c, texture) == 0x00 && "
+    "__builtin_offsetof(aNPC_draw_tex_data_c, palette) == 0x04 && "
+    "__builtin_offsetof(aNPC_draw_tex_data_c, eye_texture) == 0x08 && "
+    "__builtin_offsetof(aNPC_draw_tex_data_c, mouth_texture) == 0x28 && "
+    "aNPC_EYE_TEX_NUM == 8 && aNPC_MOUTH_TEX_NUM == 6 && "
+    "ALL_NPC_NUM == 238 && ANIMAL_NUM_MAX == 15"
+)
+
+
+def NPCTEX_GUARD(pool):
+    """The stale-tree guard, pointing both ways — same argument as R1's."""
+    if pool:
+        return (
+            "/* " + "-" * 68 + "\n"
+            " * DC_SRC_SHRINK S11 — THIS COPY WAS GENERATED FOR"
+            " DC_NPCTEX_POOL=1.\n"
+            " * The pool calls below can only do anything because\n"
+            " * tools/dcstub/make_stub_data.py emitted\n"
+            " * dc/build/stubsrc/dc_npctex_map.inc in the same pass. With the\n"
+            " * switch off that map is EMPTY, dc_npctex_ensure() is a no-op AND\n"
+            " * the 21 censused villager tex files are back on the keep list —\n"
+            " * so this tree would pay 90,464 B of .bss for textures the pool\n"
+            " * thinks it is serving. Refuse to build.\n"
+            " * " + "-" * 68 + " */\n"
+            "#if defined(DC_NPCTEX_POOL) && !DC_NPCTEX_POOL\n"
+            "#error \"DC_SRC_SHRINK S11: dc/build/shrinksrc was generated with "
+            "--npctex-pool=1, but this build defines DC_NPCTEX_POOL=0. Re-run "
+            "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+            "with --npctex-pool=0 (or rm -rf dc/build/shrinksrc "
+            "dc/build/stubsrc) before building.\"\n"
+            "#endif")
+    return (
+        "/* " + "-" * 68 + "\n"
+        " * DC_SRC_SHRINK S11 — THIS COPY WAS GENERATED FOR DC_NPCTEX_POOL=0.\n"
+        " * No pool call is inserted, so the villager texture arrays must be\n"
+        " * RESIDENT — which is why make_stub_data.py puts the 21 censused\n"
+        " * villager tex files back on the keep list at the same setting. A\n"
+        " * DC_NPCTEX_POOL=1 build against this tree would emit the map, keep\n"
+        " * nothing, call nothing, and render every villager untextured — which\n"
+        " * looks exactly like a missing asset (kb/traps.md).\n"
+        " * " + "-" * 68 + " */\n"
+        "#if defined(DC_NPCTEX_POOL) && DC_NPCTEX_POOL\n"
+        "#error \"DC_SRC_SHRINK S11: dc/build/shrinksrc was generated with "
+        "--npctex-pool=0, but this build defines DC_NPCTEX_POOL=1. Re-run "
+        "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+        "with --npctex-pool=1 (or rm -rf dc/build/shrinksrc dc/build/stubsrc) "
+        "before building.\"\n"
+        "#endif")
+
+
+# ===========================================================================
+# S12 (R3) — the villager MODEL pool, riding S11's three seams.
+# ===========================================================================
+# WHAT IT REPLACES.  Nothing: S12 inserts two more calls beside S11's and
+# deletes no code.  Same choke point, same two reset sites, same argument for
+# both — see the S11 block above, which is the one that reasons about why those
+# three places and no others.
+#
+# WHAT IS DIFFERENT.  R2 moved textures, which the draw binds through segment
+# registers; R3 moves VERTEX ARRAYS, which 933 display-list words point at by a
+# LINK-TIME-BAKED ADDRESS.  So dc_npcmdl_ensure() does not just repoint a struct
+# field, it rewrites word 1 of every gsSPVertex Gfx of that species.  All of the
+# reasoning about which words, and why they are found from a generated table
+# rather than by walking the list, is in dc/src/dc_npcmdl.c.
+#
+# ⚠️ THE SEAM IS LESS LOAD-BEARING HERE, AND THE RESET IS MORE SO.  A villager's
+# texture pointers are snapshotted per actor (ac_npc_ct.c_inc:256), so R2 had to
+# patch before the copy.  Display lists are GLOBAL and shared by every actor of
+# the species, so R3 could in principle patch later — but it must never patch
+# a species OUT from under a live actor, which is why it takes the same two
+# provably actor-free reset points and never evicts.
+#
+# WHY THE ASSERT BLOCK IS NOT OPTIONAL.  dc/src/dc_npcmdl.c walks
+# npc_draw_data_tbl[] -> cKF_Skeleton_R_c -> cKF_Joint_R_c -> Gfx entirely in
+# raw bytes, because it cannot include ac_npc.h or c_keyframe.h.  Every literal
+# it hardcodes is pinned here, in the TU that does have the headers — including
+# sizeof(Vtx), which is what turns a generated element index into a byte offset,
+# and G_VTX, which the runtime probe checks each word against.
+NPCMDL_LAYOUT_ASSERT = (
+    "__builtin_offsetof(aNPC_draw_data_c, model_skeleton) == 0x04 && "
+    "sizeof(cKF_Skeleton_R_c) == 8 && "
+    "__builtin_offsetof(cKF_Skeleton_R_c, num_joints) == 0 && "
+    "__builtin_offsetof(cKF_Skeleton_R_c, joint_table) == 4 && "
+    "sizeof(cKF_Joint_R_c) == 12 && "
+    "__builtin_offsetof(cKF_Joint_R_c, model) == 0 && "
+    "sizeof(Gfx) == 8 && sizeof(Vtx) == 16 && G_VTX == 1"
+)
+
+
+def NPCMDL_GUARD(pool):
+    """The stale-tree guard, pointing both ways — same argument as R1's."""
+    if pool:
+        return (
+            "/* " + "-" * 68 + "\n"
+            " * DC_SRC_SHRINK S12 — THIS COPY WAS GENERATED FOR"
+            " DC_NPCMDL_POOL=1.\n"
+            " * The pool calls below can only do anything because\n"
+            " * tools/dcstub/make_stub_data.py emitted\n"
+            " * dc/build/stubsrc/dc_npcmdl_map.inc in the same pass. With the\n"
+            " * switch off that map is EMPTY, dc_npcmdl_ensure() is a no-op AND\n"
+            " * cbr_1 is back on the keep list — so this tree would pay 5,536 B\n"
+            " * of .bss for a model the pool thinks it is serving, and the\n"
+            " * other 31 villager species would silently stay stubbed.\n"
+            " * Refuse to build.\n"
+            " * " + "-" * 68 + " */\n"
+            "#if defined(DC_NPCMDL_POOL) && !DC_NPCMDL_POOL\n"
+            "#error \"DC_SRC_SHRINK S12: dc/build/shrinksrc was generated with "
+            "--npcmdl-pool=1, but this build defines DC_NPCMDL_POOL=0. Re-run "
+            "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+            "with --npcmdl-pool=0 (or rm -rf dc/build/shrinksrc "
+            "dc/build/stubsrc) before building.\"\n"
+            "#endif")
+    return (
+        "/* " + "-" * 68 + "\n"
+        " * DC_SRC_SHRINK S12 — THIS COPY WAS GENERATED FOR DC_NPCMDL_POOL=0.\n"
+        " * No pool call is inserted, so a villager's vertex array must be\n"
+        " * RESIDENT — which is why make_stub_data.py puts cbr_1 back on the\n"
+        " * keep list at the same setting. A DC_NPCMDL_POOL=1 build against\n"
+        " * this tree would emit the map, keep nothing, call nothing, and\n"
+        " * every villager would draw as a black spiky mess — which looks\n"
+        " * exactly like a missing asset (kb/traps.md).\n"
+        " * " + "-" * 68 + " */\n"
+        "#if defined(DC_NPCMDL_POOL) && DC_NPCMDL_POOL\n"
+        "#error \"DC_SRC_SHRINK S12: dc/build/shrinksrc was generated with "
+        "--npcmdl-pool=0, but this build defines DC_NPCMDL_POOL=1. Re-run "
+        "tools/dcstub/make_src_shrink.py and tools/dcstub/make_stub_data.py "
+        "with --npcmdl-pool=1 (or rm -rf dc/build/shrinksrc dc/build/stubsrc) "
+        "before building.\"\n"
+        "#endif")
+
+
+def _s1c_rules(npctex_pool, npcmdl_pool):
+    """src/actor/npc/ac_npc_ctrl.c_inc — S1c's four arenas, the setupActor
+    return fix, and S11's + S12's load seam. One entry, because this tool writes
+    one scratch copy per TU.
+
+    SHADOW.  ac_npc_ctrl.c_inc is #included as
+    "../src/actor/npc/ac_npc_ctrl.c_inc" from src/actor/npc/ac_npc.c:130 AND
+    from src/actor/npc/ac_npc2.c:152 (an earlier revision of this comment said
+    "exactly once" — it is twice, and both TUs want the rewrite). That relative
+    path cannot resolve against the includer's own directory, so it falls
+    through to -I and lands in the shrink tree. VERIFIED with -H:
+      . /…/shrinksrc/include/../src/actor/npc/ac_npc_ctrl.c_inc
+    Both the struct definitions and the arrays live in this one file, so the
+    shadow is self-contained and cannot half-apply.
+
+    aNPC_actor_class_overlay_c::buf[0x9D0] is deliberately NOT touched: it is
+    REAL storage — aNPC_keep_actor_class() hands its address out as a
+    NPC_ACTOR* (ac_npc_ctrl.c_inc:733) and aNPC_get_actor_area_proc returns it
+    for allocations up to 0x9D0 B.
+    """
+    rules = [
+        (1, r"^    u8 buf\[0x800\];$",  "    u8 buf[0x10]; " + MARK),
+        (1, r"^    u8 buf\[0x2000\];$", "    u8 buf[0x10]; " + MARK),
+        (1, r"^    u8 buf\[0x3000\];$", "    u8 buf[0x10]; " + MARK),
+        (1, r"^    u8 buf\[0x2800\];$", "    u8 buf[0x10]; " + MARK),
+
+        # -- CORRECTNESS, not size. The one exception in this file. ----------
+        # aNPC_setupActor_proc is `static int` and FALLS OFF ITS END: its last
+        # statement is an unused call to aNPC_setupActor_sub, which does return
+        # an int. Reading the result of a function that returned nothing is
+        # undefined, and four call sites read it -- through the
+        # npc_clip->setupActor_proc pointer this function is installed in at
+        # :818 and :1075:
+        #
+        #   m_post_office.c:399,416   spawned_postman  (the postman)
+        #   ac_groundhog_control.c:134 spawned_actor   (the shrine groundhog)
+        #   ac_shrine_move.c_inc:317   made_hem
+        #   ac_birth_control.c:213     was_born        (VILLAGER BIRTH)
+        #
+        # It happens to work at -O0 on SH-4 because aNPC_setupActor_sub's
+        # return value is already in r0 and this epilogue does not clobber it.
+        # That is an accident of codegen, not a guarantee, and it is exactly
+        # the class of bug that appears when something unrelated moves.
+        # Upstream ACGC-PC-Port hit it as a hard softlock and fixed it in
+        # 3b650ae1 ("Fix Nook not spawning softlock"); this is that commit's
+        # first hunk, and the ONLY part of it that applies to us -- the rest of
+        # 3b650ae1 enlarges aNPC_actor_class_overlay_c::buf from 0x9D0 to 0xA40
+        # for a 64-bit ABI, and sizeof(NPC_GUIDE_ACTOR) is exactly 0x9D0 here.
+        #
+        # ⚠️ COUPLING: this rides the DC_SRC_SHRINK tree, so DC_SRC_SHRINK=0
+        # turns the fix off along with the shrinks. That is acceptable only
+        # because the -O0 codegen accident above makes the unfixed form work
+        # today; if this ever becomes load-bearing, move it to its own
+        # rewriter with its own switch.
+        (1,
+         r"^    aNPC_setupActor_sub\(play, idx, name, profile, &pos, mvlist_no, arg\);$",
+         "    return aNPC_setupActor_sub(play, idx, name, profile, &pos, mvlist_no, arg); "
+         + MARK),
+    ]
+
+    # -- S11 (R2): the load seam. See the block comment above NPCTEX_GUARD. --
+    # The WHOLE function is the anchor, not just the mem_copy line: the
+    # replacement has to introduce the extern and the layout assert at file
+    # scope, and anchoring on the body is what proves `idx` is the value the
+    # mem_copy is about to index with.
+    body = (
+        r"^static void aNPC_dma_draw_data_proc\(aNPC_draw_data_c\* draw_data_p,"
+        r" mActor_name_t npc_name\) \{\n"
+        r"    int idx = aNPC_get_draw_data_idx\(npc_name\);\n"
+        r"\n"
+        r"    mem_copy\(\(u8\*\)draw_data_p, \(u8\*\)&npc_draw_data_tbl\[idx\],"
+        r" sizeof\(aNPC_draw_data_c\)\);\n"
+        r"\}$"
+    )
+    head = NPCTEX_GUARD(npctex_pool) + "\n"
+    if npctex_pool:
+        head += (
+            "/* DC_SRC_SHRINK S11: R2's LOAD seam. `idx` is the\n"
+            " * npc_draw_data_tbl[] row this function is about to snapshot, and\n"
+            " * the snapshot is what the DRAW reads (ac_npc_draw.c_inc:227 uses\n"
+            " * the actor's private &nactorx->draw.draw_tex_data, not the\n"
+            " * table) — so the pool has to fill the row HERE, one statement\n"
+            " * earlier, or a later patch changes nothing that is ever drawn.\n"
+            " * dc_npctex_ensure() ignores idx < 0 (this function does not) and\n"
+            " * every special-NPC row, so Tom Nook and the raccoons are\n"
+            " * untouched. Declared rather than pulled from dc_platform.h: this\n"
+            " * TU is vendored decomp and must not grow a dc/ include. */\n"
+            "extern void dc_npctex_ensure(int row);\n"
+            "/* dc/src/dc_npctex.c hardcodes this layout in raw bytes because it\n"
+            " * cannot include ac_npc.h. This is where those literals are\n"
+            " * pinned; if the vendored struct moves, this TU stops compiling\n"
+            " * instead of the pool writing pointers into the wrong fields. */\n"
+            + ASSERT("npctex_layout", NPCTEX_LAYOUT_ASSERT) + "\n")
+    head += NPCMDL_GUARD(npcmdl_pool) + "\n"
+    if npcmdl_pool:
+        head += (
+            "/* DC_SRC_SHRINK S12: R3's LOAD seam, riding S11's. Same `idx`,\n"
+            " * same choke point — the two halves of a villager have to arrive\n"
+            " * together or R2 paints a correct skin onto a black spiky mess.\n"
+            " * dc_npcmdl_ensure() ignores idx < 0 and every special-NPC row,\n"
+            " * and the 40 special skeletons are not in its map at all, so Tom\n"
+            " * Nook and the raccoons are untouched twice over. */\n"
+            "extern void dc_npcmdl_ensure(int row);\n"
+            "/* dc/src/dc_npcmdl.c walks npc_draw_data_tbl[] -> the skeleton ->\n"
+            " * the joint table -> a Gfx word in raw bytes, because it cannot\n"
+            " * include ac_npc.h or c_keyframe.h. This is where those literals\n"
+            " * are pinned; if the vendored structs move, this TU stops\n"
+            " * compiling instead of the pool writing a pool address into some\n"
+            " * other display-list word. */\n"
+            + ASSERT("npcmdl_layout", NPCMDL_LAYOUT_ASSERT) + "\n")
+
+    tail = (
+        "static void aNPC_dma_draw_data_proc(aNPC_draw_data_c* draw_data_p,"
+        " mActor_name_t npc_name) {\n"
+        "    int idx = aNPC_get_draw_data_idx(npc_name);\n"
+        "\n"
+    )
+    if npctex_pool:
+        tail += "    dc_npctex_ensure(idx); " + MARK + "\n"
+    if npcmdl_pool:
+        tail += "    dc_npcmdl_ensure(idx); " + MARK + "\n"
+    tail += (
+        "    mem_copy((u8*)draw_data_p, (u8*)&npc_draw_data_tbl[idx],"
+        " sizeof(aNPC_draw_data_c));\n"
+        "}"
+    )
+    rules.append((1, body, head + tail))
+
+    return ("src/actor/npc/ac_npc_ctrl.c_inc", "shadow", rules)
+
+
+def _s11_reset_rules(npctex_pool, npcmdl_pool):
+    """The two RESET sites, shared by S11 (R2) and S12 (R3). SWAPS: both are .c
+    files compiled directly, so -I cannot reach them, and neither is in
+    stub.list (main() hard-errors if that ever changes).
+
+    Each entry is two rules — an anchor at the enclosing function's opening
+    brace that introduces the guards and the externs, and the calls themselves
+    right after mNpc_SetNpcList(). Anchoring the call on its full argument list
+    is what keeps this from silently landing on the ISLAND callers, which take a
+    different list and must NOT reset.
+    """
+    def head(what):
+        h = NPCTEX_GUARD(npctex_pool) + "\n"
+        if npctex_pool:
+            h += (
+                "/* DC_SRC_SHRINK S11: R2's RESET seam (%s). The villager\n"
+                " * texture pool never evicts — an actor keeps a private copy of\n"
+                " * the 16 texture pointers (ac_npc_ct.c_inc:256), so reusing a\n"
+                " * slot under a live actor swaps one animal's skin onto\n"
+                " * another. This is one of exactly TWO points that rebuild the\n"
+                " * whole npclist AND are between scene teardowns, i.e. where no\n"
+                " * NPC actor can exist. Do not move it and do not add a third.\n"
+                " * dc/src/dc_npctex.c carries the whole argument. */\n"
+                "extern void dc_npctex_pool_reset(void);\n" % what)
+        h += NPCMDL_GUARD(npcmdl_pool) + "\n"
+        if npcmdl_pool:
+            h += (
+                "/* DC_SRC_SHRINK S12: R3's RESET seam, the same point and the\n"
+                " * same rule. The MODEL pool never evicts either, and for a\n"
+                " * harder reason: a species' display lists are GLOBAL, so\n"
+                " * reusing a slot would put one animal's vertices into every\n"
+                " * live actor of another, mid-frame. The reset also puts the\n"
+                " * 933 patched gsSPVertex words back to the stub arrays they\n"
+                " * pointed at when linked. dc/src/dc_npcmdl.c carries the\n"
+                " * argument. */\n"
+                "extern void dc_npcmdl_pool_reset(void);\n")
+        return h
+
+    def calls():
+        out = []
+        if npctex_pool:
+            out.append("    dc_npctex_pool_reset(); " + MARK)
+        if npcmdl_pool:
+            out.append("    dc_npcmdl_pool_reset(); " + MARK)
+        if not out:
+            out.append("    /* DC_NPCTEX_POOL=0, DC_NPCMDL_POOL=0: no pool to"
+                       " reset. */")
+        return "\n".join(out)
+
+    out = []
+    out.append(("src/game/m_start_data_init.c", "swap", [
+        (1,
+         r"^extern void mSDI_StartInitAfter\(GAME\* game, int renew_mode,"
+         r" int malloc_flag\) \{$",
+         head("mSDI_StartInitAfter — player-select / game start")
+         + "extern void mSDI_StartInitAfter(GAME* game, int renew_mode,"
+           " int malloc_flag) {"),
+        (1,
+         r"^    mNpc_SetNpcList\(Common_Get\(npclist\), animals, ANIMAL_NUM_MAX,"
+         r" malloc_flag\);$",
+         "    mNpc_SetNpcList(Common_Get(npclist), animals, ANIMAL_NUM_MAX,"
+         " malloc_flag);\n" + calls()),
+    ]))
+    out.append(("src/game/m_trademark.c", "swap", [
+        (1,
+         r"^static int set_npc_4_title_demo\(GAME_TRADEMARK\* trademark\) \{$",
+         head("set_npc_4_title_demo — the 14 title-demo villagers")
+         + "static int set_npc_4_title_demo(GAME_TRADEMARK* trademark) {"),
+        (1,
+         r"^    mNpc_SetNpcList\(Common_Get\(npclist\), animals, demo_npc_num,"
+         r" 0\);$",
+         "    mNpc_SetNpcList(Common_Get(npclist), animals, demo_npc_num, 0);\n"
+         + calls()),
+    ]))
+    return out
 
 
 def _s7_rules(bgtex_demand):
@@ -1336,15 +1713,42 @@ def main():
                          "that make_stub_data.py was run with, and "
                          "dc/Makefile's DC_BGTEX_DEMAND; the generated TU "
                          "#errors on either mismatch.")
+    ap.add_argument("--npctex-pool", type=int,
+                    default=int(os.environ.get("DC_NPCTEX_POOL", "1") or "1"),
+                    choices=(0, 1),
+                    help="R2 (S11). 1 (the default, matching dc/Makefile) "
+                         "inserts the villager texture pool's load call into "
+                         "aNPC_dma_draw_data_proc and its reset call into the "
+                         "two mNpc_SetNpcList() sites that rebuild the whole "
+                         "npclist. 0 inserts nothing. It MUST match the "
+                         "--npctex-pool= that make_stub_data.py was run with, "
+                         "and dc/Makefile's DC_NPCTEX_POOL; the generated TUs "
+                         "#error on either mismatch.")
+    ap.add_argument("--npcmdl-pool", type=int,
+                    default=int(os.environ.get("DC_NPCMDL_POOL", "1") or "1"),
+                    choices=(0, 1),
+                    help="R3 (S12). 1 (the default, matching dc/Makefile) "
+                         "inserts the villager MODEL pool's load call into "
+                         "aNPC_dma_draw_data_proc beside R2's and its reset "
+                         "call into the same two mNpc_SetNpcList() sites. 0 "
+                         "inserts nothing. It MUST match the --npcmdl-pool= "
+                         "that make_stub_data.py was run with, and "
+                         "dc/Makefile's DC_NPCMDL_POOL; the generated TUs "
+                         "#error on either mismatch.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     audio = bool(args.audio)
     bgtex = bool(args.bgtex_demand)
-    # S7 is built here, not at import time, because S10 rides in its
-    # src/game/m_field_make.c entry and needs the parsed flag.
-    rules_all = RULES + _s7_rules(bgtex) + _audio_rules(audio)
+    npctex = bool(args.npctex_pool)
+    npcmdl = bool(args.npcmdl_pool)
+    # S7 and S1c are built here, not at import time, because S10 rides in S7's
+    # src/game/m_field_make.c entry and S11 + S12 ride in S1c's
+    # src/actor/npc/ac_npc_ctrl.c_inc entry, and all need the parsed flags.
+    rules_all = (RULES + [_s1c_rules(npctex, npcmdl)]
+                 + _s11_reset_rules(npctex, npcmdl)
+                 + _s7_rules(bgtex) + _audio_rules(audio))
     expected = EXPECTED + ([] if audio else EXPECTED_AUDIO_OFF)
 
     out_root = Path(args.out).resolve()
@@ -1465,6 +1869,28 @@ def main():
         if bgtex:
             print("                   150,880 B of mFM_grd_* no longer needs "
                   "keeping (80,736 B of it was)")
+        # Same story as S10: R2's saving is a KEEP-LIST saving, so the number
+        # lands in make_stub_data.py's report and not here.
+        print("  R2 / S11       : aNPC_dma_draw_data_proc {}"
+              "   [--npctex-pool={}]".format(
+                  "+ dc_npctex_ensure(), 2 reset sites" if npctex
+                  else "left alone", args.npctex_pool))
+        if npctex:
+            print("                   993,984 B of villager tex no longer needs "
+                  "keeping (90,464 B of it was)")
+        # ⚠️ R3 is the one rule in this file that SPENDS .bss. Printed as a cost
+        # so nobody reads it off the S8/S7 lines above as another saving.
+        print("  R3 / S12       : aNPC_dma_draw_data_proc {}"
+              "   [--npcmdl-pool={}]".format(
+                  "+ dc_npcmdl_ensure(), 2 reset sites" if npcmdl
+                  else "left alone", args.npcmdl_pool))
+        if npcmdl:
+            print("                   194,400 B of villager mdl served from "
+                  "16 x 7,552 B slots;")
+            print("                   only 5,536 B (cbr_1) was ever resident, "
+                  "so this COSTS ~115,296 B")
+            print("                   of .bss and buys 31 species their "
+                  "geometry")
         print("  (dc/Makefile adds -16,384 more by dropping KOS's dcache")
         print("   walk buffer out of dc/src/dc_os.c — see DC_OS_TU_OPT there.)")
 

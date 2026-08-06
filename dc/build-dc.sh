@@ -15,6 +15,20 @@
 #                                         # ground textures back in .bss
 #                                         # (+80,736 B) instead of reading them
 #                                         # off the disc. Default 1.
+#     DC_NPCTEX_POOL=0 bash dc/build-dc.sh
+#                                         # kill switch for R2 — puts the 21
+#                                         # censused villager texture sets back
+#                                         # in .bss (+90,464 B) and leaves the
+#                                         # other 215 species untextured, as
+#                                         # before R2. Default 1.
+#     DC_NPCMDL_POOL=0 bash dc/build-dc.sh
+#                                         # kill switch for R3 — gives back the
+#                                         # 16-slot villager MODEL pool
+#                                         # (-115,296 B of .bss) and leaves 31
+#                                         # species drawing as a black spiky
+#                                         # mess, as before R3. Default 1.
+#                                         # DC_NPCMDL_SLOTS=<N> cuts the pool
+#                                         # without turning it off (7,552 B each).
 #     DC_CDI_PAD=1  bash dc/build-dc.sh   # padded 740 MB CDI for CD-R burns
 #     JOBS=8        bash dc/build-dc.sh
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
@@ -56,11 +70,25 @@ fi
 # It is expanded HERE rather than left to the container so that one value drives
 # both generators and dc/Makefile's -DDC_BGTEX_DEMAND; the generated
 # m_field_make.c #errors if they disagree, but only after a full compile.
+#
+# --npctex-pool is R2's kill switch and works exactly the same way: this tool
+# emits dc_npctex_map.inc (or, at 0, puts the 21 censused villager tex files
+# back on the keep list), and make_src_shrink.py below inserts the load and
+# reset calls that use it.
+#
+# --npcmdl-pool is R3's, same shape again: dc_npcmdl_map.inc (or, at 0, cbr_1
+# back on the keep list) here, the load and reset calls there. ⚠️ Unlike R1 and
+# R2 this one COSTS ~115,296 B of .bss; it buys 31 villager species the geometry
+# they never had. See the DC_NPCMDL_POOL block in dc/Makefile.
 if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
     echo "-- DC_ASSET_STUB=1: regenerating $REPO/dc/build/stubsrc" \
-         "(DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1})"
+         "(DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
+         "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
+         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0})"
     python3 "$REPO/tools/dcstub/make_stub_data.py" \
-        --bgtex-demand="${DC_BGTEX_DEMAND:-1}"
+        --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
+        --npctex-pool="${DC_NPCTEX_POOL:-0}" \
+        --npcmdl-pool="${DC_NPCMDL_POOL:-0}"
 fi
 
 # DC_SRC_SHRINK=1 (the DEFAULT) -> the .bss literal-shrink tree, 1,159,392 B of
@@ -95,9 +123,13 @@ fi
 
 if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
     echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc" \
-         "(DC_AUDIO=${DC_AUDIO:-0} DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1})"
+         "(DC_AUDIO=${DC_AUDIO:-0} DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
+         "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
+         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0})"
     python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
-        --bgtex-demand="${DC_BGTEX_DEMAND:-1}"
+        --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
+        --npctex-pool="${DC_NPCTEX_POOL:-0}" \
+        --npcmdl-pool="${DC_NPCMDL_POOL:-0}"
 fi
 
 ENVARGS=(
@@ -140,6 +172,25 @@ ENVARGS=(
 # `#if defined(DC_BGTEX_DEMAND) && !DC_BGTEX_DEMAND` is a preprocessor error
 # rather than a wrong build. The two generators above already saw the value.
 [ -n "${DC_BGTEX_DEMAND+x}" ] && ENVARGS+=(-e DC_BGTEX_DEMAND="$DC_BGTEX_DEMAND")
+# R2's kill switch, forward-only for exactly the same reason: dc/Makefile has
+# `DC_NPCTEX_POOL ?= 0`, and a plain `-e DC_NPCTEX_POOL=` would blank it and
+# expand -DDC_NPCTEX_POOL= into every TU, where the rewritten TUs'
+# `#if defined(DC_NPCTEX_POOL) && !DC_NPCTEX_POOL` is a preprocessor error.
+# The two generators above already saw the value.
+[ -n "${DC_NPCTEX_POOL+x}" ] && ENVARGS+=(-e DC_NPCTEX_POOL="$DC_NPCTEX_POOL")
+# The pool's slot count. dc/Makefile guards it with `ifneq (…,)` so an empty
+# value would be harmless here, but it is forwarded the same way as every other
+# optional knob so the ENVARGS list has one rule rather than two.
+[ -n "${DC_NPCTEX_SLOTS+x}" ] && ENVARGS+=(-e DC_NPCTEX_SLOTS="$DC_NPCTEX_SLOTS")
+# R3's kill switch, forward-only for exactly the same reason: dc/Makefile has
+# `DC_NPCMDL_POOL ?= 0`, and a plain `-e DC_NPCMDL_POOL=` would blank it and
+# expand -DDC_NPCMDL_POOL= into every TU, where the rewritten TUs'
+# `#if defined(DC_NPCMDL_POOL) && !DC_NPCMDL_POOL` is a preprocessor error.
+# The two generators above already saw the value.
+[ -n "${DC_NPCMDL_POOL+x}" ] && ENVARGS+=(-e DC_NPCMDL_POOL="$DC_NPCMDL_POOL")
+# The model pool's slot count, same forwarding rule as DC_NPCTEX_SLOTS above.
+# This is the knob to reach for first if R3's 120,832 B does not fit.
+[ -n "${DC_NPCMDL_SLOTS+x}" ] && ENVARGS+=(-e DC_NPCMDL_SLOTS="$DC_NPCMDL_SLOTS")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has
 # DC_EMU64_HIST ?= 0, so from the HOST entry point a DC_EMU64_HIST=300 build

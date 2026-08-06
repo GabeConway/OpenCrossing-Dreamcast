@@ -131,10 +131,83 @@ membership — the point is that none of them are kept.
                        kill switch, and it must be paired with the same flag on
                        make_src_shrink.py (dc/build-dc.sh passes both).
 
+THE VILLAGER TEXTURES — dc_npctex_map.inc (R2, --npctex-pool)
+-------------------------------------------------------------
+Same shape, different seam. src/data/npc/model/tex/*.c is 1,154,944 B of .bss
+in 276 sets, of which 236 (993,984 B) are VILLAGER sets — and a town holds at
+most 15 villagers (ANIMAL_NUM_MAX) plus one islander. So at most 16 of the 236
+can be wanted at once and the keep list was paying for the 21 a census run
+happened to see, leaving 215 species with no texture at all.
+
+So this script ALSO emits
+
+    dc/build/stubsrc/dc_npctex_map.inc
+
+one row per distinct villager set — {rom_off, size, body offset, mouths,
+rom_src} — plus an npc_draw_data_tbl[] row -> set index. dc/src/dc_npctex.c
+owns 16 static slots, reads a set into one of them off the disc, and rewrites
+the 16 pointers of that table row. Those pointers are never baked into a
+display list (the draw binds them through N64 segment registers,
+ac_npc_draw.c_inc:269-278), so there is no relocation to do.
+
+Rows at or above ALL_NPC_NUM are the SPECIAL NPCs — Tom Nook, Rover, K.K.,
+Porter, the raccoons — and are deliberately absent: they are not
+town-randomised, they stay on the keep list via
+tools/dcstub/make_keeplist_town.py's EXTRA_SOURCES, and dropping them silently
+has already cost this project a session.
+
+    --npctex-pool 0    emit an empty map AND put the 21 censused villager
+                       tex files back on the keep list. Same pairing rule as
+                       --bgtex-demand.
+
+THE VILLAGER MODELS — dc_npcmdl_map.inc (R3, --npcmdl-pool)
+------------------------------------------------------------
+R2's other half, and the one that needs RELOCATION. src/data/npc/model/mdl/ is
+72 files x one `static Vtx <sp>_v[]`, 438,640 B, of which 32 species / 194,400 B
+are reachable from a VILLAGER row of npc_draw_data_tbl[] and 40 species /
+244,240 B only from a SPECIAL row. Measured 2026-08-05: the two sets do not
+intersect at all, which is why the villager half can be pooled without ever
+touching Tom Nook.
+
+Textures were free to move because the draw binds them through segment
+registers. Vertices are not: every one of the 2,068 `gsSPVertex(&<sp>_v[N],…)`
+in that tree is an R_SH_DIR32 relocation resolved at link time into word 1 of an
+initialised Gfx, and emu64::seg2k0 (emu64_utility.c:48-51) returns any address
+with a non-zero upper nibble unchanged — so on SH-4 the 0x8Cxxxxxx in .data IS
+the address the vertex fetch uses. Moving the array means rewriting those words.
+
+So this script ALSO emits
+
+    dc/build/stubsrc/dc_npcmdl_map.inc
+
+one row per villager species — {&cKF_bs_r_<sp>, rom_off, size, rom_src} — plus
+a flat patch table of {joint index, Gfx index, byte offset} triples, 933 of them
+for the villager half. dc/src/dc_npcmdl.c owns 16 static slots, reads a species'
+vertex array into one off the disc, and walks the patch table writing
+slot + offset into each named word. It reaches the display lists through the
+extern skeleton (`&cKF_bs_r_<sp>` -> joint_table[j].model), because both
+`<sp>_v` and all 13 `*_model[]` lists are `static` and cannot be named from dc/.
+
+⚠️ WHY A TABLE AND NOT A RUNTIME WALK OF THE DISPLAY LIST. gsSPNTriangles_5b
+(gbi_extensions.h:1190) packs triangle indices into the TOP BYTE of w0, so a
+G_TRIN payload word has no opcode and can read as any command — G_VTX (0x01)
+included, whenever v11 == 0 and v10 is in 4..7. emu64::dl_G_TRIN (emu64.c:4802)
+consumes those words by COUNT, 3 on the first pass and 4 thereafter, so a walker
+would have to reimplement that rule exactly or it would write a slot address
+into a neighbouring word and corrupt geometry silently. The table is computed
+once, offline, from the macro expansions; and dc_npcmdl.c re-checks every entry
+against the live word before it writes anything.
+
+    --npcmdl-pool 0    emit an empty map AND put cbr_1 — the one VILLAGER model
+                       the census keep list named — back on the keep list. Same
+                       pairing rule as --bgtex-demand.
+
 USAGE
 -----
     python3 tools/dcstub/make_stub_data.py [--out DIR] [--keep LIST]
                                            [--bgtex-demand 0|1]
+                                           [--npctex-pool 0|1]
+                                           [--npcmdl-pool 0|1]
                                            [--dry-run] [--quiet]
 
 Default --out is dc/build/stubsrc. The tree mirrors repo-relative paths, so
@@ -213,6 +286,151 @@ BGTEX_KEEP_RESTORE = (
     "src/data/model/mFM_grd_wave1_tex.c",
     "src/data/model/mFM_grd_wave2_tex.c",
     "src/data/model/mFM_grd_wave3_tex.c",
+)
+
+# ---------------------------------------------------------------------------
+# R2 — the villager texture pool. See dc/src/dc_npctex.c.
+# ---------------------------------------------------------------------------
+# Name and row shape are the contract with dc/src/dc_npctex.c, which defines the
+# matching typedef. Change both or neither.
+NPCTEX_INC_NAME = "dc_npctex_map.inc"
+NPCTEX_TABLE = "src/data/npc/npc_draw_data.c"
+NPCTEX_SRC_DIR = "src/data/npc/model/tex"
+NPCTEX_BODY_SUFFIX = "_tmem_txt"
+
+# The vendored shape, all four checked against every s_assets[] row the map
+# emits. include/ac_npc.h:128 / :138 are the two counts; the sizes are the
+# generator's own measurement across all 236 sets.
+NPCTEX_EYE_NUM = 8            # aNPC_EYE_TEX_NUM
+NPCTEX_MOUTH_NUM = 6          # aNPC_MOUTH_TEX_NUM
+NPCTEX_PAL_SIZE = 32          # 16 entries x u16, the only swapped member
+NPCTEX_FACE_SIZE = 256        # every eye and every mouth, in all 236 sets
+
+# The three checksums, same rule as BGTEX_ROWS_EXPECTED: a selector that
+# silently stops matching produces a build that looks fine, pools fewer species
+# than it thinks, and renders those villagers untextured.
+#   382  npc_draw_data_tbl[] rows      (pc/src/pc_model_viewer.c:321 agrees)
+#   238  ALL_NPC_NUM, the villager/special boundary
+#   236  distinct villager texture sets  (993,984 B; the other 40 sets and
+#        160,960 B are the special NPCs and are NOT pooled)
+NPCTEX_ROWS_TOTAL = 382
+NPCTEX_VILLAGER_ROWS = 238
+NPCTEX_SETS_EXPECTED = 236
+
+# --npctex-pool 0 puts these back on the keep list. This is the list
+# keeplist-opening.txt carried until R2 landed, verbatim: the 21 VILLAGER
+# texture sets a census happened to see. The other 215 were never on it — that
+# is the bug R2 fixes — so turning the switch off restores the OLD behaviour
+# exactly, 215 untextured villagers included.
+#
+# ⚠️ The ten SPECIAL sets that were on that list alongside them (end_1, kab_1,
+# mnk_1, mob_1, mol_1, mos_1, wip_1, wls_1, xct_1, xsq_1) are NOT here and were
+# NOT removed: rows >= ALL_NPC_NUM are never pooled, so they stay on the keep
+# list in both directions. Same for Tom Nook and the raccoons in
+# make_keeplist_town.py's EXTRA_SOURCES.
+NPCTEX_KEEP_RESTORE = (
+    "src/data/npc/model/tex/cat_6.c",
+    "src/data/npc/model/tex/cat_7.c",
+    "src/data/npc/model/tex/cbr_5.c",
+    "src/data/npc/model/tex/cbr_9.c",
+    "src/data/npc/model/tex/chn_6.c",
+    "src/data/npc/model/tex/crd_2.c",
+    "src/data/npc/model/tex/dog_4.c",
+    "src/data/npc/model/tex/dog_8.c",
+    "src/data/npc/model/tex/duk_11.c",
+    "src/data/npc/model/tex/duk_8.c",
+    "src/data/npc/model/tex/flg_1.c",
+    "src/data/npc/model/tex/flg_10.c",
+    "src/data/npc/model/tex/flg_11.c",
+    "src/data/npc/model/tex/goa_1.c",
+    "src/data/npc/model/tex/goa_3.c",
+    "src/data/npc/model/tex/goa_6.c",
+    "src/data/npc/model/tex/kal_1.c",
+    "src/data/npc/model/tex/kal_2.c",
+    "src/data/npc/model/tex/wol_1.c",
+    "src/data/npc/model/tex/wol_4.c",
+    "src/data/npc/model/tex/wol_6.c",
+)
+
+# ---------------------------------------------------------------------------
+# R3 — the villager MODEL pool. See dc/src/dc_npcmdl.c.
+# ---------------------------------------------------------------------------
+# Name and row shapes are the contract with dc/src/dc_npcmdl.c, which defines
+# the matching typedefs. Change both or neither.
+NPCMDL_INC_NAME = "dc_npcmdl_map.inc"
+NPCMDL_SRC_DIR = "src/data/npc/model/mdl"
+
+# How many Gfx entries each gs* macro used in that tree expands to. This is the
+# ONE number the whole patch table rests on, so every value here was read out of
+# the macro definition rather than assumed:
+#
+#   gsSPMatrix            -> gsDma2p                            gbi.h:1930   1
+#   gsSPTexture                                                 gbi.h:2915   1
+#   gsSPLoadGeometryMode  -> gsSPGeometryMode                   gbi.h:3023   1
+#   gsSPVertex            (F3DEX_GBI_2 form; dc/Makefile:325)   gbi.h:1967   1
+#   gsDPSetRenderMode     -> gsSPSetOtherMode                   gbi.h:3071   1
+#   gsDPSetCombineLERP                                          gbi.h:3270   1
+#   gsDPSetCombineMode    -> gsDPSetCombineLERP                 gbi.h:3295   1
+#   gsDPSetTileSize       -> gsDPLoadTileGeneric                gbi.h:3473   1
+#   gsDPSetPrimColor                                            gbi.h:3353   1
+#   gsSPNTrianglesInit_5b                        gbi_extensions.h:1196       1
+#   gsSPNTriangles_5b                            gbi_extensions.h:1190       1
+#   gsSPEndDisplayList                                          gbi.h:3002   1
+#   gsDPLoadTextureBlock_4b_Dolphin              gbi_extensions.h:1133       2
+#
+# ⚠️ THE LAST ONE IS WHY THIS TABLE EXISTS. It is a comma pair —
+# gsDPSetTextureImage_Dolphin THEN gsDPSetTile_Dolphin — so it contributes TWO
+# Gfx, and there are 1,619 of them in the tree. "one macro, one Gfx" would put
+# every patch after the first texture load in a list off by one or more, which
+# writes a slot address over a triangle packet. A macro that is not in this
+# table is a HARD ERROR, never a default of 1.
+NPCMDL_GFX_WORDS = {
+    "gsSPMatrix": 1,
+    "gsSPTexture": 1,
+    "gsSPLoadGeometryMode": 1,
+    "gsSPVertex": 1,
+    "gsDPSetRenderMode": 1,
+    "gsDPSetCombineLERP": 1,
+    "gsDPSetCombineMode": 1,
+    "gsDPSetTileSize": 1,
+    "gsDPSetPrimColor": 1,
+    "gsSPNTrianglesInit_5b": 1,
+    "gsSPNTriangles_5b": 1,
+    "gsSPEndDisplayList": 1,
+    "gsDPLoadTextureBlock_4b_Dolphin": 2,
+}
+
+# sizeof(Vtx) — gbi.h:1096-1100, a union of Vtx_t (16 B) with a long long. The
+# .c files spell their bound `<sp>_v[0x1430 / sizeof(Vtx)]`, so this is what
+# turns a gsSPVertex element index into a byte offset. Pinned on the other side
+# by make_src_shrink.py's npcmdl layout assert, which does have the header.
+NPCMDL_VTX_SIZE = 16
+
+# The checksums, same rule as BGTEX_ROWS_EXPECTED. Measured 2026-08-05 across
+# all 72 src/data/npc/model/mdl/*.c:
+#     72   species files, one `static Vtx <sp>_v[]` each, 438,640 B
+#    940   display lists, == the gsSPEndDisplayList count, each named by
+#          exactly one joint of exactly one skeleton
+#  2,068   gsSPVertex words, all of the form `&<sp>_v[N]`, no exceptions
+#     32   species reachable from a VILLAGER row (194,400 B) -- what R3 pools
+#     40   species reachable ONLY from a SPECIAL row (244,240 B) -- never pooled
+# A selector that stops matching would emit a SHORT patch table, and a species
+# whose lists are half-patched draws half its geometry out of another animal's
+# slot. That must fail the build, not the frame.
+NPCMDL_FILES_EXPECTED = 72
+NPCMDL_LISTS_EXPECTED = 940
+NPCMDL_VTXCMD_EXPECTED = 2068
+NPCMDL_VILLAGER_EXPECTED = 32
+
+# --npcmdl-pool 0 puts this back on the keep list. ONE file: of the twelve
+# mdl/*.c the keep lists name, eleven (end_1, hgh_1, kab_1, mnk_1, xct_1 in
+# keeplist-opening.txt; rcc_1, rcd_1, rcf_1, rcn_1, rcs_1, tuk_1 in
+# make_keeplist_town.py's EXTRA_SOURCES) are SPECIAL-NPC skeletons that R3 never
+# pools and that stay kept in both directions. cbr_1 is the only villager model
+# that was ever resident, so turning the switch off restores the OLD behaviour
+# exactly — 31 villager species drawing as a black spiky mess included.
+NPCMDL_KEEP_RESTORE = (
+    "src/data/npc/model/mdl/cbr_1.c",
 )
 
 # ---------------------------------------------------------------------------
@@ -881,6 +1099,768 @@ def emit_bgtex_map(table, demand):
     return "\n".join(L), len(names), n_bytes
 
 
+def _all_npc_num():
+    """ALL_NPC_NUM — the villager/special boundary in npc_draw_data_tbl[].
+
+    Read out of include/m_name_table.h rather than typed here: it is what
+    aNPC_get_draw_data_idx() (ac_npc_ctrl.c_inc:154-187) adds to a special NPC's
+    id, so rows below it are NAME_TYPE_NPC villagers and rows at or above it are
+    NAME_TYPE_SPNPC.
+    """
+    hdr = (REPO / "include" / "m_name_table.h").read_text(
+        encoding="utf-8", errors="surrogateescape")
+    m = re.search(r"^#define NPC_NUM (\d+)$", hdr, re.MULTILINE)
+    if not m:
+        raise SystemExit(
+            "make_stub_data: cannot find `#define NPC_NUM` in "
+            "include/m_name_table.h. That macro is the villager/special "
+            "boundary (ALL_NPC_NUM = NPC_NUM + 2); do not guess it.")
+    # m_name_table.h:149 -- "+ 2 to include the two test villagers".
+    return int(m.group(1)) + 2
+
+
+def parse_npc_draw_data():
+    """The villager half of npc_draw_data_tbl[], as ordered symbol lists.
+
+    Returns (rows, n_total) where rows[i] is the 16 symbol names of villager row
+    i in aNPC_draw_tex_data_c order (texture, palette, eye[8], mouth[6]) and
+    n_total is the whole table's row count. 'NULL' is a legal entry — 78 of the
+    236 villager sets have no mouth textures and ac_npc_draw.c_inc:272 tests for
+    it.
+
+    The villager/special boundary is ALL_NPC_NUM, which is what
+    aNPC_get_draw_data_idx() (ac_npc_ctrl.c_inc:154-187) adds to a special NPC's
+    id: rows below it are NAME_TYPE_NPC villagers, rows at or above it are
+    NAME_TYPE_SPNPC. It is read out of m_name_table.h rather than typed here.
+    """
+    all_npc_num = _all_npc_num()
+
+    text = (REPO / NPCTEX_TABLE).read_text(
+        encoding="utf-8", errors="surrogateescape")
+    try:
+        body = text[text.index("npc_draw_data_tbl[] = {"):]
+    except ValueError:
+        raise SystemExit(
+            "make_stub_data R2: %s no longer defines npc_draw_data_tbl[]."
+            % NPCTEX_TABLE)
+
+    raw = re.findall(r"\n    \{\n(.*?)\n    \},", body, re.S)
+    rows = []
+    for i, r in enumerate(raw):
+        m = re.search(
+            r"\{\n\s+(\w+),\n\s+(\w+),\n"
+            r"\s+\{\n((?:\s+\w+,\n){%d})\s+\},\n"
+            r"\s+\{\n((?:\s+\w+,\n){%d})\s+\},"
+            % (NPCTEX_EYE_NUM, NPCTEX_MOUTH_NUM), r)
+        if not m:
+            raise SystemExit(
+                "make_stub_data R2: row %d of npc_draw_data_tbl[] does not "
+                "match the aNPC_draw_tex_data_c shape (texture, palette, "
+                "eye[%d], mouth[%d]). The vendored table has changed; "
+                "re-derive the parser rather than skipping the row -- a "
+                "skipped row is a villager that renders untextured."
+                % (i, NPCTEX_EYE_NUM, NPCTEX_MOUTH_NUM))
+        rows.append([m.group(1), m.group(2)]
+                    + re.findall(r"(\w+),", m.group(3))
+                    + re.findall(r"(\w+),", m.group(4)))
+    return rows, all_npc_num
+
+
+def emit_npctex_map(table, keep_paths, pool):
+    """Build the text of dc_npctex_map.inc. Returns (text, n_sets, n_bytes).
+
+    One row per DISTINCT villager texture set, keyed by its position in
+    npc_draw_data_tbl[] through dc_npctex_row_set[]. dc/src/dc_npctex.c is the
+    consumer and carries the argument.
+
+    THE WHOLE DESIGN RESTS ON ONE MEASURED FACT and this function is where it is
+    checked: every villager set is CONTIGUOUS in the ROM, in declaration order
+    (palette, eye1..8, mouth1..6, body), from one rom_src, with the palette the
+    only byte-swapped member. That makes a set two disc reads and a base
+    pointer instead of sixteen rows of (size, offset, swap). If it ever stops
+    being true this hard-errors -- it must not degrade into a short map, because
+    a set that silently loses its body texture renders as a missing asset and
+    reads as a renderer bug for hours (kb/traps.md).
+
+    `pool` False emits only the count macro and no table, so the runtime
+    compiles to a pair of empty functions and nothing is left unreferenced.
+    """
+    L = []
+    L.append("/* GENERATED by tools/dcstub/make_stub_data.py — DO NOT EDIT. */")
+    L.append("/*")
+    L.append(" * R2: the villager texture pool. Each row is one DISTINCT set of")
+    L.append(" * 16 textures out of src/data/npc/model/tex/, described by where")
+    L.append(" * its bytes live in the ROM rather than by an address — nothing")
+    L.append(" * here is resident. dc_npctex_row_set[] maps an")
+    L.append(" * npc_draw_data_tbl[] row onto its set; dc/src/dc_npctex.c")
+    L.append(" * defines the dc_npctex_set_t this is written against, owns the")
+    L.append(" * 16 slots the bytes are read into, and does the pointer")
+    L.append(" * rewrite.")
+    L.append(" *")
+    L.append(" * ONLY the villager range is here. Rows at or above ALL_NPC_NUM")
+    L.append(" * are the special NPCs — Tom Nook, Rover, K.K., Porter and the")
+    L.append(" * raccoons — which stay RESIDENT via")
+    L.append(" * tools/dcstub/make_keeplist_town.py's EXTRA_SOURCES and must")
+    L.append(" * never be pooled.")
+    L.append(" */")
+    L.append("#ifndef DC_NPCTEX_MAP_INC_")
+    L.append("#define DC_NPCTEX_MAP_INC_")
+    L.append("")
+
+    if not pool:
+        L.append("/* --npctex-pool 0: the map is empty and the %d censused"
+                 % len(NPCTEX_KEEP_RESTORE))
+        L.append(" * villager tex files are back on the keep list, so")
+        L.append(" * dc_npctex_ensure() and dc_npctex_pool_reset() are no-ops.")
+        L.append(" * No table is emitted, so nothing here is left unreferenced. */")
+        L.append("#define DC_NPCTEX_SETS 0")
+        L.append("")
+        L.append("#endif /* DC_NPCTEX_MAP_INC_ */")
+        L.append("")
+        return "\n".join(L), 0, 0
+
+    rows, all_npc_num = parse_npc_draw_data()
+    if len(rows) != NPCTEX_ROWS_TOTAL:
+        raise SystemExit(
+            "make_stub_data R2: npc_draw_data_tbl[] has %d rows, expected %d.\n"
+            "  This count is the table's own checksum; pc/src/pc_model_viewer.c"
+            ":321\n"
+            "  carries the same number. Re-derive NPCTEX_ROWS_TOTAL against the"
+            " vendored\n"
+            "  table; do not relax it." % (len(rows), NPCTEX_ROWS_TOTAL))
+    if all_npc_num != NPCTEX_VILLAGER_ROWS:
+        raise SystemExit(
+            "make_stub_data R2: ALL_NPC_NUM is %d, expected %d. That is the\n"
+            "  villager/special boundary — get it wrong high and Tom Nook goes\n"
+            "  into the pool (which is the one thing R2 must not do), get it\n"
+            "  wrong low and real villagers keep their [1]-sized arrays."
+            % (all_npc_num, NPCTEX_VILLAGER_ROWS))
+
+    # A file is "kept" if the keep list names it AT ALL. A partial keep with a
+    # symbol filter is treated as kept too: R2 would otherwise repoint the row
+    # away from arrays the keep machinery had just filled.
+    kept_files = {p for p, _ in keep_paths}
+
+    # ROM order inside a set: palette, eye1..8, mouth1..6, body. Indices into
+    # the 16-entry aNPC_draw_tex_data_c order (texture first, palette second).
+    rom_order = [1] + list(range(2, 2 + NPCTEX_EYE_NUM)) \
+                    + list(range(2 + NPCTEX_EYE_NUM,
+                                 2 + NPCTEX_EYE_NUM + NPCTEX_MOUTH_NUM)) + [0]
+
+    sets = []            # (name, rom_off, rom_src, total, tmem_off, tmem_size,
+                         #  mouths, kept)
+    index_of = {}
+    row_set = []
+    for i in range(all_npc_num):
+        syms = rows[i]
+        body_sym = syms[0]
+        if not body_sym.endswith(NPCTEX_BODY_SUFFIX):
+            raise SystemExit(
+                "make_stub_data R2: row %d's texture symbol %r does not end in"
+                " %r.\n  The set NAME is derived from it and so is the source"
+                " file path; a\n  changed convention must be re-derived, not"
+                " guessed."
+                % (i, body_sym, NPCTEX_BODY_SUFFIX))
+        name = body_sym[:-len(NPCTEX_BODY_SUFFIX)]
+
+        if name in index_of:
+            row_set.append(index_of[name])
+            continue
+
+        off = None
+        cur = None
+        src = None
+        total = 0
+        tmem_off = None
+        tmem_size = 0
+        mouths = 0
+        for pos in rom_order:
+            sym = syms[pos]
+            if sym == "NULL":
+                # Only the mouth block is ever absent, and it is all-or-nothing.
+                if not (2 + NPCTEX_EYE_NUM <= pos
+                        < 2 + NPCTEX_EYE_NUM + NPCTEX_MOUTH_NUM):
+                    raise SystemExit(
+                        "make_stub_data R2: %s has NULL at tex_data slot %d. "
+                        "Only\n  mouth_texture[] may be NULL (78 of the sets "
+                        "are); a NULL palette,\n  eye or body would mean the "
+                        "layout assumption is wrong."
+                        % (name, pos))
+                continue
+            if sym not in table:
+                raise SystemExit(
+                    "make_stub_data R2: %s has no s_assets[] row in %s. Every\n"
+                    "  villager texture must be loadable off the disc or the "
+                    "pool cannot\n  fill; a missing row means the asset table "
+                    "and the draw table have\n  drifted apart."
+                    % (sym, ASSET_TABLE.name))
+            _bin, size, ro, rs, swap = table[sym]
+            if off is None:
+                off, cur, src = ro, ro, rs
+            if ro != cur:
+                raise SystemExit(
+                    "make_stub_data R2: %s is NOT contiguous in the ROM — %s "
+                    "starts at\n  0x%X, the previous member ended at 0x%X. R2 "
+                    "reads a whole set with\n  TWO preads and relies on that "
+                    "contiguity; a gap means the two-read\n  loader in "
+                    "dc/src/dc_npctex.c would fill the slot with the wrong "
+                    "bytes.\n  Re-derive the loader against a per-member map "
+                    "rather than relaxing this."
+                    % (name, sym, ro, cur))
+            if rs != src:
+                raise SystemExit(
+                    "make_stub_data R2: %s spans two ROM sources (%d and %d). "
+                    "The set\n  descriptor carries one rom_src; re-derive the "
+                    "loader." % (name, src, rs))
+            want_swap = 1 if pos == 1 else 0   # 1 == SWAP_U16, pc_assets.c:14
+            if swap != want_swap:
+                raise SystemExit(
+                    "make_stub_data R2: %s has swap=%d, expected %d. R2 swaps "
+                    "the\n  leading 32 B palette and nothing else; a second "
+                    "swapped member would\n  be byte-reversed in VRAM and look "
+                    "like a palette bug." % (sym, swap, want_swap))
+            if pos == 1 and size != NPCTEX_PAL_SIZE:
+                raise SystemExit(
+                    "make_stub_data R2: palette %s is %d B, expected %d."
+                    % (sym, size, NPCTEX_PAL_SIZE))
+            if 2 <= pos < 2 + NPCTEX_EYE_NUM and size != NPCTEX_FACE_SIZE:
+                raise SystemExit(
+                    "make_stub_data R2: eye texture %s is %d B, expected %d. "
+                    "The slot\n  layout is computed from fixed eye/mouth "
+                    "strides." % (sym, size, NPCTEX_FACE_SIZE))
+            if (2 + NPCTEX_EYE_NUM <= pos
+                    < 2 + NPCTEX_EYE_NUM + NPCTEX_MOUTH_NUM):
+                if size != NPCTEX_FACE_SIZE:
+                    raise SystemExit(
+                        "make_stub_data R2: mouth texture %s is %d B, expected"
+                        " %d." % (sym, size, NPCTEX_FACE_SIZE))
+                mouths += 1
+            if pos == 0:
+                tmem_off = cur - off
+                tmem_size = size
+            cur += size
+            total += size
+
+        if mouths not in (0, NPCTEX_MOUTH_NUM):
+            raise SystemExit(
+                "make_stub_data R2: %s has %d mouth textures. It is all-or-"
+                "nothing in\n  the vendored table and dc_npctex.c's slot layout"
+                " assumes that."
+                % (name, mouths))
+        expect_tmem_off = (NPCTEX_PAL_SIZE
+                           + NPCTEX_EYE_NUM * NPCTEX_FACE_SIZE
+                           + mouths * NPCTEX_FACE_SIZE)
+        if tmem_off != expect_tmem_off:
+            raise SystemExit(
+                "make_stub_data R2: %s puts its body texture at +%d, computed "
+                "+%d."
+                % (name, tmem_off, expect_tmem_off))
+
+        src_file = "%s/%s.c" % (NPCTEX_SRC_DIR, name)
+        index_of[name] = len(sets)
+        row_set.append(index_of[name])
+        sets.append((name, off, src, total, tmem_off, tmem_size, mouths,
+                     1 if src_file in kept_files else 0))
+
+    if len(sets) != NPCTEX_SETS_EXPECTED:
+        raise SystemExit(
+            "make_stub_data R2: found %d distinct villager texture sets, "
+            "expected %d.\n  Same checksum rule as BGTEX_ROWS_EXPECTED: a "
+            "selector that stops matching\n  would emit a SHORT map and the "
+            "villagers it dropped would render\n  untextured rather than fail."
+            % (len(sets), NPCTEX_SETS_EXPECTED))
+
+    slot_bytes = max(s[3] for s in sets)
+    tmem_max = max(s[5] for s in sets)
+    rows_per_set_max = max(row_set.count(v) for v in set(row_set))
+    # What the pool actually takes off .bss: every set it will serve. A set the
+    # keep list still names stays resident and is not R2's to count.
+    n_bytes = sum(s[3] for s in sets if not s[7])
+
+    L.append("#define DC_NPCTEX_SETS            {}".format(len(sets)))
+    L.append("#define DC_NPCTEX_ROWS            {}".format(all_npc_num))
+    L.append("/* The pool slot size: the largest villager set in the tree"
+             " ({}). */".format(
+                 max(sets, key=lambda s: s[3])[0]))
+    L.append("#define DC_NPCTEX_SLOT_BYTES      {}".format(slot_bytes))
+    L.append("/* The zero block an unserved row is pointed at: the largest body"
+             " texture,")
+    L.append(" * which is the largest single read any of the 16 pointers can"
+             " take. */")
+    L.append("#define DC_NPCTEX_TMEM_MAX        {}".format(tmem_max))
+    L.append("/* chn_1 is named by three rows (39, 236, 237 — the two test"
+             " villagers at")
+    L.append(" * the end of the range reuse it), so the patch list has to be"
+             " longer")
+    L.append(" * than the slot count. */")
+    L.append("#define DC_NPCTEX_ROWS_PER_SET_MAX {}".format(rows_per_set_max))
+    L.append("/* Slot layout, fixed for every set and checked against every"
+             " s_assets[] row")
+    L.append(" * by the generator: palette, eye[8], mouth[6] (or none), body. */")
+    L.append("#define DC_NPCTEX_PAL_SIZE        {}".format(NPCTEX_PAL_SIZE))
+    L.append("#define DC_NPCTEX_EYE_NUM         {}".format(NPCTEX_EYE_NUM))
+    L.append("#define DC_NPCTEX_EYE_SIZE        {}".format(NPCTEX_FACE_SIZE))
+    L.append("#define DC_NPCTEX_MOUTH_NUM       {}".format(NPCTEX_MOUTH_NUM))
+    L.append("#define DC_NPCTEX_MOUTH_SIZE      {}".format(NPCTEX_FACE_SIZE))
+    L.append("#define DC_NPCTEX_MOUTH_OFF       {}".format(
+        NPCTEX_PAL_SIZE + NPCTEX_EYE_NUM * NPCTEX_FACE_SIZE))
+    L.append("")
+    L.append("static const dc_npctex_set_t dc_npctex_set[] = {")
+    for name, off, src, total, tmem_off, tmem_size, mouths, kept in sets:
+        L.append('    {{ 0x{:X}u, "{}", {}u, {}u, {}u, {}, {}, {}, 0 }},'.format(
+            off, name, total, tmem_off, tmem_size, mouths, src, kept))
+    L.append("};")
+    L.append("")
+    L.append("/* npc_draw_data_tbl[] row -> dc_npctex_set[] index. */")
+    L.append("static const short dc_npctex_row_set[] = {")
+    for i in range(0, len(row_set), 16):
+        L.append("    " + " ".join("%d," % v for v in row_set[i:i + 16]))
+    L.append("};")
+    L.append("")
+    L.append("#endif /* DC_NPCTEX_MAP_INC_ */")
+    L.append("")
+    return "\n".join(L), len(sets), n_bytes
+
+
+# ---------------------------------------------------------------------------
+# R3 — parsing src/data/npc/model/mdl/*.c
+# ---------------------------------------------------------------------------
+# Comments have to go before anything else is scanned: the files carry
+# `/* joint 3 */` markers and `// clang-format off`, and a `gs`-looking word
+# inside one would otherwise be counted as a command.
+NPCMDL_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+NPCMDL_VTX_DECL_RE = r"static Vtx %s_v\[(0x[0-9A-Fa-f]+)"
+NPCMDL_GFX_ARR_RE = re.compile(
+    r"^static Gfx ([A-Za-z_][A-Za-z0-9_]*)\[\] = \{$", re.M)
+NPCMDL_SKEL_RE = (
+    r"extern cKF_Skeleton_R_c cKF_bs_r_%s\s*=\s*"
+    r"\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\w+)\s*\}")
+NPCMDL_JOINT_RE = re.compile(
+    r"\{\s*(\w+)\s*,\s*\d+\s*,\s*[\w |]+?\s*,\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\}")
+# A command is an identifier starting `gs` that is immediately applied. Anchored
+# at paren depth 0 so an argument like `head_gst_model` (which contains the
+# substring "gst_model") can never be mistaken for one.
+NPCMDL_CMD_RE = re.compile(r"gs[A-Za-z_][A-Za-z0-9_]*(?=\s*\()")
+
+
+def _npcmdl_braced(text, start):
+    """The text between `start` and the `}` that closes the brace before it."""
+    depth = 1
+    i = start
+    while depth > 0:
+        depth += (text[i] == "{") - (text[i] == "}")
+        i += 1
+    return text[start:i - 1]
+
+
+def parse_npc_mdl_tree():
+    """Every src/data/npc/model/mdl/<sp>.c, as R3 needs it.
+
+    Returns {species: {size, rom_off, rom_src, bin, patches}} where `patches` is
+    the ordered list of (joint index, Gfx index within that joint's display
+    list, byte offset into <sp>_v) for every gsSPVertex in the file.
+
+    ⚠️ EVERYTHING HERE IS A CHECK. A patch table that is quietly short or
+    quietly shifted does not fail — it writes a pool address into whatever Gfx
+    word the arithmetic landed on, and the result is corrupt geometry that reads
+    as a renderer bug. So every step hard-errors rather than skipping:
+    an unknown macro, a gsSPVertex whose operand is not `&<sp>_v[N]`, a display
+    list no joint names, a list that does not end in gsSPEndDisplayList, an
+    offset past the end of the array, and a missing pc_load_asset() line.
+    """
+    root = REPO / NPCMDL_SRC_DIR
+    files = sorted(root.glob("*.c"))
+    if len(files) != NPCMDL_FILES_EXPECTED:
+        raise SystemExit(
+            "make_stub_data R3: %s holds %d .c files, expected %d. That count "
+            "is the\n  tree's own checksum; re-derive NPCMDL_FILES_EXPECTED "
+            "rather than relaxing it."
+            % (NPCMDL_SRC_DIR, len(files), NPCMDL_FILES_EXPECTED))
+
+    out = {}
+    n_lists = 0
+    n_vtxcmd = 0
+    for f in files:
+        sp = f.stem
+        raw = f.read_text(encoding="utf-8", errors="surrogateescape")
+        text = NPCMDL_COMMENT_RE.sub(" ", raw)
+
+        m = re.search(NPCMDL_VTX_DECL_RE % re.escape(sp), text)
+        if not m:
+            raise SystemExit(
+                "make_stub_data R3: %s.c has no `static Vtx %s_v[0x…]` under "
+                "#ifdef TARGET_PC.\n  That declaration is what the pool slot is "
+                "sized against; a changed\n  convention must be re-derived, not "
+                "guessed." % (sp, sp))
+        size = int(m.group(1), 16)
+
+        lm = PC_LOAD_CALL_RE.search(text)
+        if not lm or lm.group("dest") != sp + "_v":
+            raise SystemExit(
+                "make_stub_data R3: %s.c has no pc_load_asset(…, %s_v, …).\n"
+                "  %s_v is FILE-STATIC, so it has no s_assets[] row and the "
+                "generated\n  per-file loader is the ONLY place its (rom_off, "
+                "size, rom_src, swap)\n  exists. Without it the slot cannot be "
+                "filled." % (sp, sp, sp))
+        if int(lm.group("size"), 0) != size:
+            raise SystemExit(
+                "make_stub_data R3: %s_v is declared %d B but loaded %d B."
+                % (sp, size, int(lm.group("size"), 0)))
+        if int(lm.group("swap")) != 2:
+            raise SystemExit(
+                "make_stub_data R3: %s_v loads with swap=%s, expected 2 "
+                "(DC_STUB_SWAP_VTX,\n  dc/src/dc_main.c:745-746). A Vtx array "
+                "read without the vertex swap is\n  byte-reversed geometry, "
+                "which looks like a renderer bug."
+                % (sp, lm.group("swap")))
+
+        sm = re.search(NPCMDL_SKEL_RE % re.escape(sp), text)
+        if not sm:
+            raise SystemExit(
+                "make_stub_data R3: %s.c does not define "
+                "`extern cKF_Skeleton_R_c cKF_bs_r_%s`.\n  That symbol is the "
+                "ONLY externally visible thing in the file, and R3 reaches\n"
+                "  every display list through it (c_keyframe.h:44-48 -> :37-42)."
+                % (sp, sp))
+        n_joints, n_shown, tbl = int(sm.group(1)), int(sm.group(2)), sm.group(3)
+
+        tm = re.search(r"static cKF_Joint_R_c %s\[\]\s*=\s*\{" % re.escape(tbl),
+                       text)
+        if not tm:
+            raise SystemExit(
+                "make_stub_data R3: %s.c names joint table %s, which it does "
+                "not define." % (sp, tbl))
+        joints = NPCMDL_JOINT_RE.findall(_npcmdl_braced(text, tm.end()))
+        if len(joints) != n_joints:
+            raise SystemExit(
+                "make_stub_data R3: cKF_bs_r_%s claims %d joints, %s[] has %d."
+                % (sp, n_joints, tbl, len(joints)))
+        joint_of = {}
+        for ji, name in enumerate(joints):
+            if name == "NULL":
+                continue
+            if name in joint_of:
+                # Measured false across all 72 files. If it ever becomes true,
+                # the shared list would be patched twice with the same value —
+                # harmless — but the joint index in the table would be
+                # ambiguous, so stop rather than pick one.
+                raise SystemExit(
+                    "make_stub_data R3: %s is named by joints %d and %d of "
+                    "cKF_bs_r_%s.\n  R3's patch table addresses a list BY "
+                    "JOINT; re-derive it before allowing\n  this."
+                    % (name, joint_of[name], ji, sp))
+            joint_of[name] = ji
+        if len(joint_of) != n_shown:
+            raise SystemExit(
+                "make_stub_data R3: cKF_bs_r_%s claims %d shown joints, %s[] "
+                "names %d distinct models." % (sp, n_shown, tbl, len(joint_of)))
+
+        patches = []
+        seen_lists = set()
+        for am in NPCMDL_GFX_ARR_RE.finditer(text):
+            name = am.group(1)
+            body = _npcmdl_braced(text, am.end())
+            if name not in joint_of:
+                raise SystemExit(
+                    "make_stub_data R3: display list %s in %s.c is named by no "
+                    "joint of\n  cKF_bs_r_%s. R3 can only reach a list through "
+                    "the skeleton, so a list\n  nothing points at would keep "
+                    "its stubbed vertex pointers while the rest\n  of the model "
+                    "moved." % (name, sp, sp))
+            seen_lists.add(name)
+            n_lists += 1
+            joint = joint_of[name]
+            idx = 0
+            k = 0
+            depth = 0
+            last = None
+            while k < len(body):
+                c = body[k]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                elif depth == 0:
+                    cm = NPCMDL_CMD_RE.match(body, k)
+                    if cm:
+                        mac = cm.group(0)
+                        if mac not in NPCMDL_GFX_WORDS:
+                            raise SystemExit(
+                                "make_stub_data R3: %s.c/%s uses %s(), which is "
+                                "not in\n  NPCMDL_GFX_WORDS. Read its definition "
+                                "and add the number of Gfx it\n  expands to — "
+                                "defaulting to 1 would shift every later patch "
+                                "in this\n  list onto the wrong word."
+                                % (sp, name, mac))
+                        if mac == "gsSPVertex":
+                            p = body.index("(", k)
+                            vm = re.match(
+                                r"\(\s*&%s_v\[(\d+)\]\s*," % re.escape(sp),
+                                body[p:])
+                            if not vm:
+                                raise SystemExit(
+                                    "make_stub_data R3: %s.c/%s has a "
+                                    "gsSPVertex whose operand is not\n  "
+                                    "&%s_v[N]: %r. All 2,068 in the tree are "
+                                    "that shape; a different one\n  would need "
+                                    "a different relocation."
+                                    % (sp, name, sp, body[p:p + 48]))
+                            off = int(vm.group(1)) * NPCMDL_VTX_SIZE
+                            if off >= size:
+                                raise SystemExit(
+                                    "make_stub_data R3: %s.c/%s loads %s_v[%s] "
+                                    "= +%d, past the %d B\n  array. The slot "
+                                    "would be read out of bounds."
+                                    % (sp, name, sp, vm.group(1), off, size))
+                            patches.append((joint, idx, off))
+                            n_vtxcmd += 1
+                        idx += NPCMDL_GFX_WORDS[mac]
+                        last = mac
+                        k += len(mac)
+                        continue
+                k += 1
+            if last != "gsSPEndDisplayList":
+                raise SystemExit(
+                    "make_stub_data R3: %s.c/%s does not end in "
+                    "gsSPEndDisplayList (last was\n  %s). The command walk did "
+                    "not reach the end of the array, so every Gfx\n  index it "
+                    "produced is suspect." % (sp, name, last))
+
+        missing = set(joint_of) - seen_lists
+        if missing:
+            raise SystemExit(
+                "make_stub_data R3: cKF_bs_r_%s names %s, which %s.c does not "
+                "define as a\n  `static Gfx …[] = {`." % (sp, sorted(missing), sp))
+
+        out[sp] = {
+            "size": size,
+            "rom_off": int(lm.group("off"), 0),
+            "rom_src": int(lm.group("src")),
+            "bin": lm.group("path"),
+            "patches": patches,
+        }
+
+    if n_lists != NPCMDL_LISTS_EXPECTED:
+        raise SystemExit(
+            "make_stub_data R3: found %d display lists, expected %d."
+            % (n_lists, NPCMDL_LISTS_EXPECTED))
+    if n_vtxcmd != NPCMDL_VTXCMD_EXPECTED:
+        raise SystemExit(
+            "make_stub_data R3: found %d gsSPVertex commands, expected %d.\n"
+            "  Same checksum rule as BGTEX_ROWS_EXPECTED — a short patch table "
+            "does not\n  fail, it half-moves a model." % (n_vtxcmd,
+                                                          NPCMDL_VTXCMD_EXPECTED))
+    return out
+
+
+def parse_npc_draw_skeletons():
+    """npc_draw_data_tbl[] row -> the cKF_bs_r_* species it selects.
+
+    aNPC_actor_ct() reads exactly this field — `skeleton =
+    draw_data.model_skeleton` (ac_npc_ct.c_inc:274) out of the row this
+    function's caller is about to snapshot — and hands it to
+    cKF_SkeletonInfo_R_ct(). So the row -> skeleton mapping is not invented
+    here; it IS the game's own, read out of the same table.
+
+    Returns (species_per_row, all_npc_num).
+    """
+    text = (REPO / NPCTEX_TABLE).read_text(
+        encoding="utf-8", errors="surrogateescape")
+    try:
+        body = text[text.index("npc_draw_data_tbl[] = {"):]
+    except ValueError:
+        raise SystemExit(
+            "make_stub_data R3: %s no longer defines npc_draw_data_tbl[]."
+            % NPCTEX_TABLE)
+    rows = re.findall(r"\n    \{\n(.*?)\n    \},", body, re.S)
+    out = []
+    for i, r in enumerate(rows):
+        m = re.search(r"^\s+&cKF_bs_r_(\w+),\s*$", r, re.M)
+        if not m:
+            raise SystemExit(
+                "make_stub_data R3: row %d of npc_draw_data_tbl[] names no "
+                "&cKF_bs_r_*\n  skeleton. That field (ac_npc.h:156) is what "
+                "selects the model; a row\n  without one cannot be mapped."
+                % i)
+        out.append(m.group(1))
+    return out, _all_npc_num()
+
+
+def emit_npcmdl_map(keep_paths, pool):
+    """Build the text of dc_npcmdl_map.inc. Returns (text, n_species, n_bytes).
+
+    One row per VILLAGER species, keyed by the address of its extern skeleton —
+    the same pointer aNPC_actor_ct() reads out of the row — plus one flat patch
+    table shared by all of them. dc/src/dc_npcmdl.c is the consumer and carries
+    the argument.
+
+    THE SPLIT IS THE WHOLE SAFETY ARGUMENT and this function is where it is
+    checked: the set of skeletons reachable from a VILLAGER row and the set
+    reachable from a SPECIAL row do not intersect. That is what lets R3 pool by
+    skeleton pointer and still be structurally incapable of touching Tom Nook,
+    Rover, K.K., Porter or the raccoons. If it ever stops being true this
+    hard-errors — R3 must not silently start pooling a special NPC, which is
+    the one mistake that has already cost this project a session.
+
+    `pool` False emits only the count macro and no tables, so the runtime
+    compiles to a pair of empty functions and nothing is left unreferenced.
+    """
+    L = []
+    L.append("/* GENERATED by tools/dcstub/make_stub_data.py — DO NOT EDIT. */")
+    L.append("/*")
+    L.append(" * R3: the villager model pool. Each row is one species'")
+    L.append(" * src/data/npc/model/mdl/<sp>.c vertex array, described by where")
+    L.append(" * its bytes live in the ROM, and keyed by &cKF_bs_r_<sp> — the")
+    L.append(" * skeleton pointer aNPC_actor_ct() reads out of the")
+    L.append(" * npc_draw_data_tbl[] row (ac_npc_ct.c_inc:274).")
+    L.append(" *")
+    L.append(" * dc_npcmdl_patch[] is the RELOCATION the textures did not need:")
+    L.append(" * one entry per gsSPVertex, naming the joint whose display list")
+    L.append(" * holds it, the Gfx index within that list, and the byte offset")
+    L.append(" * into the vertex array. dc/src/dc_npcmdl.c defines the two")
+    L.append(" * structs this is written against, owns the slots, and re-checks")
+    L.append(" * every entry against the live word before it writes.")
+    L.append(" *")
+    L.append(" * ONLY the villager species are here. The 40 reached solely from")
+    L.append(" * a row >= ALL_NPC_NUM — Tom Nook, Rover, K.K., Porter and the")
+    L.append(" * raccoons — stay RESIDENT via the keep list and have no entry,")
+    L.append(" * so the lookup below cannot find them even by accident.")
+    L.append(" */")
+    L.append("#ifndef DC_NPCMDL_MAP_INC_")
+    L.append("#define DC_NPCMDL_MAP_INC_")
+    L.append("")
+
+    if not pool:
+        L.append("/* --npcmdl-pool 0: the maps are empty and %s is back"
+                 % Path(NPCMDL_KEEP_RESTORE[0]).name)
+        L.append(" * on the keep list, so dc_npcmdl_ensure() and")
+        L.append(" * dc_npcmdl_pool_reset() are no-ops. No table is emitted, so")
+        L.append(" * nothing here is left unreferenced. */")
+        L.append("#define DC_NPCMDL_SPECIES 0")
+        L.append("")
+        L.append("#endif /* DC_NPCMDL_MAP_INC_ */")
+        L.append("")
+        return "\n".join(L), 0, 0
+
+    mdl = parse_npc_mdl_tree()
+    skel_of_row, all_npc_num = parse_npc_draw_skeletons()
+    if all_npc_num != NPCTEX_VILLAGER_ROWS:
+        raise SystemExit(
+            "make_stub_data R3: ALL_NPC_NUM is %d, expected %d. That is the\n"
+            "  villager/special boundary — get it wrong high and Tom Nook's "
+            "model goes\n  into the pool, get it wrong low and real villagers "
+            "keep their [1]-sized\n  vertex arrays." % (all_npc_num,
+                                                        NPCTEX_VILLAGER_ROWS))
+    if len(skel_of_row) != NPCTEX_ROWS_TOTAL:
+        raise SystemExit(
+            "make_stub_data R3: npc_draw_data_tbl[] has %d rows, expected %d."
+            % (len(skel_of_row), NPCTEX_ROWS_TOTAL))
+
+    villager = set(skel_of_row[:all_npc_num])
+    special = set(skel_of_row[all_npc_num:])
+    both = sorted(villager & special)
+    if both:
+        raise SystemExit(
+            "make_stub_data R3: %s is used by BOTH a villager row and a "
+            "special-NPC row.\n  R3 pools by skeleton pointer precisely because "
+            "those two sets were disjoint\n  (measured 2026-08-05: 32 villager, "
+            "40 special, 0 shared), which is what\n  makes it structurally "
+            "unable to pool Tom Nook. Re-derive the selector —\n  do NOT relax "
+            "this." % ", ".join(both))
+    unknown = sorted((villager | special) - set(mdl))
+    if unknown:
+        raise SystemExit(
+            "make_stub_data R3: npc_draw_data_tbl[] names cKF_bs_r_%s, which "
+            "has no\n  %s/<sp>.c." % (unknown[0], NPCMDL_SRC_DIR))
+    if len(villager) != NPCMDL_VILLAGER_EXPECTED:
+        raise SystemExit(
+            "make_stub_data R3: found %d villager species, expected %d. Same\n"
+            "  checksum rule as BGTEX_ROWS_EXPECTED: a selector that stops "
+            "matching would\n  emit a SHORT map and the species it dropped "
+            "would keep drawing as a black\n  spiky mess rather than fail."
+            % (len(villager), NPCMDL_VILLAGER_EXPECTED))
+
+    kept_files = {p for p, _ in keep_paths}
+
+    names = sorted(villager)
+    patch = []
+    rows = []
+    for sp in names:
+        e = mdl[sp]
+        first = len(patch)
+        patch += e["patches"]
+        src_file = "%s/%s.c" % (NPCMDL_SRC_DIR, sp)
+        rows.append((sp, e["rom_off"], e["rom_src"], e["size"], first,
+                     len(e["patches"]), 1 if src_file in kept_files else 0))
+
+    slot_bytes = max(r[3] for r in rows)
+    max_joint = max(p[0] for p in patch)
+    max_gfx = max(p[1] for p in patch)
+    max_off = max(p[2] for p in patch)
+    max_patches = max(r[5] for r in rows)
+    # What the pool actually takes off .bss: every species it will serve. One
+    # the keep list still names stays resident and is not R3's to count.
+    n_bytes = sum(r[3] for r in rows if not r[6])
+
+    # The generated table's own field widths. Emitted as literals so a future
+    # tree that overflows one of them is caught HERE rather than by silent
+    # truncation into a wrong Gfx word.
+    if max_joint > 0xFF or max_gfx > 0xFF or max_off > 0xFFFF \
+            or max_patches > 0xFF or len(patch) > 0xFFFF or slot_bytes > 0xFFFF:
+        raise SystemExit(
+            "make_stub_data R3: a patch field overflowed its width "
+            "(joint %d, gfx %d,\n  offset %d, per-species %d, total %d, slot "
+            "%d). Widen dc_npcmdl_patch_t in\n  dc/src/dc_npcmdl.c and this "
+            "check together."
+            % (max_joint, max_gfx, max_off, max_patches, len(patch),
+               slot_bytes))
+
+    L.append("#define DC_NPCMDL_SPECIES         {}".format(len(rows)))
+    L.append("#define DC_NPCMDL_PATCHES         {}".format(len(patch)))
+    L.append("/* ALL_NPC_NUM. A row at or above this is a SPECIAL NPC and is")
+    L.append(" * refused before the skeleton is even looked at. */")
+    L.append("#define DC_NPCMDL_ROWS            {}".format(all_npc_num))
+    L.append("/* The pool slot size: the largest villager model in the tree"
+             " ({}). */".format(max(rows, key=lambda r: r[3])[0]))
+    L.append("#define DC_NPCMDL_SLOT_BYTES      {}".format(slot_bytes))
+    L.append("/* sizeof(Vtx), gbi.h:1096-1100. Pinned by make_src_shrink.py's")
+    L.append(" * npcmdl layout assert, which has the header this file does"
+             " not. */")
+    L.append("#define DC_NPCMDL_VTX_SIZE        {}".format(NPCMDL_VTX_SIZE))
+    L.append("/* G_VTX under -DF3DEX_GBI_2 (gbi.h:122, dc/Makefile:325). Every")
+    L.append(" * word R3 is about to write is checked to be one first. */")
+    L.append("#define DC_NPCMDL_G_VTX           1")
+    L.append("/* pc/src/pc_assets.c:14 — SWAP_VTX. Every one of the 72 vertex")
+    L.append(" * arrays loads with it; the generator refuses any that does"
+             " not. */")
+    L.append("#define DC_NPCMDL_SWAP_VTX        2")
+    L.append("")
+    L.append("/* One per gsSPVertex, grouped by species (patch_off/patch_n"
+             " below). */")
+    L.append("static const dc_npcmdl_patch_t dc_npcmdl_patch[] = {")
+    for i in range(0, len(patch), 8):
+        L.append("    " + " ".join(
+            "{%d,%d,%d}," % (o, g, j) for j, g, o in patch[i:i + 8]))
+    L.append("};")
+    L.append("")
+    # `extern char x[]` regardless of the vendored type, exactly as
+    # dc_bgtex_map.inc declares its u16 palettes: only the ADDRESS is used, no
+    # TU sees both spellings, and this .inc must not drag c_keyframe.h into
+    # dc/src (it pulls game.h, m_lib.h and half the actor system with it).
+    for sp, _off, _src, _size, _first, _n, _kept in rows:
+        L.append("extern char cKF_bs_r_{}[];".format(sp))
+    L.append("")
+    L.append("static const dc_npcmdl_t dc_npcmdl_species[] = {")
+    for sp, off, src, size, first, n, kept in rows:
+        L.append('    {{ 0x{:X}u, "{}", cKF_bs_r_{}, {}u, {}u, {}, {}, {} }},'
+                 .format(off, sp, sp, size, first, n, src, kept))
+    L.append("};")
+    L.append("")
+    L.append("#endif /* DC_NPCMDL_MAP_INC_ */")
+    L.append("")
+    return "\n".join(L), len(rows), n_bytes
+
+
 def write_if_changed(dst, text):
     """Returns True if the file was actually written."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -917,11 +1897,40 @@ def main():
              "and dc/Makefile's DC_BGTEX_DEMAND; dc/build-dc.sh passes all "
              "three from one value.",
     )
+    ap.add_argument(
+        "--npctex-pool",
+        type=int,
+        default=int(os.environ.get("DC_NPCTEX_POOL", "1") or "1"),
+        choices=(0, 1),
+        help="R2. 1 (the default, matching dc/Makefile) emits "
+             "dc_npctex_map.inc so the 236 villager texture sets (993,984 B) "
+             "are served out of 16 resident slots read off the disc. 0 emits "
+             "an empty map and puts the 21 censused villager tex files back on "
+             "the keep list. It MUST match the --npctex-pool= that "
+             "make_src_shrink.py was run with, and dc/Makefile's "
+             "DC_NPCTEX_POOL; dc/build-dc.sh passes all three from one value.",
+    )
+    ap.add_argument(
+        "--npcmdl-pool",
+        type=int,
+        default=int(os.environ.get("DC_NPCMDL_POOL", "1") or "1"),
+        choices=(0, 1),
+        help="R3. 1 (the default, matching dc/Makefile) emits "
+             "dc_npcmdl_map.inc so the 32 villager MODELS (194,400 B) are "
+             "served out of 16 resident slots read off the disc, with their "
+             "933 baked gsSPVertex words relocated. 0 emits an empty map and "
+             "puts cbr_1 — the one villager model the census keep list named — "
+             "back on the keep list. It MUST match the --npcmdl-pool= that "
+             "make_src_shrink.py was run with, and dc/Makefile's "
+             "DC_NPCMDL_POOL; dc/build-dc.sh passes all three from one value.",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     bgtex_demand = bool(args.bgtex_demand)
+    npctex_pool = bool(args.npctex_pool)
+    npcmdl_pool = bool(args.npcmdl_pool)
     out_root = Path(args.out).resolve()
 
     keep_paths, keep_why = parse_keep(args.keep)
@@ -934,6 +1943,16 @@ def main():
     if not bgtex_demand:
         already = {p for p, _ in keep_paths}
         keep_paths += [(p, ()) for p in BGTEX_KEEP_RESTORE if p not in already]
+
+    # R2's, and for the same reason.
+    if not npctex_pool:
+        already = {p for p, _ in keep_paths}
+        keep_paths += [(p, ()) for p in NPCTEX_KEEP_RESTORE if p not in already]
+
+    # R3's, and for the same reason.
+    if not npcmdl_pool:
+        already = {p for p, _ in keep_paths}
+        keep_paths += [(p, ()) for p in NPCMDL_KEEP_RESTORE if p not in already]
 
     missing = [p for p, _ in keep_paths if not (REPO / p).is_file()]
     if missing:
@@ -1117,6 +2136,10 @@ def main():
         keep_paths, table, None if args.dry_run else rewritten_cinc
     )
     bgtex_text, n_bgtex, n_bgtex_bytes = emit_bgtex_map(table, bgtex_demand)
+    npctex_text, n_npctex, n_npctex_bytes = emit_npctex_map(
+        table, keep_paths, npctex_pool)
+    npcmdl_text, n_npcmdl, n_npcmdl_bytes = emit_npcmdl_map(
+        keep_paths, npcmdl_pool)
 
     pruned = 0
     if not args.dry_run:
@@ -1143,6 +2166,14 @@ def main():
             written += 1
         else:
             unchanged += 1
+        if write_if_changed(out_root / NPCTEX_INC_NAME, npctex_text):
+            written += 1
+        else:
+            unchanged += 1
+        if write_if_changed(out_root / NPCMDL_INC_NAME, npcmdl_text):
+            written += 1
+        else:
+            unchanged += 1
 
     if not args.quiet:
         print("== DC_ASSET_STUB tree ==")
@@ -1165,6 +2196,18 @@ def main():
         if not bgtex_demand:
             print("                  {} mFM_grd_*.c file(s) forced back onto the"
                   " keep list".format(len(BGTEX_KEEP_RESTORE)))
+        print("  {:<14}: {} sets, {:,} B NOT resident  [R2, "
+              "--npctex-pool={}]".format(
+                  NPCTEX_INC_NAME, n_npctex, n_npctex_bytes, args.npctex_pool))
+        if not npctex_pool:
+            print("                  {} villager tex file(s) forced back onto"
+                  " the keep list".format(len(NPCTEX_KEEP_RESTORE)))
+        print("  {:<14}: {} species, {:,} B NOT resident [R3, "
+              "--npcmdl-pool={}]".format(
+                  NPCMDL_INC_NAME, n_npcmdl, n_npcmdl_bytes, args.npcmdl_pool))
+        if not npcmdl_pool:
+            print("                  {} villager mdl file(s) forced back onto"
+                  " the keep list".format(len(NPCMDL_KEEP_RESTORE)))
         if n_unmapped:
             print("  WARNING       : {} kept global(s) have no s_assets[] row"
                   " and will stay zeroed".format(n_unmapped))
