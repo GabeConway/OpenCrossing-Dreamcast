@@ -202,6 +202,59 @@ against the live word before it writes anything.
                        the census keep list named — back on the keep list. Same
                        pairing rule as --bgtex-demand.
 
+THE TEXTURE PROBE — dc_texpool_map.inc (T1, --texpool)
+-------------------------------------------------------
+NOT a pool. This one emits a map for an INSTRUMENT: dc/src/dc_texpool.c counts,
+per texture bind, whether the source pointer is the exact base of a mapped asset
+row. It moves no bytes and changes no pixel. It exists to answer, before the T1
+loader is written, whether the design's central assumption holds — that a
+texture's cache key can be synthesised from its asset IDENTITY instead of read
+back out of main RAM on every bind (dc_pvr_texture.c:1083's tex_content_hash,
+~109 binds/frame).
+
+Three counters kill the design if non-zero: `interior` (a bind landing inside a
+row rather than at its base — with arrays stubbed to [1] that would silently
+serve a neighbour's texture), `mutated` (a row whose content hash changes between
+binds, i.e. it is not immutable) and `oversize` (the decoder reading past the
+row, which is R1's mFM_grd_s_beach_tex over-read in a new place).
+
+HOW THE POPULATION IS DERIVED, and why it is not a name heuristic. A row is a
+symbol that (a) some display-list macro in src/ names as its TEXTURE IMAGE
+operand, and (b) has an s_assets[] row. TEXPOOL_IMG_ARG below is the operand
+position of every such macro in the tree — read out of each macro's definition,
+never defaulted, exactly like NPCMDL_GFX_WORDS. Comments are stripped first:
+src/game/m_play.c:59 contains `gDPSetTextureImage_Dolphin(..., G_IM_SIZ_16b,
+...)` inside a comment, which parses as a 3-argument call and would otherwise be
+counted as a malformed macro.
+
+FOUR EXCLUSIONS, each for a measured reason and each with its own checksum:
+
+  palettes      38 rows arrive through the texture-image operand because that is
+                how a TLUT is loaded on Dolphin (set the texture image to the
+                palette, then load it). They are identified by swap != 0
+                (SWAP_U16, pc_assets.c:14) rather than by an `_pal` name — a
+                data test, not a spelling test, and after it no `_pal`-named row
+                survives. Palettes must stay RESIDENT: a CI texture decoded
+                against a missing TLUT fails SILENTLY (dc_pvr_texture.c:347).
+  gSPSegment     1 row (hnw_tmem_txt) is bound through a segment register rather
+                than by address, so its address is not the key the renderer sees.
+  file-static    6 rows (ctl_att_w1..w6_tex, src/static/dvderr.c) cannot be named
+                `extern` from dc/. R2 hit this and got eight undefined references.
+  src/data/npc/  0 rows today. R2's domain (dc/src/dc_npctex.c); asserted at 0 so
+                that if the villager tree ever starts naming textures this way the
+                build fails instead of the two systems both claiming them.
+
+⚠️ RESIDENCY IS REPORTED, NEVER ASSERTED. Each row carries a `kept` flag saying
+whether it is resident TODAY under the keep list, because only resident rows are
+a byte saving and the rest are content that does not exist yet. That number moves
+every time make_keeplist_town.py is re-run, so it must not be a checksum — a
+keep-list-derived hard error would fail the build on every legitimate
+regeneration. Checksums are for tree-derived, stable facts only.
+
+    --texpool 0        emit an empty map. dc/src/dc_texpool.c then compiles to
+                       nothing and the probe is inert. This is the default: the
+                       instrument is off unless asked for by name.
+
 USAGE
 -----
     python3 tools/dcstub/make_stub_data.py [--out DIR] [--keep LIST]
@@ -432,6 +485,405 @@ NPCMDL_VILLAGER_EXPECTED = 32
 NPCMDL_KEEP_RESTORE = (
     "src/data/npc/model/mdl/cbr_1.c",
 )
+
+# ---------------------------------------------------------------------------
+# T1 — the texture PROBE map. See dc/src/dc_texpool.c and the module docstring.
+# ---------------------------------------------------------------------------
+# Name and row shape are the contract with dc/src/dc_texpool.c, which defines the
+# matching typedef. Change both or neither.
+TEXPOOL_INC_NAME = "dc_texpool_map.inc"
+TEXPOOL_NPC_DIR = "src/data/npc/"
+
+# The TEXTURE IMAGE operand position (0-based) of every display-list macro in
+# this tree that names one. Every entry was read out of the macro's own
+# definition, never assumed — the same rule as NPCMDL_GFX_WORDS above, and for
+# the same reason: a wrong index silently harvests the WRONG ARGUMENT (a format
+# enum, a width) and either drops real textures or invents rows for constants.
+#
+#   gsDPSetTextureImage_Dolphin(fmt, siz, w, h, img)   gbi_extensions.h:1089  -> 4
+#   gsDPLoadTextureBlock_4b_Dolphin(timg, ...)         gbi_extensions.h:1133  -> 0
+#   gDPLoadTextureBlock_8b_Dolphin(pkt, timg, ...)     gbi_extensions.h:1143  -> 1
+#   gDPLoadTextureTile_4b_Dolphin(pkt, timg, ...)      gbi_extensions.h:1149  -> 1
+#   gDPLoadTextureBlockS(pkt, timg, ...)               gbi.h:3600             -> 1
+#   gDPLoadTextureTile(pkt, timg, ...)                 gbi.h:4066             -> 1
+# The `g`-prefixed (packet) forms take `pkt` first, so their index is one higher
+# than the `gs`-prefixed (static) form of the same macro. A macro matching
+# SetTextureImage/LoadTextureBlock/LoadTextureTile that is NOT in this table is a
+# HARD ERROR, never a default — the same discipline NPCMDL_GFX_WORDS uses.
+TEXPOOL_IMG_ARG = {
+    "gsDPSetTextureImage_Dolphin":      4,
+    "gDPSetTextureImage_Dolphin":       5,
+    "gsDPSetTextureImage":              3,
+    "gDPSetTextureImage":               4,
+    "gsDPLoadTextureBlock_4b_Dolphin":  0,
+    "gDPLoadTextureBlock_4b_Dolphin":   1,
+    "gsDPLoadTextureBlock_8b_Dolphin":  0,
+    "gDPLoadTextureBlock_8b_Dolphin":   1,
+    "gsDPLoadTextureTile_4b_Dolphin":   0,
+    "gDPLoadTextureTile_4b_Dolphin":    1,
+    "gsDPLoadTextureBlock_4b":          0,
+    "gDPLoadTextureBlock_4b":           1,
+    "gsDPLoadTextureBlock":             0,
+    "gDPLoadTextureBlock":              1,
+    "gsDPLoadTextureBlockS":            0,
+    "gDPLoadTextureBlockS":             1,
+    "gsDPLoadTextureTile":              0,
+    "gDPLoadTextureTile":               1,
+}
+
+# The checksums, same rule as BGTEX_ROWS_EXPECTED: a selector that silently stops
+# matching produces a probe that measures a SMALLER population than it claims and
+# reports a reassuring `interior=0` about textures it never looked at. Measured
+# 2026-08-06 against this tree.
+#
+# ⚠️ NONE of these is keep-list-derived. The resident/stubbed split IS reported
+# (and is emitted as a per-row flag), but it is deliberately NOT a checksum: it
+# changes every time make_keeplist_town.py is re-run, and a hard error on it
+# would break the build on every legitimate regeneration.
+TEXPOOL_ROWS_EXPECTED = 6092
+TEXPOOL_BYTES_EXPECTED = 3018336
+# The four exclusion counts. Asserted individually so that a change in ANY of
+# them is attributable, rather than surfacing as a single wrong row total.
+TEXPOOL_PAL_EXCLUDED_EXPECTED = 38     # swap != 0, i.e. TLUTs. Must stay resident.
+TEXPOOL_SEG_EXCLUDED_EXPECTED = 1      # hnw_tmem_txt, bound via gSPSegment
+TEXPOOL_STATIC_EXCLUDED_EXPECTED = 6   # ctl_att_w1..w6_tex, src/static/dvderr.c
+TEXPOOL_NPC_EXCLUDED_EXPECTED = 0      # R2's domain; asserted at 0
+
+# Comments must go before anything is scanned, exactly as R3 does it: this tree
+# documents macro calls INSIDE comments (src/game/m_play.c:59 is a
+# `gDPSetTextureImage_Dolphin(..., G_IM_SIZ_16b, ...)` with three arguments), and
+# such a line parses as a malformed call rather than as prose.
+TEXPOOL_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+TEXPOOL_CALL_RE = re.compile(r"\b(g[sD]?DP[A-Za-z0-9_]*)\s*\(")
+TEXPOOL_TEXMACRO_RE = re.compile(
+    r"(SetTextureImage|LoadTextureBlock|LoadTextureTile)")
+TEXPOOL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# gSPSegment(pkt, num, base) — the third argument is the symbol a segment
+# register is pointed at, and such a symbol is reached through the register
+# rather than by its own address.
+TEXPOOL_SEGMENT_RE = re.compile(
+    r"gSPSegment\(\s*[^,]+,\s*[^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)")
+
+
+def _texpool_call_args(text, lparen):
+    """The argument list of a macro call whose '(' is at `lparen`.
+
+    Depth-aware, so a nested call or a parenthesised expression inside an
+    argument does not split it. Returns [] if the call is unterminated.
+    """
+    depth = 0
+    cur = ""
+    out = []
+    i = lparen
+    while i < len(text):
+        c = text[i]
+        if c == "(":
+            depth += 1
+            if depth == 1:
+                i += 1
+                continue
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                out.append(cur)
+                return [a.strip() for a in out]
+        if depth == 1 and c == ",":
+            out.append(cur)
+            cur = ""
+        else:
+            cur += c
+        i += 1
+    return []
+
+
+def scan_texture_operands():
+    """Symbols named as a TEXTURE IMAGE operand by some display list in src/.
+
+    Returns {symbol: n_sites}. This is the population T1 would serve, derived
+    from the game's own display lists rather than from a name heuristic — the
+    suffix `_txt` alone spans animation data and segment bases as well as
+    textures, and `_tex` misses the Dolphin tile macros entirely.
+    """
+    names = {}
+    unknown = {}
+    for pat in ("*.c", "*.c_inc"):
+        for f in SRC.rglob(pat):
+            text = TEXPOOL_COMMENT_RE.sub(
+                " ", f.read_text(encoding="utf-8", errors="surrogateescape"))
+            for m in TEXPOOL_CALL_RE.finditer(text):
+                macro = m.group(1)
+                if macro not in TEXPOOL_IMG_ARG:
+                    if TEXPOOL_TEXMACRO_RE.search(macro):
+                        unknown[macro] = unknown.get(macro, 0) + 1
+                    continue
+                args = _texpool_call_args(text, m.end() - 1)
+                idx = TEXPOOL_IMG_ARG[macro]
+                if idx >= len(args):
+                    unknown["%s (only %d args)" % (macro, len(args))] = \
+                        unknown.get("%s (only %d args)" % (macro, len(args)), 0) + 1
+                    continue
+                operand = args[idx]
+                if TEXPOOL_IDENT_RE.match(operand):
+                    names[operand] = names.get(operand, 0) + 1
+    if unknown:
+        raise SystemExit(
+            "make_stub_data T1: found texture macro(s) not in TEXPOOL_IMG_ARG:\n"
+            + "".join("    %s  x%d\n" % (k, v)
+                      for k, v in sorted(unknown.items()))
+            + "  Read each macro's definition and add the 0-based position of "
+              "its texture\n  IMAGE operand. Defaulting to 0 would harvest a "
+              "format enum as if it were a\n  symbol; skipping it would drop "
+              "real textures from the probe's population\n  and report a "
+              "reassuring interior=0 about binds it never examined.")
+    return names
+
+
+def scan_gsp_segment_symbols():
+    """Symbols used as the third argument of gSPSegment anywhere in src/.
+
+    Such a symbol is reached through a segment register, so the address the
+    renderer sees is not the symbol's own and it can never be keyed by it.
+    """
+    out = set()
+    for pat in ("*.c", "*.c_inc"):
+        for f in SRC.rglob(pat):
+            text = TEXPOOL_COMMENT_RE.sub(
+                " ", f.read_text(encoding="utf-8", errors="surrogateescape"))
+            out.update(TEXPOOL_SEGMENT_RE.findall(text))
+    return out
+
+
+def scan_asset_declarations():
+    """Every `#ifdef TARGET_PC` asset array in src/, with its owner and linkage.
+
+    Returns {symbol: (byte_size, repo_relative_owner, is_static)}. .c_inc files
+    are scanned alongside .c: the generator has been bitten twice by treating a
+    .c_inc as invisible (kb/traps.md — the dialogue balloon and the reply box).
+    """
+    out = {}
+    for pat in ("*.c", "*.c_inc"):
+        for f in sorted(SRC.rglob(pat)):
+            text = f.read_text(encoding="utf-8", errors="surrogateescape")
+            if "#ifdef TARGET_PC" not in text:
+                continue
+            globs, stats, _ = scan_declarations(text)
+            rel = str(f.relative_to(REPO))
+            for name, size in globs:
+                out[name] = (size, rel, 0)
+            for name, size in stats:
+                out[name] = (size, rel, 1)
+    return out
+
+
+def texpool_kept_files(keep_paths):
+    """repo-relative file -> keep prefixes, for every file the keep list keeps.
+
+    ⚠️ THE CALLER MUST HAVE PARSED THE KEEP LIST WITH parse_keep(), and this
+    function deliberately does not re-implement it. MEASURED 2026-08-06, and it
+    cost a full analysis cycle: tools/dcstub/keeplist-town.txt is NEWLINE
+    separated with '#' comment lines and documents its own consumption on its
+    line 15 (`grep -v '^#' … | paste -sd:`). Splitting the raw file on [:,]
+    instead — which is what parse_keep() does to an ALREADY-JOINED string —
+    collapses its 810 lines into 41 multi-line blobs, none of which equals any
+    real path, and every residency test then misses. The result was a confident
+    `resident = 0 rows / 0 B`, which is a plausible-looking number and wrong.
+    A silent zero that reads as a real answer is the failure class this project
+    keeps paying for.
+
+    The .c_inc files a kept TU includes are kept with it, for the reason
+    cinc_includes() documents: their arrays are `static` and are filled from
+    inside the TU.
+    """
+    kept = {}
+    for rel, prefixes in keep_paths:
+        kept[rel] = prefixes
+        f = REPO / rel
+        text = f.read_text(encoding="utf-8", errors="surrogateescape")
+        for cinc_rel, _cinc_path in cinc_includes(text, f):
+            kept.setdefault(cinc_rel, prefixes)
+    return kept
+
+
+def emit_texpool_map(table, keep_paths, probe):
+    """Build the text of dc_texpool_map.inc. Returns (text, n_rows, n_bytes).
+
+    One row per texture the display lists name by address, keyed by that address
+    — which is exactly what dc_gx_backend_texture_upload() receives as `data`
+    (dc_gx.c:2333 -> dc_pvr_texture.c:1060). dc/src/dc_texpool.c is the consumer,
+    defines the dc_texpool_row_t this is written against, and does the lookup.
+
+    `probe` False emits only the count macro and no table, so the instrument
+    compiles to nothing and no row is left unreferenced.
+    """
+    L = []
+    L.append("/* GENERATED by tools/dcstub/make_stub_data.py — DO NOT EDIT. */")
+    L.append("/*")
+    L.append(" * T1's PROBE map. Each row is one texture the display lists name")
+    L.append(" * by ADDRESS — the key dc_gx_backend_texture_upload() receives as")
+    L.append(" * `data` — joined to the s_assets[] row its bytes live in.")
+    L.append(" *")
+    L.append(" * This map moves no bytes and changes no pixel. It exists so")
+    L.append(" * dc/src/dc_texpool.c can count whether a texture's cache key")
+    L.append(" * could be synthesised from its asset identity instead of read")
+    L.append(" * back out of main RAM on every bind.")
+    L.append(" *")
+    L.append(" * `kept` is 1 when the row is RESIDENT under the keep list this")
+    L.append(" * tree was generated with, 0 when it is stubbed to [1]. Only the")
+    L.append(" * resident rows are a byte saving; the rest are content that does")
+    L.append(" * not exist in the image today. That flag is REPORTED, never")
+    L.append(" * asserted — it moves with every keep-list regeneration.")
+    L.append(" */")
+    L.append("#ifndef DC_TEXPOOL_MAP_INC_")
+    L.append("#define DC_TEXPOOL_MAP_INC_")
+    L.append("")
+
+    if not probe:
+        L.append("/* --texpool 0: the probe is off. No table is emitted, so")
+        L.append(" * nothing here is left unreferenced and dc/src/dc_texpool.c")
+        L.append(" * compiles to nothing. */")
+        L.append("#define DC_TEXPOOL_MAP_N 0")
+        L.append("")
+        L.append("#endif /* DC_TEXPOOL_MAP_INC_ */")
+        L.append("")
+        return "\n".join(L), 0, 0
+
+    operands = scan_texture_operands()
+    segment_syms = scan_gsp_segment_symbols()
+    decls = scan_asset_declarations()
+
+    n_pal = n_seg = n_static = n_npc = 0
+    rows = []
+    for name in sorted(operands):
+        row = table.get(name)
+        if row is None:
+            # Named by a display list but with no s_assets[] row: not loadable
+            # off the disc, so T1 could never serve it. Not an error — 599 such
+            # operands exist (scratch buffers, framebuffers, segment bases).
+            continue
+        decl = decls.get(name)
+        if decl is None:
+            raise SystemExit(
+                "make_stub_data T1: %s has an s_assets[] row but no "
+                "`#ifdef TARGET_PC`\n  declaration in src/. The probe keys on "
+                "the symbol's ADDRESS, so a row it\n  cannot take the address "
+                "of is a contradiction — re-derive the scan rather\n  than "
+                "skipping it." % name)
+        _size, owner, is_static = decl
+        bin_path, tsize, off, rom_src, swap = row
+
+        if swap != 0:
+            # A TLUT, reached through the texture-image operand because that is
+            # how Dolphin loads one. Palettes stay RESIDENT: a CI texture
+            # decoded against a missing TLUT fails SILENTLY
+            # (dc_pvr_texture.c:347 and the DC_TEX_LOG note at :1200-1208).
+            n_pal += 1
+            continue
+        if name in segment_syms:
+            n_seg += 1
+            continue
+        if is_static:
+            n_static += 1
+            continue
+        if owner.startswith(TEXPOOL_NPC_DIR):
+            n_npc += 1
+            continue
+
+        if rom_src != 0:
+            raise SystemExit(
+                "make_stub_data T1: %s has rom_src=%d, expected 0. Every "
+                "texture in this\n  tree lives in foresta.rel and is a pure "
+                "pread; a second source means the\n  loader T1 is being sized "
+                "for needs another case. Re-derive it rather than\n  emitting "
+                "the row." % (name, rom_src))
+        if tsize > 0xFFFF:
+            raise SystemExit(
+                "make_stub_data T1: %s is %d B, which overflows the 16-bit "
+                "`size` field of\n  dc_texpool_row_t. Widen that struct in "
+                "dc/src/dc_texpool.c and this check\n  together." % (name, tsize))
+        if _size != tsize:
+            raise SystemExit(
+                "make_stub_data T1: %s is declared 0x%X but its s_assets[] row "
+                "says 0x%X.\n  The probe's `oversize` counter compares the "
+                "decoder's own read length\n  against the ROW size, so a "
+                "declaration that disagrees with the table makes\n  that "
+                "measurement meaningless. Re-derive, do not pick one."
+                % (name, _size, tsize))
+
+        kept = 1 if _texpool_is_resident(name, owner, keep_paths) else 0
+        rows.append((name, bin_path, tsize, off, kept))
+
+    n_bytes = sum(r[2] for r in rows)
+    if len(rows) != TEXPOOL_ROWS_EXPECTED or n_bytes != TEXPOOL_BYTES_EXPECTED:
+        raise SystemExit(
+            "make_stub_data T1: emitted %d rows / %d B, expected %d / %d.\n"
+            "  Same checksum rule as BGTEX_ROWS_EXPECTED: a selector that stops\n"
+            "  matching does not fail, it measures a SMALLER population than it\n"
+            "  claims and then reports a reassuring interior=0 about binds it\n"
+            "  never examined. Re-derive TEXPOOL_ROWS_EXPECTED /\n"
+            "  TEXPOOL_BYTES_EXPECTED against the tree; do not relax them."
+            % (len(rows), n_bytes, TEXPOOL_ROWS_EXPECTED, TEXPOOL_BYTES_EXPECTED))
+    for got, want, what in (
+            (n_pal, TEXPOOL_PAL_EXCLUDED_EXPECTED, "palette (swap != 0)"),
+            (n_seg, TEXPOOL_SEG_EXCLUDED_EXPECTED, "gSPSegment-bound"),
+            (n_static, TEXPOOL_STATIC_EXCLUDED_EXPECTED, "file-static"),
+            (n_npc, TEXPOOL_NPC_EXCLUDED_EXPECTED, "src/data/npc/**")):
+        if got != want:
+            raise SystemExit(
+                "make_stub_data T1: excluded %d %s row(s), expected %d.\n"
+                "  Each exclusion is checked separately so a change is "
+                "ATTRIBUTABLE rather\n  than surfacing as a wrong total. Work "
+                "out which symbol moved and why\n  before adjusting the "
+                "constant." % (got, what, want))
+
+    n_kept = sum(1 for r in rows if r[4])
+    b_kept = sum(r[2] for r in rows if r[4])
+
+    L.append("#define DC_TEXPOOL_MAP_N          {}".format(len(rows)))
+    L.append("/* Residency under the keep list this tree was generated with.")
+    L.append(" * REPORTED, never asserted — see the module docstring. */")
+    L.append("#define DC_TEXPOOL_RESIDENT_N     {}".format(n_kept))
+    L.append("#define DC_TEXPOOL_RESIDENT_B     {}".format(b_kept))
+    L.append("#define DC_TEXPOOL_STUBBED_N      {}".format(len(rows) - n_kept))
+    L.append("#define DC_TEXPOOL_STUBBED_B      {}".format(n_bytes - b_kept))
+    L.append("")
+    # `extern char x[]` regardless of the vendored element type, exactly as
+    # dc_bgtex_map.inc declares its u16 palettes: only the ADDRESS is used, no TU
+    # sees both spellings, and this .inc must not drag the decomp headers in.
+    for name, _bin, _sz, _off, _kept in rows:
+        L.append("extern char {}[];".format(name))
+    L.append("")
+    L.append("static const dc_texpool_row_t dc_texpool_map[] = {")
+    for name, _bin, sz, off, kept in rows:
+        L.append('    {{ (const void*){}, "{}", {}u, {}u, {}, 0 }},'.format(
+            name, name, off, sz, kept))
+    L.append("};")
+    L.append("")
+    L.append("#endif /* DC_TEXPOOL_MAP_INC_ */")
+    L.append("")
+    return "\n".join(L), len(rows), n_bytes
+
+
+def _texpool_is_resident(name, owner, keep_paths):
+    """Is `name` full-size in the image the keep list describes?
+
+    Resolved through parse_keep()'s own output and keep_symbol(), never by
+    re-parsing the keep-list file — see texpool_kept_files() for the measured
+    reason that matters.
+    """
+    kept = _texpool_is_resident.cache
+    if kept is None or _texpool_is_resident.key is not keep_paths:
+        kept = texpool_kept_files(keep_paths)
+        _texpool_is_resident.cache = kept
+        _texpool_is_resident.key = keep_paths
+    if owner not in kept:
+        return False
+    prefixes = kept[owner]
+    return keep_symbol(name, prefixes) if prefixes else True
+
+
+_texpool_is_resident.cache = None
+_texpool_is_resident.key = None
+
 
 # ---------------------------------------------------------------------------
 # The default allowlist: everything src/actor/ac_animal_logo.c draws.
@@ -1924,6 +2376,18 @@ def main():
              "make_src_shrink.py was run with, and dc/Makefile's "
              "DC_NPCMDL_POOL; dc/build-dc.sh passes all three from one value.",
     )
+    ap.add_argument(
+        "--texpool",
+        type=int,
+        default=int(os.environ.get("DC_TEXPOOL_PROBE", "0") or "0"),
+        choices=(0, 1),
+        help="T1's PROBE (not a pool). 1 emits dc_texpool_map.inc so "
+             "dc/src/dc_texpool.c can count, per texture bind, whether the "
+             "source pointer is the exact base of a mapped asset row. It moves "
+             "no bytes and changes no pixel. 0 (the default, matching "
+             "dc/Makefile's DC_TEXPOOL_PROBE) emits an empty map and the probe "
+             "compiles to nothing.",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -1931,6 +2395,10 @@ def main():
     bgtex_demand = bool(args.bgtex_demand)
     npctex_pool = bool(args.npctex_pool)
     npcmdl_pool = bool(args.npcmdl_pool)
+    # T1's probe. Unlike the three pools above it has NO keep-list kill switch to
+    # pair with: it restores nothing and frees nothing, so turning it off simply
+    # emits an empty map.
+    texpool_probe = bool(args.texpool)
     out_root = Path(args.out).resolve()
 
     keep_paths, keep_why = parse_keep(args.keep)
@@ -2140,6 +2608,8 @@ def main():
         table, keep_paths, npctex_pool)
     npcmdl_text, n_npcmdl, n_npcmdl_bytes = emit_npcmdl_map(
         keep_paths, npcmdl_pool)
+    texpool_text, n_texpool, n_texpool_bytes = emit_texpool_map(
+        table, keep_paths, texpool_probe)
 
     pruned = 0
     if not args.dry_run:
@@ -2171,6 +2641,10 @@ def main():
         else:
             unchanged += 1
         if write_if_changed(out_root / NPCMDL_INC_NAME, npcmdl_text):
+            written += 1
+        else:
+            unchanged += 1
+        if write_if_changed(out_root / TEXPOOL_INC_NAME, texpool_text):
             written += 1
         else:
             unchanged += 1
@@ -2208,6 +2682,25 @@ def main():
         if not npcmdl_pool:
             print("                  {} villager mdl file(s) forced back onto"
                   " the keep list".format(len(NPCMDL_KEEP_RESTORE)))
+        # The probe's row count is printed unconditionally, and so is its
+        # resident/stubbed split. A generated list that is silently inert is what
+        # left G1 unrun for two sessions (dc/opt-lists.mk), and the split is the
+        # number that says how much of T1 is a SAVING and how much is content
+        # that does not exist in the image yet.
+        print("  {:<14}: {} rows, {:,} B mapped        [T1 PROBE, "
+              "--texpool={}]".format(
+                  TEXPOOL_INC_NAME, n_texpool, n_texpool_bytes, args.texpool))
+        if texpool_probe:
+            import re as _re
+            _m = _re.search(r"RESIDENT_N\s+(\d+)", texpool_text)
+            _b = _re.search(r"RESIDENT_B\s+(\d+)", texpool_text)
+            _sn = _re.search(r"STUBBED_N\s+(\d+)", texpool_text)
+            _sb = _re.search(r"STUBBED_B\s+(\d+)", texpool_text)
+            print("                  resident {} rows / {:,} B  (the only part "
+                  "T1 would SAVE)".format(int(_m.group(1)), int(_b.group(1))))
+            print("                  stubbed  {} rows / {:,} B  (content the "
+                  "image does not have today)".format(
+                      int(_sn.group(1)), int(_sb.group(1))))
         if n_unmapped:
             print("  WARNING       : {} kept global(s) have no s_assets[] row"
                   " and will stay zeroed".format(n_unmapped))

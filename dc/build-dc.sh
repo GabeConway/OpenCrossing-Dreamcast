@@ -29,6 +29,13 @@
 #                                         # mess, as before R3. Default 1.
 #                                         # DC_NPCMDL_SLOTS=<N> cuts the pool
 #                                         # without turning it off (7,552 B each).
+#     DC_TEXPOOL_PROBE=1 DC_ASSET_STUB=1 bash dc/build-dc.sh
+#                                         # T1's falsification probe. Counts
+#                                         # only — no bytes move, no pixel
+#                                         # changes. Needs DC_ASSET_STUB=1.
+#                                         # Read the result with:
+#                                         #   grep '\[DC/TEXPOOL\]' console.log
+#                                         # Default 0.
 #     DC_CDI_PAD=1  bash dc/build-dc.sh   # padded 740 MB CDI for CD-R burns
 #     JOBS=8        bash dc/build-dc.sh
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
@@ -84,11 +91,13 @@ if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
     echo "-- DC_ASSET_STUB=1: regenerating $REPO/dc/build/stubsrc" \
          "(DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
          "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
-         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0})"
+         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
+         "DC_TEXPOOL_PROBE=${DC_TEXPOOL_PROBE:-0})"
     python3 "$REPO/tools/dcstub/make_stub_data.py" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
-        --npcmdl-pool="${DC_NPCMDL_POOL:-0}"
+        --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
+        --texpool="${DC_TEXPOOL_PROBE:-0}"
 fi
 
 # DC_SRC_SHRINK=1 (the DEFAULT) -> the .bss literal-shrink tree, 1,159,392 B of
@@ -201,6 +210,19 @@ ENVARGS=(
 # is `ifneq ($(DC_EMU64_HIST),0)`, and empty is not 0, so an unset variable
 # would turn the instrument ON for every build.
 [ -n "${DC_EMU64_HIST+x}" ] && ENVARGS+=(-e DC_EMU64_HIST="$DC_EMU64_HIST")
+# T1's probe, and it MUST be the forward-only form for BOTH of the reasons
+# DC_EMU64_HIST documents above. Its dc/Makefile guard is
+# `ifneq ($(DC_TEXPOOL_PROBE),0)` -- empty is not 0 -- so a plain
+# `-e DC_TEXPOOL_PROBE=` would arm the probe on EVERY build and then $(error)
+# out of any build that is not DC_ASSET_STUB=1. Omitting the line entirely would
+# be the G1 bug verbatim: dc/Makefile has DC_TEXPOOL_PROBE ?= 0, so from this
+# HOST entry point a DC_TEXPOOL_PROBE=1 build would compile the instrument out
+# while make_stub_data.py above still emitted the map, and the run would reach
+# the town and simply print no [DC/TEXPOOL] line -- which reads as "the probe
+# found nothing", not "it was never built". That is what left G1 unrun for two
+# sessions (kb/traps.md).
+[ -n "${DC_TEXPOOL_PROBE+x}" ] && \
+    ENVARGS+=(-e DC_TEXPOOL_PROBE="$DC_TEXPOOL_PROBE")
 # G2, forward-only for the same reason as DC_EMU64_HIST above -- its Makefile
 # guard is `ifneq (...,0)` too, so an empty -e would arm it on every build.
 [ -n "${DC_EMU64_SHADOW_LOOP+x}" ] && \

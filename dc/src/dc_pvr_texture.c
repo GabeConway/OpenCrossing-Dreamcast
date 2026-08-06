@@ -100,6 +100,16 @@
 #include "dc_gx_internal.h"
 #include <dolphin/gx/GXEnum.h>
 
+#if defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE
+/* T1's probe (dc/src/dc_texpool.c). Declared here rather than through a header
+ * because dc_bgtex.c / dc_npctex.c / dc_npcmdl.c all do it this way — none of
+ * the four has a dc/include header, and a one-consumer instrument does not earn
+ * one. Both symbols exist only when the probe is compiled in. */
+void dc_texpool_note_bind(const void* data, unsigned int decoded_bytes,
+                          unsigned int content_hash);
+void dc_texpool_report(void);
+#endif
+
 /* --- KOS surface -----------------------------------------------------------
  * dc_platform.h already pulls <dc/pvr.h> behind #ifndef DC_HOST_STUB; the
  * include below is the same pattern, stated explicitly so this file's
@@ -1030,6 +1040,13 @@ void dc_pvr_texture_report(void) {
     DC_LOGE("[DC/TEX] uploads=%u hits=%u resident=%u B evictions=%u rejects=%u\n",
             s_stat_uploads, s_stat_hits, s_bytes_resident,
             s_stat_evictions, s_stat_rejects);
+#if defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE
+    /* Hung off the existing report rather than given its own call site: this
+     * function is already reached every 30 presented frames via dc_pvr_report()
+     * (dc_pvr.c:3215 <- dc_vi.c:581), so the probe inherits a rate that is known
+     * good and cannot put a line on the boot path. */
+    dc_texpool_report();
+#endif
 }
 
 /* ==========================================================================
@@ -1089,6 +1106,17 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     probe.ci_fmt     = (unsigned short)ci_fmt;
     probe.tlut_fmt   = (unsigned short)tlut_fmt;
     probe.tlut_count = (unsigned short)(tlut_count < 0 ? 0 : tlut_count);
+
+#if defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE
+    /* T1's falsification probe (dc/src/dc_texpool.c). Placed HERE, after the key
+     * is built and BEFORE the cache lookup, on purpose: every bind must be
+     * counted, and returning on a cache hit below would hide the ~99.97 % of
+     * binds that hit — which is exactly the population T1 wants to serve without
+     * touching main RAM. Both arguments are values this function has already
+     * computed, so the probe repeats no work and reorders nothing. */
+    dc_texpool_note_bind(data, (unsigned int)gc_data_size(w, h, fmt),
+                         probe.data_hash);
+#endif
 
     hit = index_find(&probe);
     if (hit) {

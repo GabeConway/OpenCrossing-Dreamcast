@@ -42,6 +42,10 @@
 #                    31 species never had, it does not save bytes. 0 restores
 #                    cbr_1 to the keep list and pools nothing. MUST match the
 #                    --npcmdl-pool= that BOTH scripts were run with.
+#   DC_TEXPOOL_PROBE=0  T1's falsification probe, DEFAULT OFF. Counts only —
+#                    moves no bytes, changes no pixel. Needs DC_ASSET_STUB=1 and
+#                    a stub tree built with --texpool=1. MUST match the
+#                    --texpool= that make_stub_data.py was run with.
 #   DC_AUDIO=0       sound. DEFAULT OFF — it costs ~45 % of the frame rate
 #                    (dc/src/dc_audio.c). Also selects the S8 half of the
 #                    shrink tree, so it MUST match the --audio= that
@@ -653,6 +657,50 @@ DEFINES += -DDC_NPCMDL_POOL=$(DC_NPCMDL_POOL)
 # is never another animal's limbs.
 ifneq ($(DC_NPCMDL_SLOTS),)
 DEFINES += -DDC_NPCMDL_SLOTS=$(DC_NPCMDL_SLOTS)
+endif
+
+# =============================================================================
+# DC_TEXPOOL_PROBE — T1's falsification probe (KILL SWITCH: =0, the default)
+# =============================================================================
+# NOT a pool and NOT a lever: it moves no bytes and changes no pixel. It counts,
+# per texture bind, whether the source pointer is the EXACT BASE of a mapped
+# asset row — which is the one question that decides whether T1 can synthesise a
+# texture's cache key from its asset identity instead of reading the array back
+# out of main RAM on every bind (dc_pvr_texture.c:1083, ~109 binds/frame).
+#
+# Three counters kill the design if non-zero — `interior`, `mutated`,
+# `oversize` — plus `aliased`, which dc/src/dc_texpool.c adds for the same
+# reason `mutated` exists. RUN IT BEFORE WRITING THE LOADER (kb/levers.md L10).
+#
+# Two parts and they must agree, which is why this is ONE number:
+#   tools/dcstub/make_stub_data.py --texpool   emits dc_texpool_map.inc
+#   this -D                                    compiles the probe in
+# Unlike R1/R2/R3 there is no keep-list half: the probe restores nothing and
+# frees nothing, so at 0 the generator emits an empty map and the TU is empty.
+#
+# ⚠️ REQUIRES DC_ASSET_STUB=1, because the map is generated into $(STUBDIR) and
+# only make_stub_data.py writes it. Checked below rather than left to
+# dc/src/dc_texpool.c's #include, so a mismatch says so at once instead of
+# failing 3,900 TUs later on one platform source.
+#
+# COSTS, and why it is off by default: ~97,472 B of .rodata for the 6,092 rows
+# plus their names, and ~42.6 KB of .bss for the sorted order, the per-row
+# baseline hashes and the seen flags. That is a diagnostic build, not a shipping
+# one.
+DC_TEXPOOL_PROBE ?= 0
+ifneq ($(DC_TEXPOOL_PROBE),0)
+  ifneq ($(DC_ASSET_STUB),1)
+    $(error DC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE) needs DC_ASSET_STUB=1 — \
+            dc_texpool_map.inc is generated into $(STUBDIR) and only \
+            make_stub_data.py writes it)
+  endif
+  ifeq ($(wildcard $(STUBDIR)/dc_texpool_map.inc),)
+    $(error DC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE) but \
+            $(STUBDIR)/dc_texpool_map.inc is missing — the stub tree was \
+            generated without --texpool. Run: python3 \
+            $(ROOT)/tools/dcstub/make_stub_data.py --texpool=1)
+  endif
+DEFINES += -DDC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE)
 endif
 
 # DC_DIAG=1 turns on PC_DIAG() — the decomp's own rate-limited bring-up tracer
@@ -1379,6 +1427,7 @@ FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DC_AUDIO=$(DC_AUDIO) DC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND) \
              DC_NPCTEX_POOL=$(DC_NPCTEX_POOL) \
              DC_NPCMDL_POOL=$(DC_NPCMDL_POOL) \
+             DC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE) \
              DC_OPT_PROFILE=$(DC_OPT_PROFILE) \
              DECOMP_OPT=$(DECOMP_OPT) DECOMP_HOT_OPT=$(DECOMP_HOT_OPT) \
              OPT_HOT=$(OPT_HOT_SRC) OPT_QUAR=$(strip $(OPT_QUARANTINE_SRC)) \
