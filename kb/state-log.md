@@ -1,5 +1,64 @@
 # Session log — what was observed running, in order
 
+## 2026-08-06 (later) — sh4zam vendored; the FIPR experiment measures FLAT
+
+Falco's direction, followed and measured. Recorded because the NEGATIVE result
+is the useful one.
+
+**The experiment.** `PSMTXMultVec`/`SR` through `shz_vec4_dot3` — three FIPRs
+sharing one pinned left vector, which the KOS `fipr()` macro cannot express.
+The compiled function really did become **3 FIPRs and nothing else** (objdump,
+down from 9 `fmul` + 9 `fadd`). The frame did not care:
+
+| | `-O3` baseline | + FIPR MultVec |
+|---|---:|---:|
+| `us/v` | 3.11 | 3.12 |
+| `draw` ms | 45.4 | 45.5 |
+| town FPS | 20.6 | 20.4 |
+
+`smoke-oc-dc-shz-20260806-133743`. **DEFAULT 0**, and the reason is precision
+rather than speed: FIPR carries ~2^-21 relative error against four
+correctly-rounded scalar operations, which is a real risk on VERTEX POSITIONS
+bought for nothing. (Lighting keeps the same trade, `dc_pvr.c:188-191`, where
+the error cannot move a pixel.)
+
+⚠️ **HOW THE ESTIMATE WENT WRONG — rule 5, again.** It was built from
+instruction counts: ~6,951 G_VTX source vertices × 2 calls × ~90 cycles ⇒
+"~6 ms/frame". The backend only ever sees ~3,000 vertices, and `-O3` had
+already made the scalar body cheap. **Only a matched-frame A/B may price a
+function.**
+
+**What the trip was worth.** The residency branch at the top of both functions
+is **dead code**: `dc_xm_claim(..., DC_XM_KIND_TRANSPOSE)` has one call site,
+inside `PSMTXMultVecArray`, which `--gc-sections` discards — and `dc_mtx.c`'s
+own header already said so while the code went on probing for it twice per
+vertex at 12 loads + 12 compares a call. Probe removed. Measured 21.3 FPS /
+`draw` 43.7 ms against 20.6 / 45.4, but that window carried less geometry
+(`cmds` 3611 vs 3728), so it is logged as **no regression, direction
+positive** — not as a win.
+
+**Structural, so it is not re-proposed:** XMTRX can never serve that path.
+`dl_G_VTX` calls it twice per vertex with two different matrices
+(`emu64.c:4709`, `:4711`), alternating every iteration, and SH-4 has one XF
+bank.
+
+**Costed and NOT tried:** composing the per-batch `P·MV` inside XMTRX. The
+hand fold it would replace is ~96 batches × ~140 instructions ≈ **67 µs of a
+45 ms frame**. Doing the arithmetic first is what rule 5 is for.
+
+**Still open, and cheap now that sh4zam is vendored:**
+`dc_gx_batch_is_offscreen` (`dc_gx.c:495`) puts 8 AABB corners through two
+scalar matrix stages per batch — ~2.0 ms/frame — and never touches the matrix
+unit, despite using the same `P·MV` product `dc_pvr.c` builds a line later.
+And the per-lit-vertex block (`dc_pvr.c:2868`) re-reads `mv`/`nm` from RAM per
+vertex for 6-7 FIPRs, on ~2,900 of ~3,100 town vertices.
+
+⚠️ **sh4zam currently contributes ZERO bytes to the image** — its four `.c`
+files gc-section away and the one path that used a header is off by default.
+It is vendored (`dc/third_party/sh4zam`, MIT, pinned `d4c648f`) so those two
+experiments need no setup, not because anything ships from it today.
+
+
 ## ⭐ 2026-08-06 — THE `-O0` BAN WAS ARM EVIDENCE, AND IT COST 2.8 MB AND 8 FPS
 
 **Session 5, and the largest single result the project has had.** The user

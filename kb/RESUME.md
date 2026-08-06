@@ -39,7 +39,15 @@ with 14 hot TUs at `-O3`; `DC_OPT_PROFILE=o0` is the byte-identical revert.
    instead of the game dereferencing NULL. Do not "fix" it by defining it.
 9. **Nothing here has run on hardware.** Flycast models no instruction cache,
    so it understates a change that deleted 2.8 MB of `.text`.
-10. **The RAM picture changed as much as the FPS picture.** −2.78 MB of `.text`
+10. **sh4zam is vendored (`dc/third_party/sh4zam`) and ships NOTHING.** The
+    FIPR `PSMTXMultVec` experiment measured **flat** (`us/v` 3.11 → 3.12) and
+    is off by default on precision grounds. What it did find: that function's
+    residency probe was **dead code** and is gone. The two experiments still
+    worth running with it are the AABB cull (`dc_gx.c:495`, ~2.0 ms/frame,
+    scalar, never touches the matrix unit) and the per-lit-vertex block
+    (`dc_pvr.c:2868`). Composing `P·MV` in XMTRX is **costed and dropped** —
+    67 µs of a 45 ms frame. `kb/state-log.md` top entry.
+11. **The RAM picture changed as much as the FPS picture.** −2.78 MB of `.text`
     is bigger than every `.bss` lever landed so far, combined; `kb/levers.md`
     and `kb/ram-plan.md` are costed against an image that no longer exists.
 
