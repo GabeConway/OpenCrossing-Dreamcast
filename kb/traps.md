@@ -19,6 +19,37 @@ for those see `kb/closed.md`.
   `$(file …)` to build a linker response file.
 - **`char` is SIGNED by default** on this toolchain build, so `-fsigned-char`
   is belt-and-braces, not load-bearing.
+- **`--wrap=<C name>` MATCHES NOTHING ON sh-elf, and ld does not tell you
+  (2026-08-05).** This toolchain uses a leading-underscore user label prefix:
+  `dc/build/dedup/syms.txt` has `8c35f384 00000318 T _mNpc_SetNpcList`, so the
+  linker symbol is **`_mNpc_SetNpcList`** and `--wrap=mNpc_SetNpcList` wraps
+  nothing — **silently**, because `--wrap` on an unknown symbol is not
+  diagnosed. The build succeeds, the seam is simply absent, and the `__wrap_`
+  function is dead code that `--gc-sections` then removes, so even a size check
+  looks normal. Several kb proposals are written in the unprefixed form
+  (`kb/STATE.md`'s villager seam, `kb/research-ram-tiers.md`'s
+  `--wrap=malloc`, the `--wrap=_RspStart2` audio probe). **Spell every `--wrap`
+  with the underscore, and verify with
+  `sh-elf-nm dc/build/AnimalCrossing.elf | grep __wrap_`.**
+
+## Counting things in display lists — two ways to be wrong (2026-08-05)
+
+- **`gsDPLoadTextureBlock_4b_Dolphin` expands to TWO `Gfx`, not one.** It is a
+  comma pair at `include/libforest/gbi_extensions.h:1133`, and there are
+  **1,619** of them in `src/data/npc/model/mdl/` alone. **Any tool that sizes a
+  display list by counting macros is wrong by that much**, and the error is
+  systematically in one direction.
+- **A `gsSPNTriangles_5b` packet's top byte is vertex-index data, and it reads
+  as `G_VTX` (0x01)** whenever `v11 == 0` and `v10` is 4..7 — which is ordinary
+  geometry, not a corner case. **A display-list walker hunting for `G_VTX` will
+  corrupt geometry.** This is why R3 patches from a generated table rather than
+  by walking display lists at runtime.
+- Related, and it is a different field from the one the kb used to quote: the
+  N-triangle **face count** in `G_TRIN_INDEPEND` is **7 bits** —
+  `emu64.c:4814` is `n_faces = ((w0 >> 17) & 0x7F) + 1`, i.e. 1..128 faces. The
+  "5 bits" everyone quotes is the per-vertex **index** width (`POLY_5b`,
+  `gbi_extensions.h:64,69-86`), which is what caps a batch at 32 distinct
+  source vertices. Both facts are true; they are not the same fact.
 
 ## `DC_ASSET_STUB` — full-size passes over `[1]`-sized destinations
 
@@ -413,6 +444,12 @@ for those see `kb/closed.md`.
   The user reported "kk slider is messed up major, regression" — correct
   behaviour for that switch, wasted round trip. Name the expected collateral in
   the same message as the build.
+- **The harness writes `console.log` only when Flycast EXITS (2026-08-05).**
+  Polling the run directory mid-run finds no log — or a stale one from the
+  previous run — which reads exactly like a hang and has cost a kill-and-restart
+  cycle. **A 900 s run takes ~17-20 min of wall clock; wait for it.** If you
+  need to know a run is alive, check that the Flycast process still exists, not
+  that the log has grown.
 - **`-c config:LimitFPS=no` unlocks the frame limiter.** `smoke.sh` passes `-c`
   straight through to Flycast (`smoke.sh:97`). This is the user's own
   play-testing setting and gets far more game per wall-clock second.
@@ -692,6 +729,39 @@ for those see `kb/closed.md`.
   must be non-zero. One G2 run was made, watched by a human and reported as
   "seems faster" before this check showed the shadow had never been compiled in
   — its FPS was identical to baseline because it *was* baseline.
+- **`dc/build-dc.sh` and `dc/Makefile` each carry the knob's DEFAULT, and they
+  drift (2026-08-05).** The script passes `--npctex-pool="${DC_NPCTEX_POOL:-0}"`
+  to the generators while the Makefile has its own `DC_NPCTEX_POOL ?= 0` for the
+  compile — two independent spellings of one default. They disagreed, and it was
+  caught only because the generated tree carries an `#error` against a stale
+  tree (the same guard S8 uses for `DC_AUDIO`). **Change both, and give any
+  generator-plus-compiler knob a hard `#error` on mismatch** — a rewriter that
+  ran with one value and a compile that ran with the other is a silent,
+  arbitrary bug.
+- **A knob whose value the GENERATOR consumes must never be forwarded as
+  empty.** `[ -n "${VAR+x}" ] && ENVARGS+=(-e VAR="$VAR")` is the only correct
+  form; `-e VAR=` expands `-DDC_NPCTEX_POOL=` into every TU, where the rewritten
+  TUs' `#if defined(DC_NPCTEX_POOL) && !DC_NPCTEX_POOL` is a preprocessor
+  error — a build failure, which is the good case. The bad case is the
+  `ifneq ($(VAR),0)` guard, where empty is not 0 and the feature turns on for
+  every build.
+
+## Two instruments that install into the same table are not additive (2026-08-05)
+
+- **G1 (`DC_EMU64_HIST`) and G2 (`DC_EMU64_SHADOW_LOOP`) both overwrite emu64's
+  dispatch table, and building both produced a silently useless run.** G2's
+  trampolines replace G1's thunks, and G2's loop then calls `s_orig[]`
+  directly — so G1 armed, cost a clock read per command, and reported nothing.
+  It is an `#error` now (`dc/include/dc_platform.h:417`). **Any third installer
+  has the same problem in a worse form:** both existing ones `memcpy` **all 64
+  slots** on frame open (`dc_emu64_hist.c:262`, `dc_emu64_shadow.cpp:492`) and
+  restore all 64 on close, so a per-slot shadow must either arm slot-wise or
+  initialise strictly before them.
+- **An instrument's REPORT and its ARM SITES must live under the same guard.**
+  G1's `[EMU64H]` print was inside `#ifdef DC_PERF_PHASE` while the arming was
+  not, so a `DC_EMU64_HIST=1` build without `-DDC_PERF_PHASE` paid ~2,867 clock
+  reads a frame and printed nothing at all — indistinguishable from "the
+  instrument is broken".
 
 ## Killing a build mid-flight corrupts `objs.rsp` (2026-08-04)
 

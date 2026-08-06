@@ -44,15 +44,60 @@
  * ==========================================================================
  * WHAT IS DELIBERATELY *NOT* ACCELERATED
  * ==========================================================================
- *  - PSVECDotProduct / PSVECMag / PSVECNormalize. SH-4 has FIPR (4-way dot)
- *    and FSRRA (reciprocal sqrt), but both are ~20-bit-mantissa APPROXIMATIONS
- *    where the GameCube used full single precision. These feed lighting
- *    normals and, through C_MTXLookAt, the camera basis. TODO(M3): measure
- *    whether the error is visible before enabling; DC_MTX_USE_FIPR turns them
- *    on for that experiment and is OFF by default.
  *  - PSMTXInverse. Not hot, and the cofactor expansion has no FTRV shape.
  *  - Everything gu* (N64 fixed-point). Called at scene setup, not per frame,
  *    and guMtxF2L is integer bit-twiddling anyway.
+ *
+ * ==========================================================================
+ * THE PSVEC* TRIO — the M3 TODO, answered from the map
+ * ==========================================================================
+ * This block used to say PSVECDotProduct / PSVECMag / PSVECNormalize were held
+ * at full precision because they "feed lighting normals and, through
+ * C_MTXLookAt, the camera basis", with a TODO(M3) to measure the error first.
+ * Two thirds of that sentence is false for this image. Read the map:
+ *
+ *   PSVECDotProduct   AnimalCrossing.map:37256   DISCARDED, never called
+ *   PSVECMag          AnimalCrossing.map:37258   DISCARDED, never called
+ *   PSVECCrossProduct AnimalCrossing.map:37254   DISCARDED, never called
+ *   C_MTXLookAt       AnimalCrossing.map:37264   DISCARDED, never called
+ *   PSMTXMultVecArray AnimalCrossing.map:37248   DISCARDED, never called
+ *
+ * All five are inside the map's "Discarded input sections" block, which starts
+ * at line 733 and ends at 42895. --gc-sections deleted them. THE CAMERA BASIS
+ * DOES NOT GO THROUGH THIS FILE AT ALL, so there was never a camera-drift risk
+ * to weigh; and PSMTXMultVecArray, which this file's own comments call "where
+ * XMTRX actually pays", is not linked either.
+ *
+ * Exactly one member of the trio survives:
+ *
+ *   PSVECNormalize    AnimalCrossing.map:92577   0x8c4cdde4, 0x44 B
+ *
+ * with exactly one caller in the whole image, emu64.c:4696, gated on
+ * `aflags[AFLAGS_VTX_NORMAL_MODIFY_TYPE] == 0 && (geometry_mode &
+ * G_TEXTURE_GEN) != 0` — a per-vertex call, but only on texture-gen batches.
+ * (The other two textual call sites, mtx.c:290 and :482-484, are in
+ * src/static/dolphin/mtx/, which dc/Makefile:783 excludes from the build.)
+ *
+ * So the question the TODO deferred is narrow: does a ~2^-21 relative error on
+ * ONE normalized vertex normal show up in the frame? Work it forward. The
+ * normal is unit length, so the absolute error is ~5e-7 per component. That
+ * normal is multiplied by the model-view matrix and consumed as a lighting
+ * input whose output is an 8-bit colour channel. One channel step is 1/255 =
+ * 3.9e-3, nearly four orders of magnitude larger than the error. There is no
+ * arrangement of lights that turns 5e-7 into a visible band, and unlike a
+ * camera basis this error does not accumulate across frames — every vertex is
+ * renormalized from its source data every time.
+ *
+ * That is the whole argument, and it is why this now defaults ON. Turn it back
+ * off with -DDC_MTX_NO_FIPR and diff a screenshot pair if you disbelieve it;
+ * the shot to take is a texture-gen surface, because a batch without
+ * G_TEXTURE_GEN never reaches this code — kb/station-bugs.md's shiny train
+ * station interior is the cheapest one to frame.
+ *
+ * Note what this is NOT worth: with dc/src/dc_fmath.c linked, the scalar path's
+ * sqrtf is already one FSQRT instruction, so the FIPR path is buying a
+ * 3-mul-2-add-1-div sequence collapsed into FIPR + FSRRA. Tens of cycles on a
+ * subset of vertices. This stage is cheap and safe, not large.
  *
  * XMTRX is a global CPU resource shared with anything else that uses the SH-4
  * matrix unit (GLdc, KOS's own mat_* helpers). Every fast path here loads it
@@ -67,9 +112,14 @@
 #define DC_MTX_USE_XMTRX 1
 #endif
 
-/* OFF by default — see "WHAT IS DELIBERATELY NOT ACCELERATED" above. */
+/* ON by default — see "THE PSVEC* TRIO" above for why the M3 TODO that held
+ * this at 0 was resolved rather than measured. -DDC_MTX_NO_FIPR is the A/B. */
 #ifndef DC_MTX_USE_FIPR
+#ifdef DC_MTX_NO_FIPR
 #define DC_MTX_USE_FIPR 0
+#else
+#define DC_MTX_USE_FIPR 1
+#endif
 #endif
 
 #if defined(DC_HOST_STUB)
@@ -455,9 +505,15 @@ void PSMTXScaleApply(const MtxP src, MtxP dst, f32 sx, f32 sy, f32 sz) {
 }
 
 /* --- Vector ops -----------------------------------------------------------
- * FIPR/FSRRA are ~20-bit approximations. These feed lighting normals and the
- * C_MTXLookAt camera basis, so they stay full precision by default. */
+ * Of the four below, only PSVECNormalize is linked; the other three are in the
+ * map's discarded block. See "THE PSVEC* TRIO" in the header for the map lines
+ * and for why DC_MTX_USE_FIPR now defaults to 1. */
 
+/* The one live caller is emu64.c:4696, per vertex on texture-gen batches only.
+ * The mag2 > 0 guard is load-bearing in BOTH paths and for different reasons:
+ * the scalar path would divide by zero, and FSRRA of +0 is +inf, which would
+ * turn a degenerate normal into inf/NaN and poison the lit colour rather than
+ * producing the zero vector the GameCube produced. */
 void PSVECNormalize(const Vec* src, Vec* dst) {
 #if DC_MTX_USE_FIPR
     float mag2 = fipr_magnitude_sqr(src->x, src->y, src->z, 0.0f);

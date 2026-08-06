@@ -86,12 +86,23 @@ Full derivation: `kb/state-log.md`, 2026-08-05.
 
 ## Applied
 
-### A5. R2 + R3 — the villager pools. **Content restoration, +110,724 B `.bss` net** (2026-08-05)
+### A5. R2 + R3 — the villager pools. **Written, DEFAULTED OFF, +110,724 B `.bss` if turned on** (2026-08-05)
 
-`dc/src/dc_npctex.c` (236 villager texture sets out of 16 × 4,832 B slots,
-`DC_NPCTEX_POOL=0`) and `dc/src/dc_npcmdl.c` (32 villager model species out of
-16 × 7,552 B slots, `DC_NPCMDL_POOL=0`). Listed here because they are applied,
-**not because they are savings** — see the rule above.
+`dc/src/dc_npctex.c` (236 villager texture sets out of 16 × 4,832 B slots) and
+`dc/src/dc_npcmdl.c` (32 villager model species out of 16 × 7,552 B slots).
+**Both default to 0**; `DC_NPCTEX_POOL=1` / `DC_NPCMDL_POOL=1` arm them. Listed
+here because the code is applied, **not because they are savings** — see the
+rule above.
+
+⚠️ **They are off because the port has no villagers to load into them, and that
+is measured.** `mNpc_SetNpcList` fills the town from the save's `Animal_c
+animals[]` (`m_start_data_init.c:559`); the VMU path is unwired, so
+`[PC] No save file found` and **not one villager actor is ever constructed**.
+Two 900 s runs reaching scene 9 and walking printed zero `[DC/NPCTEX]` /
+`[DC/NPCMDL]` lines, because their only entry point
+`aNPC_dma_draw_data_proc` (`ac_npc_ctrl.c_inc:687`) never runs. **Wiring the
+save (PLAN N2b) is a prerequisite for testing either pool, not a nice-to-have.**
+Nothing in the byte columns below has been observed under load.
 
 ```
 R2   keep list removed  -90,464 | pool +78,872 | .rodata +~6,900 | net  ~-4,700
@@ -135,8 +146,8 @@ to be resident — only the 32 destinations.
 | `MEMLEDGER margin` | 3,103,956 | 3,191,348 | **+87,392** |
 
 `ASSET MISSING` 0, `aram LOST` 0, no OOM, `deepest_scene` 18 unchanged,
-`fps_p50` 24.1 → 24.2. ⚠️ **Screenshot verification was still in flight when
-this was banked — the counters are not the verdict** (measurement rule 2).
+`fps_p50` 24.1 → 24.2, and **screenshot-verified on a `DC_BGTEX_DEMAND=0` vs
+`=1` pair** — measurement rule 2 satisfied, not just the counters.
 
 **The seam is NOT `--wrap`, and that is the reusable part.**
 `mFM_LoadBGCommonTex` and all six segment tables are `static`, and `bcopy` has
@@ -541,6 +552,32 @@ stays untouched.
 **Verdict: keep, do not schedule.** 120 KB durable against an 8.27 MB gap, for
 a nontrivial rewriter. It is worth doing *after* L3, or never. The measurement
 existed to stop the question being asked again.
+
+## L9. Our own libm dependency — 5,940 B, and it is in `dc/` code (2026-08-05)
+
+Small, but it is the rarest kind of lever here: **`.text` that `-O0` does not
+protect, because it is not `src/`'s.**
+
+`dc/src/dc_misc.c:421` builds its sine table with the **double-precision**
+`sin()`, and that single call drags in 44 % of the image's 13,400 B of libm:
+
+```
+k_rem_pio2.o 2720 · e_rem_pio2.o 1408 · k_cos.o 408 · s_scalbn.o 392 ·
+s_floor.o 376 · k_sin.o 264 · s_sin.o 192 · s_frexp.o 148 · s_fabs.o 32
+                                                        ------
+                                                         5,940 B
+```
+
+The table is 1,025 `s16` entries of a quarter turn built once at startup, so the
+argument reduction machinery those objects exist for is never needed. Any of:
+`sinf()`, a float polynomial, or generating the table offline into `.rodata`
+(2,050 B, which is a net loss unless the code goes too). **Not implemented.**
+
+Related and already applied: `dc/src/dc_fmath.c` defines `sqrtf` itself, so
+`libm_a-wf_sqrt.o` (84 B) and `libm_a-ef_sqrt.o` (240 B) are no longer pulled
+in — **324 B**, on top of the speed win of not running a software square root
+339 times a frame. The mechanism is archive extraction, not symbol overriding:
+our objects precede `-lm` on the link line, so libm's copy is never reached.
 
 ## L7. Bucket 6's high-water mark — deferred, deliberately.
 

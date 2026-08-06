@@ -1,7 +1,10 @@
 # Session state — resume here
 
-Updated 2026-08-05. This file is **short on purpose**: only what is
+Updated 2026-08-05 (session 4). This file is **short on purpose**: only what is
 true *right now*, plus what to do next. Everything else is one hop away.
+**A fresh context should read `kb/RESUME.md` first** — that is the handoff and
+it carries the build lines and the eight measurement rules; this file is the
+numbers and the queue.
 
 ## ⭐ 2026-08-05 — G1 RAN. ONE OPCODE IS 28 % OF THE TOWN FRAME, and it is not
 ## the one every plan was costing against
@@ -43,20 +46,59 @@ Run `smoke-G1-20260805-160640-92325`, town, probe-free, 11.5-12.1 FPS:
 rewrite of one `bcopy`, `src/` untouched, kill switch `DC_BGTEX_DEMAND=0`.
 **`.bss` 4,027,212 → 3,945,356 (−81,856). `margin` 3,103,956 → 3,191,348
 (+87,392).** No OOM, `ASSET MISSING` 0, `aram LOST` 0, `deepest_scene` 18
-unchanged, `fps_p50` 24.1 → 24.2. ⚠️ **Screenshot verification was still in
-flight — this is a counter result, not a verdict** (rule 2).
+unchanged, `fps_p50` 24.1 → 24.2, and **screenshot-verified on a
+`DC_BGTEX_DEMAND=0` vs `=1` pair** — so this one clears measurement rule 2, not
+just the counters.
 
-**R2 and R3 landed too** — the villager texture and model pools, 16 slots each
-(`dc/src/dc_npctex.c`, `dc/src/dc_npcmdl.c`). They are **content restoration,
-not a saving**: see the corrected pool section below, and read the rule there
-before costing any further pool.
+**R2 and R3 landed too, and are DEFAULTED OFF** — the villager texture and model
+pools, 16 slots each (`dc/src/dc_npctex.c`, `dc/src/dc_npcmdl.c`,
+`DC_NPCTEX_POOL=1` / `DC_NPCMDL_POOL=1`). They are **content restoration, not a
+saving** (see the corrected pool section below), and they are off because
+**the port constructs ZERO villager NPCs**: `mNpc_SetNpcList` populates the town
+from the save's `Animal_c animals[]` (`m_start_data_init.c:559`), the VMU path is
+unwired, `[PC] No save file found`. Two 900 s runs that reach scene 9 and walk
+printed not one `[DC/NPCTEX]`/`[DC/NPCMDL]` line, because
+`aNPC_dma_draw_data_proc` (`ac_npc_ctrl.c_inc:687`) never runs. **Wiring the save
+(N2b) is now a PREREQUISITE for testing them.**
 
-**Next, ranked:** (1) the `gap=7.92 ms`; (2) `dc_gx_backend_submit`'s 12.2 ms;
-(3) the distinct-reference count that settles the memo ceiling; (4) a sorted
-batch helper for R1's 27 scattered seeks (0.5-2.7 s [UNMEASURED]); (5) the acre
-pool — the one class where "a pool frees RAM" is still true, **815,024 B of
-summer acre vertex arrays measured resident**. Evidence for all of it:
-`kb/state-log.md`, top entry.
+**SH-4 math: FTRV/FIPR/FSRRA were already live; two real gaps were not.**
+`DC_MTX_USE_FIPR` now defaults to 1 (`-DDC_MTX_NO_FIPR` reverts), and
+**272 `sqrtf` sites in `src/` were linking newlib's SOFTWARE
+`__ieee754_sqrtf`** — `dc/src/dc_fmath.c` binds them to FSQRT
+(`-DDC_NO_FSQRT` reverts), bit-identical to newlib for every normal input.
+**sh4zam stays a PASS** and `kb/closed.md` carries the corrected reasons.
+One RAM find: `dc/src/dc_misc.c:421` calls **double** `sin()` to build a startup
+table and drags in **5,940 B** of libm — 44 % of the image's libm, in our own
+code, removable without touching `src/` (`kb/levers.md`).
+
+### Ranked next actions (2026-08-05)
+
+1. **`dc_gx_backend_submit` — 12.2 ms, ours, `-O2`, no gate.** First step is
+   free: print the vertex-memo hit ratio and a per-batch `count` histogram from
+   `dc_gx_flush_vertices`. It decides whether this is a 3 ms or an 8 ms lever
+   and settles the memo-ceiling question above.
+2. **Per-slot shadow of `G_MTX`** (2.18 ms / 113 calls) as proof the per-slot
+   machinery works — est 0.9-1.4 ms. ⚠️ `dc_emu64_hist.c:262` and
+   `dc_emu64_shadow.cpp:492` both `memcpy` **all 64 slots** on frame open and
+   restore all 64 on close; a third installer must arm slot-wise or initialise
+   strictly first.
+3. **Slot-60 `TRIN_INDEPEND` cull-only shadow** — AABB over the index window at
+   entry, `dl_G_TRIN` kept as the fallback. Est 4.5-7.0 ms.
+4. **Wire the VMU save path (N2b)** — now blocking, because it is the only way
+   to test R2/R3.
+5. **The audio sequencer floor:** `-Wl,--wrap=_RspStart2` (note the leading
+   underscore) + an empty `__wrap_` deletes exactly the work AICA would absorb.
+   Read `synth_us=` against 19,840: ≤2,000 ⇒ AICA Stage B is worth 6-10 weeks;
+   ≥8,000 ⇒ an `-O2` rspsim shadow outranks it.
+6. **The TEV shadow-alpha fix** — config #007 currently loses BOTH alpha
+   factors and draws at `vtx.a * T0.a`, i.e. the fog coefficient: the black
+   wedges. `kb/RESUME.md` §4 item 6 has the two levers, both needing a
+   screenshot pair.
+
+Still open behind those: the `gap=7.92 ms`; a sorted batch helper for R1's 27
+scattered seeks (0.5-2.7 s [UNMEASURED]); and the acre pool — the one class
+where "a pool frees RAM" is still true, **815,024 B of summer acre vertex arrays
+measured resident**. Evidence for all of it: `kb/state-log.md`, top entry.
 
 ## ⭐ 2026-08-04 session 3 — EVERY SUMMER STRUCTURE NOW RENDERS, and it cost
 ## nothing, because the keep list had been buying WINTER
@@ -132,6 +174,11 @@ Measured, and this is what the villager pools actually did:
 |---|---:|---:|---:|---:|---|
 | **R2** villager textures | 1,154,944 | **90,464** (21 of 236 sets) | 78,872 (16 × 4,832) | **~−4,700** | 21 species with textures → **236** |
 | **R3** villager models | 438,640 | **5,536** (`cbr_1` only) | 120,956 (16 × 7,552) | **+115,424** | 1 species with geometry → **32** |
+
+⚠️ **"Content delivered" is what the pools WOULD deliver — both default to 0,
+and nothing has been delivered yet**, because the town constructs no villagers
+at all (see the top of this file). Read that column as the case for turning them
+on after N2b, not as a description of the shipping image.
 
 R3 **spends** bytes. It is justified because the only other way to get those 31
 species is keeping all 32 `mdl/*.c` at 194,400 B, so the pool is 73,568 B
@@ -245,8 +292,12 @@ sharp instrument.
    only at `tuk_1_tmem_txt` + palette + eyes, all kept, and all five of his
    model parts are in the kept TU. Next step is a `DC_TEX_LOG=1` run to see
    whether that texture uploads non-zero.
-5. Large black wedges in the town — present in the baseline too, so
-   pre-existing; suspect opaque shadow decals.
+5. ✅ **DIAGNOSED 2026-08-05, not fixed — the large black wedges are TEV config
+   #007** (`ef_shadow_out.c:34-35`, two stages, not three). It loses *both*
+   alpha factors and draws at `vtx.a * T0.a`, i.e. the `G_RM_FOG_SHADE_A` fog
+   coefficient. The suspicion "opaque shadow decals" was right about the
+   geometry and wrong about the mechanism. Two levers, both widenings needing a
+   screenshot pair: `kb/RESUME.md` §4 item 6.
 6. `aram zero=7` still non-zero.
 
 ## ⭐ 2026-08-04 session 2 — three things changed, and one of them was a
@@ -663,23 +714,13 @@ it is the town-to-town transfer path with no save.
 `DC_STUB_KEEP` with the censused models and textures is the next concrete step
 (N1 item 2 below).
 
-## ⭐ Ranked next actions — SUPERSEDED 2026-08-02 (session 2)
+## ⭐ Ranked next actions — SUPERSEDED (2026-08-02, session 2)
 
-**Read `kb/RESUME.md` §5 instead.** The list below predates the town being
-reachable. What changed: N1 ("get the town to draw") is essentially done — the
-keep list is 107 files from a town census, uploads went 119→269 with blanks
-9.2 %→5.6 %, and the town renders. The live queue is now
-**(1) the PVR punch-through list** — blocking the train door, and the one thing
-that cannot be worked around, since both depth-write settings are visibly
-broken; **(2) the window scroll's UV offset**; **(3) fog**, entirely
-unimplemented though the game asks for `GX_FOG_PERSP_LIN`; **(4) the missing
-speaker-name / reply text**, with `DC_ARAM_TBL_PROBE` written and ready to
-adjudicate it.
-
-Audio is parked by the user's instruction. Its root cause was found (the jaudio
-pipeline had never ticked once — `pc_audio_process_frame` had no caller and was
-being dropped by `--gc-sections`), a real `snd_stream` device and pump now
-exist, and it produces silence because `dc_aram.c` throws `audiorom.img` away.
+**Read the top of this file, or `kb/RESUME.md` §5.** That list predated the town
+being reachable, and all four of its items (punch-through, the window scroll's
+UV offset, fog, the speaker-name text) have since landed. Its audio note is
+superseded by `kb/audio-plan-of-record.md` and by the 2026-08-05 DAC-frame
+correction above.
 
 ## Ranked next actions (2026-08-02, session 1) — the list before parking
 

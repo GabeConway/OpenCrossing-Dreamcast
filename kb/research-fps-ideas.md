@@ -22,6 +22,38 @@ editing and where compiler flags are banned.
 to 66.0 ms — 11.8 to 15.2 FPS.** Any plan that quotes a renderer optimisation as
 a route to 30 FPS in the town is wrong on arithmetic.
 
+⚠️ **G1 re-cut that split along a different axis, and the new one is the useful
+one (2026-08-05).** The `gx=` counter still says 19-27 %, but the per-opcode
+histogram shows that **65 % of the heaviest "emu64" opcode is our own `-O2`
+code**, billed through `GXEnd` (`emu64.c:4935`): of `G_TRIN_INDEPEND`'s
+152 µs/call, ~15 µs is the AABB cull and ~81 µs is `dc_gx_backend_submit`, and
+only ~53 µs is `src/` at `-O0`. **So the editable share of the frame is larger
+than "19-27 % renderer" suggests, and the un-editable share is smaller** — which
+is why the queue below starts with a `dc/` function and not with a sign-off
+request.
+
+---
+
+## The ranked queue as of 2026-08-05 — READ THIS BEFORE PICKING AN IDEA BELOW
+
+The ideas on this page are ranked by their own merits; this is the order to
+actually work in, after G1's histogram. `kb/STATE.md` carries the same list.
+
+| # | what | est | gate |
+|---|---|---|---|
+| 1 | **`dc_gx_backend_submit`** — 12.2 ms, 15.6 % of `draw`, `dc/src/dc_pvr.c:2448`. First step is free: print the vertex-memo hit ratio and a per-batch `count` histogram from `dc_gx_flush_vertices`, which also settles F3's ceiling dispute | unmeasured; the block is 12.2 ms | **none — it is ours** |
+| 2 | **Per-slot shadow of `G_MTX`** (2.18 ms / 113 calls) as the proof the per-slot machinery works — self-contained, no `gfx_p` rewriting | 0.9-1.4 ms [ESTIMATED] | G2/G3 sign-off already given |
+| 3 | **Slot-60 `TRIN_INDEPEND` cull-only shadow** — AABB over the index window at entry, tested against `projection_mtx ×` (identity for SHARED / `position_mtx_stack` for NONSHARED), `dl_G_TRIN` kept as the fallback | 4.5-7.0 ms [ESTIMATED] | as above |
+| — | the `gap=7.92 ms` | unknown | it is not even attributed yet |
+
+⚠️ **HAZARD FOR ANY THIRD INSTALLER INTO THE DISPATCH TABLE.**
+`dc_emu64_hist.c:262` and `dc_emu64_shadow.cpp:492` each `memcpy` **all 64
+slots** on frame open and restore all 64 on close. A per-slot shadow that arms
+after either of them will be silently reverted on the next frame boundary, and a
+per-slot shadow that arms before will be captured *into* their saved copy.
+**Arm slot-wise, or initialise strictly first.** G1 and G2 are already mutually
+exclusive by `#error` for the same reason (`dc/include/dc_platform.h:417`).
+
 ---
 
 ## The five facts these ideas rest on
@@ -337,8 +369,8 @@ biggest block in the frame turned out to need no gate at all.**
 | | what | est. win | status |
 |---|---|---|---|
 | **G1** | **Per-opcode time histogram.** Wrap every table entry in a timing thunk that calls the original `-O0` handler. | 0 ms, unlocks G2/G3 | ✅ **RUN 2026-08-05.** `TRIN_INDEPEND 22.25/146`, `VTX 5.40/149`, `gap 7.92`. `kb/perf-dc.md` §2b |
-| G2 | **Reimplement the dispatch LOOP only.** `emu64_taskstart_r` (`:5769-5901`) is one self-contained function, paid once per command × ~3,500 commands at `-O0`. A `dc/` `-O2` replacement calls the untouched `-O0` handlers through the same table. | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], hard cap ~8.3 ms | needs sign-off — and now hard to justify asking |
-| G3 | **`-O2` shadow handlers for the VTX/TRI path, with a runtime batch AABB cull built in.** | ~~25-35 ms~~ → the cull half is **4.5-7.0 ms** [ESTIMATED]; the `-O2` half sits inside G2's ~8.3 ms cap | needs sign-off |
+| G2 | **Reimplement the dispatch LOOP only.** `emu64_taskstart_r` (`:5769-5901`) is one self-contained function, paid once per command × ~3,500 commands at `-O0`. A `dc/` `-O2` replacement calls the untouched `-O0` handlers through the same table. | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], hard cap ~8.3 ms | ✅ signed off 2026-08-04 and BUILT (`dc_emu64_shadow.cpp`); +0.8 FPS whole-run, town not separated out |
+| G3 | **`-O2` shadow handlers for the VTX/TRI path, with a runtime batch AABB cull built in.** | ~~25-35 ms~~ → the cull half is **4.5-7.0 ms** [ESTIMATED]; the `-O2` half sits inside G2's ~8.3 ms cap | ✅ signed off 2026-08-04, unbuilt. **Build the cull half alone** (queue item 3) — that is where the whole win is |
 | — | **`dc_gx_backend_submit`** (`dc/src/dc_pvr.c:2448`) | the block is **12.2 ms = 15.6 % of the draw phase**; the win in it is unmeasured | **no gate — it is `dc/` code already at `-O2`** |
 
 **Why both shrank, in one measurement.** `GXEnd` is live at `emu64.c:4935`, so

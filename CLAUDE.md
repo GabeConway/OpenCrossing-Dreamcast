@@ -62,9 +62,13 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 **The port walks the town.** It boots on retail hardware with **loading at
 parity with the emulator**, and in Flycast it reaches the town, walks around it,
 meets Tom Nook and is taken to the houses. Every summer acre is in the image.
-Read `kb/RESUME.md` first — in particular the **seven** measurement rules, two
-of which were paid for on 2026-08-04: `MEMLEDGER FIT … OK` does not mean the
-image boots, and an average cost per command is not the cost of any command.
+Read `kb/RESUME.md` first — in particular the **eight** measurement rules.
+Three were paid for recently: `MEMLEDGER FIT … OK` does not mean the image
+boots; an average cost per command is not the cost of any command; and — new on
+2026-08-05 — **in a stubbed image, an asset class's resident cost is what the
+KEEP LIST kept, not what the class totals.** A pool is worth building when it
+delivers content the keep list cannot afford, not when it "frees" bytes the
+stub system already dropped.
 
 <details><summary>the older status line, kept for the sequence</summary>
 

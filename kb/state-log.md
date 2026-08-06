@@ -103,6 +103,30 @@ population. **The experiment that settles it is a direct count of distinct
 vertex references per batch**, which is cheap and unbuilt. Until it runs, do not
 plan memo work and do not close F3.
 
+### Four instrument holes, and G1 could not have printed through any of them
+
+The histogram had been "in the tree, never run" for a session. Getting one
+number out of it took four fixes, all in `82cb299`, and three of them are the
+same shape — **an instrument that arms and then cannot report**:
+
+1. **G1's `[EMU64H]` report was nested inside `#ifdef DC_PERF_PHASE` while its
+   arm sites were not.** A `DC_EMU64_HIST=1` build without `-DDC_PERF_PHASE`
+   therefore armed the thunks, paid a clock read on ~2,867 commands a frame,
+   and printed nothing — which reads as "the instrument is broken", not "you
+   built it wrong".
+2. **G1 and G2 both install into emu64's dispatch table, and were silent about
+   it.** G2's trampolines overwrite G1's thunks and its loop calls `s_orig[]`
+   directly, so a both-on build measures nothing while costing both overheads.
+   Now an `#error` (`dc/include/dc_platform.h:417`).
+3. **`EMU64_TBL_OBJ` spelled a literal object path**, so the
+   `objcopy --globalize-symbol` that both G1 and G2 depend on would have stopped
+   matching the moment `emu64.c` entered the stub or shrink tree — latent, and
+   it would have presented as an undefined symbol at link with no hint why.
+4. **G2's shadow had lost the original's 5-message rate limiter** on the
+   unexpected-command diagnostic (the `vprintf` flood trap, at emulator speed),
+   and its punt path dropped one command; it now rewinds `gfx_p`,
+   `cmds_processed` and `dl_history_start` before handing back.
+
 ### R1 landed — acre ground textures are demand-loaded, and it is the first
 ### asset pool this port has ever had
 
@@ -123,9 +147,9 @@ be resident, only the 32 destinations.
 | `deepest_scene` | 18 | 18 | — |
 | `fps_p50` | 24.1 | 24.2 | within noise |
 
-⚠️ **Screenshot verification was still in flight when this was written, so this
-is a counter result and not a verdict** (measurement rule 2 — a change can pass
-every counter and still be a visible regression).
+**Screenshot-verified on a `DC_BGTEX_DEMAND=0` vs `=1` pair**, so it clears
+measurement rule 2 and not merely the counters. (An earlier version of this
+entry said verification was still in flight; it has since landed.)
 
 **The seam is NOT `--wrap`.** `mFM_LoadBGCommonTex` and all six segment tables
 are `static`, and `bcopy` has no symbol in the linked image at all (GCC folds it
@@ -165,8 +189,27 @@ Two hazards banked with it:
 ### through the whole RAM plan, and INVERTS what a pool is for
 
 `dc/src/dc_npctex.c` (R2, villager textures, 16 slots) and `dc/src/dc_npcmdl.c`
-(R3, villager models, 16 slots) are in the tree. The interesting result is not
-either pool; it is what costing them revealed.
+(R3, villager models, 16 slots) are in the tree, **and both default to OFF**.
+The interesting results are not the pools; they are what building them revealed.
+
+#### First: THE TOWN HAS NO VILLAGERS, and that is why the knobs are 0
+
+Both pools load from `aNPC_dma_draw_data_proc` (`ac_npc_ctrl.c_inc:687`), which
+runs only when a **villager** NPC actor is constructed. **Measured: this port
+never constructs one.** `mNpc_SetNpcList` fills the town from the save's
+`Animal_c animals[]` (`m_start_data_init.c:559`); the VMU path is unwired, so
+`[PC] No save file found` and the list stays empty. Two 900 s runs that reach
+scene 9 and walk around printed **not one** `[DC/NPCTEX]` or `[DC/NPCMDL]` line.
+
+Two consequences, and the second is a schedule change:
+
+- Every villager the port has ever drawn came from somewhere else — special
+  NPCs, Tom Nook and the raccoons — which is why "the villagers look wrong" has
+  never been reported: there are none.
+- **Wiring the VMU save path (PLAN N2b) is now a PREREQUISITE for testing R2/R3,
+  not a separate feature.** Turn the knobs to 1 and read the log *after* a save
+  exists; until then neither pool can be exercised at all, and neither byte
+  column below has been observed under load.
 
 **Every pool claim in the kb was costed against the NON-STUB total, as if those
 bytes were resident today.** `kb/STATE.md`'s "the RAM plan from here is a POOL"
@@ -295,13 +338,100 @@ size, so this parse is not dropping sections.)
   and tags stop at v2.2.2. Both `pvr_dr_addr` and `dcache_toggle_ocram()` are
   master-only and absent from every release tag. In `kb/traps.md`.
 - **sh4zam is a PASS**, and it is in `kb/closed.md` with the reasons so it stops
-  being re-proposed at every toolchain review.
+  being re-proposed at every toolchain review. Full workings in the SH-4 math
+  section below.
 - **The N-triangle count in `G_TRIN_INDEPEND` is 7 bits, not 5.**
   `emu64.c:4814` is `n_faces = ((w0 >> 17) & 0x7F) + 1`, i.e. 1..128 faces per
   command. The "5-bit" figure in `kb/closed.md`'s F1 entry is the per-vertex
   **index** width (`POLY_5b`, `gbi_extensions.h:64,69-86`), not the face count.
   F1's verdict is unchanged — a `gsSPVertex` still never exceeds 32 vertices —
   but the stated reason was imprecise and has been fixed.
+- **The SH-4's caches are 8 KB I / 16 KB D**, not 16/32. That halves the
+  headroom `kb/research-fps-ideas.md` F5 (I-cache packing) and F6 (OCRAM) were
+  sized against: OCRAM's price is halving a **16 KB** D-cache, not a 32 KB one.
+  Corrected in place in both entries.
+
+### SH-4 math — the sh4zam question, answered with map evidence
+
+The user asked about **sh4zam** (`sh4zam.com`, MIT) after community advice that
+GCC does not emit the SH-4's T&L instructions. The advice is true in general and
+mostly already spent here.
+
+**Already live in this port**, all through KOS `dc/fmath.h`: FTRV
+(`dc_pvr.c:2666`, `:2721`; `dc_mtx.c:246-427`), FIPR (`dc_pvr.c:188-191`), FSRRA
+(`dc_pvr.c:187`). **Two genuinely unexploited gaps were found, and both are now
+addressed:**
+
+- `dc_mtx.c:71-72` carried `DC_MTX_USE_FIPR 0` with a `TODO(M3)`. **It defaults
+  to 1 now**; kill switch `-DDC_MTX_NO_FIPR`, which is also the A/B — the flag
+  was resolved rather than measured, and that is worth saying out loud.
+- **272 `sqrtf` sites in `src/` were linking newlib's SOFTWARE
+  `__ieee754_sqrtf`** — a bit-twiddling loop over the mantissa, where the SH-4
+  has a single instruction. `dc/src/dc_fmath.c` defines `sqrtf` via KOS
+  `fsqrt()`; kill switch `-DDC_NO_FSQRT`. The mechanism is **archive
+  extraction, not symbol overriding**: our objects precede `-lm` on the link
+  line, so `libm_a-wf_sqrt.o` (84 B) and `libm_a-ef_sqrt.o` (240 B) are never
+  pulled. The hottest caller is `guMtxNormalize` (`emu64_utility.c:265`), three
+  `sqrtf` per call, 113 `dl_G_MTX` calls a frame = **339 software square roots
+  per town frame**, all at `-O0`.
+
+**Map evidence that shrinks the scope, and it contradicts `dc_mtx.c`'s own old
+comment**, so it is recorded rather than left as a reading: `PSVECDotProduct`,
+`PSVECMag`, `PSVECCrossProduct`, `C_MTXLookAt` and `PSMTXMultVecArray` are all
+in the map's *Discarded input sections* — **not in the image**. Only
+`PSVECNormalize` is live (`0x8c4cdde4`), with a single caller (`emu64.c:4696`)
+gated on texture-gen batches. The "camera basis precision" worry has **no
+mechanism in this build**.
+
+**Verdicts banked in `kb/closed.md`** so the question stops being reopened:
+`shz_sqrtf` is *not* FSQRT (`shz_scalar.inl.h:315-325` is
+`shz_inv_sqrtf_fsrra(x) * x`, an FSRRA approximation); FSQRT needs no precision
+screenshot because KOS sets `FPSCR = 0x00040000` at `startup.S:74-85`, making it
+correctly-rounded IEEE and bit-identical to newlib for every normal input;
+replacing KOS `mat_*`/`fipr`/`frsqrt` with sh4zam's is a **no-op** (same
+instructions, ~15 µs of extra `jsr`/`rts` against a 78.3 ms frame); sh4zam is
+header-only, depends on nothing from KOS and keeps no shadow copy of XMTRX, so
+if it is ever wanted it should be **vendored into `dc/third_party/sh4zam/`**
+rather than pulled from kos-ports, which would force a ~27 min SDK image
+rebuild; and FSCA is not a lever, because there are only **four** live
+`sinf`/`cosf` sites (`m_camera2.c:87-90`) and everything else uses
+`sins()`/`coss()`, a table lookup at the same 16-bit angular resolution FSCA
+takes as input.
+
+**A RAM find fell out of the same sweep** and is now `kb/levers.md` L9:
+`dc/src/dc_misc.c:421` builds its sine table with the **double** `sin()`,
+dragging in **5,940 B** of libm (`k_rem_pio2.o` 2,720 + `e_rem_pio2.o` 1,408 +
+`k_cos.o` 408 + `s_scalbn.o` 392 + `s_floor.o` 376 + `k_sin.o` 264 +
+`s_sin.o` 192 + `s_frexp.o` 148 + `s_fabs.o` 32) — **44 % of the image's
+13,400 B of libm, in our own code**, removable without touching `src/`.
+
+### The black wedges are TEV config #007 losing BOTH alpha factors — diagnosed, NOT fixed
+
+`dc/src/dc_pvr.c` carries a new `tev_const_alpha_last()` (kill switch
+`-DDC_PVR_NO_TEVALPHA_LAST`, counter `tevalpha_last batches=`) that recognises a
+final TEV stage of the shape `APREV * konst`. **It does not fix the black
+wedges**, and the investigation found the brief's premise wrong:
+`ef_shadow_out.c:34-35` records as **two** stages, not three —
+
+```
+stage0 alpha = (ZERO, TEXA, A1,    ZERO)
+stage1 alpha = (ZERO, TEXA, APREV, ZERO)      emu64.c:1888-1897
+```
+
+config #007 in `kb/tev-map-table.md:120`. PRIM.a is on **stage 0**, in a
+*mirrored* spelling that `tev_const_alpha()` does reach and then discards at its
+`konst != GX_CA_A0` narrowing; and the last stage is `APREV * TEXEL1.a`, the
+mirror of what `tex1_alpha_active()` tests. **So config #007 currently loses
+both alpha factors and draws at `vtx.a * T0.a` — where `vtx.a` is the
+`G_RM_FOG_SHADE_A` fog coefficient. A flat dark quad: exactly the reported
+symptom.**
+
+The two real levers are widening `tev_const_alpha()`'s A1 arm and adding the
+mirrored shape to `tex1_alpha_active()`. Both are *widenings*, and widenings in
+this family have regressed before (`dc_pvr.c:1080-1098`), so **both need a
+screenshot pair**. ⚠️ **This diagnosis has not yet been transcribed into
+`kb/tev-map-alpha.md` / `kb/tev-map-hard-cases.md`** — it lives only here and in
+`kb/RESUME.md` §4 item 6. Move it when those files are next touched.
 
 ### The audio plan has been steering on a 2× arithmetic error
 

@@ -1,14 +1,66 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-04 (session 2), amended session 3 and 2026-08-05. **Read
-`kb/STATE.md` first** — session 3's changes and the 2026-08-05 G1 result are all
-there and this file is not yet rewritten around them. In particular items 4-6 of
-"SESSION 3 IN TEN LINES" below are superseded: **G1 has now been run**, and §5
-carries the re-cost. Full narrative: `kb/state-log.md`. Everything below §6 is older
-material kept because it is still the reasoning behind items that are now
-closed.
+Rewritten 2026-08-05 (session 4). **This file is the handoff — start here, then
+`kb/STATE.md` for the current numbers.** The narrative and the evidence behind
+every figure below are in `kb/state-log.md`, top entry. Everything under "Older
+material" is kept because it is still the reasoning behind items now closed.
 
-## SESSION 3 IN TEN LINES
+## SESSION 4 IN TEN LINES (2026-08-05)
+
+1. **G1 RAN, and it moved the FPS argument off `G_VTX`.**
+   `TRIN_INDEPEND 22.25 ms / 146 calls` = **152 µs a call: 63 % of emu64
+   dispatch and 28 % of the whole 78.3 ms town frame, from one opcode.**
+   `G_VTX` is **5.40 ms**, not the ~48 ms that four documents costed G3
+   against.
+2. **65 % of that heavy opcode is ALREADY `dc/` code at `-O2`.** `GXEnd` is
+   live at `emu64.c:4935`, so the AABB cull (~15 µs) and
+   `dc_gx_backend_submit` (~81 µs) bill into it; only ~53 µs is `src/` at
+   `-O0`. G2 and G3 shrink accordingly — and **the biggest single addressable
+   block in the frame is `dc_gx_backend_submit` at 12.2 ms, which needs no
+   sign-off, no trampoline and no `objcopy`.**
+3. **The cull rate is a measurement now:** `vcull=6042` against `v=3002` —
+   **66.8 %** of vertices discarded after emu64 paid the full `-O0` price.
+   ⚠️ It is **not** worth 22.25 × 0.668; culled vertices already cost `xform`
+   nothing. An ideal cull at TRIN entry is **4.5-7.0 ms**.
+4. **`gap=7.92 ms`** — 18 % of emu64's own total, inside the draw phase and
+   outside every command. Unexplained. **OPEN.**
+5. **R1 landed** (`60222ba`): the 96 acre ground textures load off `/cd`
+   instead of living in `.bss`. **`.bss` −81,856 B, `margin` +87,392 B**, FPS
+   unchanged, screenshot-verified. Kill switch `DC_BGTEX_DEMAND=0`.
+6. **R2/R3 are written and DEFAULTED OFF (`35cb00c`), and the reason is the
+   finding:** the port constructs **ZERO villager NPCs**. `mNpc_SetNpcList`
+   reads the save's `Animal_c animals[]`, the VMU path is unwired,
+   `[PC] No save file found`. Two 900 s town runs printed not one
+   `[DC/NPCTEX]`/`[DC/NPCMDL]` line. **Wiring the save (N2b) is now a
+   PREREQUISITE for testing the pools, not just a feature.**
+7. ⭐ **THE ACCOUNTING CORRECTION — the most reusable finding of the session.**
+   In a stubbed image an asset class's resident cost is **what the KEEP LIST
+   kept**, not what the class totals: villager textures are 1,154,944 B on
+   paper and **90,464 B resident**. A pool converts MISSING into PRESENT; it
+   usually frees nothing. Cost one against *keeping the class*, never against
+   the class total. **The acres are the one exception** — all 242 summer acre
+   TUs really are kept, so **815,024 B** of `grd_s_*` vertex arrays really is
+   resident and an acre pool really would free RAM.
+8. **Four instrument holes fixed** (`82cb299`). G1's report sat inside
+   `#ifdef DC_PERF_PHASE` while its arm sites did not, so without that flag it
+   armed, paid a clock read on ~2,867 commands a frame and printed nothing;
+   **G1 and G2 overwrite each other's table entries and were silent about it**
+   (now an `#error`, `dc_platform.h:417`); `EMU64_TBL_OBJ` spelled a literal
+   object path that breaks the moment `emu64.c` enters a scratch tree; and G2's
+   shadow had lost the original's 5-message rate limiter and dropped one
+   command on its punt path.
+9. **SH-4 math: FTRV/FIPR/FSRRA were already live; two real gaps were not.**
+   `DC_MTX_USE_FIPR` now defaults to **1** (`-DDC_MTX_NO_FIPR` reverts), and
+   **272 `sqrtf` sites in `src/` were linking newlib's SOFTWARE
+   `__ieee754_sqrtf`** — `dc/src/dc_fmath.c` binds them to FSQRT
+   (`-DDC_NO_FSQRT` reverts). **sh4zam stays a PASS**, for corrected reasons:
+   `kb/closed.md`.
+10. **`--wrap` DOES NOT WORK AS SPELLED anywhere in this kb.** sh-elf prefixes
+    user labels with `_` (`_mNpc_SetNpcList`), and ld does not diagnose
+    `--wrap` on an unknown symbol — so every proposed `--wrap` seam matches
+    nothing, silently.
+
+<details><summary>SESSION 3 IN TEN LINES — kept for the sequence; items 4-6 are superseded above</summary>
 
 1. **All 84 summer structures render.** They were affordable because every
    `obj_s_*.c` carries winter too and the keep list was buying it: the new
@@ -21,10 +73,9 @@ closed.
 4. **`DC_EMU64_HIST` was never forwarded into the container.** G1 was
    unreachable from the documented build line; that is why it was never run.
 5. **G1 also armed on the wrong tick** (the frameskipped one, which issues no
-   commands). Fixed. **G1 still has to be re-run — there is no per-opcode
-   number yet, so nothing in F1/F8/G2/G3 is costed.**
-6. **G2 is written** (`dc/src/dc_emu64_shadow.cpp`, off by default) and not yet
-   measured. Its 7-14 ms estimate is **above its own ceiling**; expect 2-5 ms.
+   commands). Fixed.
+6. **G2 is written** (`dc/src/dc_emu64_shadow.cpp`, off by default) and
+   measured once at +0.8 FPS whole-run.
 7. **`emu64.hpp`'s offset comments are PowerPC and wrong here.**
    `sizeof(emu64)` = 0x2278. Never hand-write an offset map.
 8. **`emu64_set_aflags()` is not a seam** — `AFLAGS_MAX` is 0.
@@ -32,15 +83,31 @@ closed.
    layout lives in the SAVE, not in per-boot randomness.
 10. **`tools/dcfb/shot_diff.py`** makes the screenshot gate mechanical.
 
+</details>
+
 ⚠️ **Killing a build mid-link corrupts `dc/build/objs.rsp` with NUL bytes** and
 the next link fails with `undefined reference to 'main'`. `rm` it and relink;
 do not go hunting in your own diff. (`kb/traps.md`.)
 
-## 0. Everything is committed on `dev`
+## 0. What is committed on `dev`
 
-**The main thread commits; agents do not.** Session 2 is these commits:
+**The main thread commits; agents do not.** Session 4 so far:
 
 ```
+35cb00c feat(dc): villager texture and model pools -- written, and OFF,
+                  because the town has no villagers to test them on
+60222ba feat(dc): the acre ground textures load off the disc, not out of .bss
+82cb299 fix(dc): G1 could not print, and 63% of emu64 is ONE opcode
+```
+
+⚠️ **The SH-4 math work (item 9) and the TEV `tev_const_alpha_last()` work were
+still in the tree, uncommitted, behind a running build when this was written.**
+Check the tree before assuming either is committed or measured.
+
+<details><summary>sessions 2-3, newest first</summary>
+
+```
+bb12d18 feat(dc): every summer structure renders, and G2 takes over the dispatch loop
 0f269d1 fix(dc): Nook and the houses; and K.K.'s strum is slaved to the music
 f6e8a8d feat(dc): keep every summer acre -- the town stops disappearing
 7970358 docs(dc): hardware loading is at parity with the emulator
@@ -52,7 +119,9 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
 34d3772 feat(dc): print the opcode mix, and 73% of the town frame is state
 ```
 
-## 0b. THE MEASUREMENT RULES. Now SEVEN, and 6 and 7 were paid for this session.
+</details>
+
+## 0b. THE MEASUREMENT RULES. Now EIGHT — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05.
 
 1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
    any visual comparison.
@@ -78,6 +147,15 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
    vertices. **G1 measured `G_VTX` at 5.40 ms and `G_TRIN_INDEPEND` at
    22.25 ms** (2026-08-05). Only the histogram is allowed to price an opcode.
    `kb/traps.md`.
+8. ⚠️ **IN A STUBBED IMAGE AN ASSET CLASS COSTS WHAT THE KEEP LIST KEPT — not
+   what the class totals.** `DC_ASSET_STUB` already dropped the rest; an unkept
+   asset is a 1-byte `.bss` symbol with its load suppressed. Every "pool X and
+   free N bytes" claim written before 2026-08-05 costed N against the *non-stub*
+   total. Measured: villager textures are 1,154,944 B on paper and **90,464 B
+   resident**; villager models 438,640 B on paper and **5,536 B resident**.
+   **Cost a pool against the alternative — keeping the class — never against
+   the class total.** The acres are the only class where the old framing still
+   holds. `kb/levers.md`.
 
 ## 1. Where the port is
 
@@ -89,30 +167,45 @@ parity on compute: the only hardware FPS figure is still "~11 FPS in the town".
 In Flycast it reaches the town, walks around it, meets Tom Nook and is taken to
 the houses. `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`.
 
-**Current numbers (2026-08-04, probe-free, audio off, opening keep list):**
+**Current numbers (2026-08-05, probe-free, audio off, town keep list, post-R1):**
 
 | | |
 |---|---|
-| FPS | min 8.0, p50 **24.0**, max 29.9 |
-| the town (scene 9) | p50 **~15** |
+| FPS whole run | p50 **24.2**, max 29.9 |
+| the town (scene 9) | **11.5-12.1** |
+| `MEMLEDGER margin` | 3,191,348 (⚠️ read rule 6 before spending it) |
 | `ASSET MISSING` / `ptdrop` / `LOST` | 0 / 0 / 0 |
 
-### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN
+### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN — REWRITTEN BY G1
 
-The town frame is **19-27 % renderer** (`gx=`, in `dc/`, editable) and
-**77-80 % emu64 traversal + game logic** (in `src/`, closed to editing, compiler
-flags banned). **Deleting the renderer entirely takes the worst frames from 11.8
-to 15.2 FPS.**
-
-**NEW, and it reframes the FPS problem — the opcode mix, per town frame:**
+The old framing was "19-27 % renderer, 77-80 % `src/`, so deleting the renderer
+takes the worst frames from 11.8 to 15.2 FPS". **That split is still true of the
+`gx=` counter and it is no longer the useful decomposition**, because the
+per-opcode histogram shows most of the "emu64" bucket is our own code:
 
 ```
-[EMU64] cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3
+[PHASE]  draw=78.3 skip=8.2 (n=30) vi=0.4 | cull=2.2 xform=12.2 |
+         v=3002 vsrc=3002 vlit=2517 vcull=6042 us/v=4.07
+[EMU64]  cmds=3458 noop=1 vtx=298 tri=295 dl=276 | cullvis=7 cullrej=2
+[EMU64H] tot=42.86ms gap=7.92ms probe=79.9ns | TRIN_INDEPEND 22.25/146
+         VTX 5.40/149 MTX 2.18/113 TEXRECT 2.17/25 MOVEMEM 0.55/207
+         SETTILE_DOLPHIN 0.32/109 DL 0.29/138 SETCOMBINE 0.28/58
+         SETTIMG 0.25/112 TRI2 0.19/2 ENDDL 0.18/131 LOADTLUT 0.13/42
 ```
 
-**773 of 2,867 commands do geometry work; 2,094 (73 %) are RDP/RSP state.** See
-rule 7 before pricing that. Also `cullvis=6`: emu64's own display-list cull runs
-nine times a frame and rejects three.
+| | |
+|---|---|
+| `G_TRIN_INDEPEND` | **22.25 ms / 146 calls = 152 µs each** — 63 % of dispatch, **28 % of the frame** |
+| of which already `dc/` at `-O2` | ~96 µs (AABB cull ~15 + `dc_gx_backend_submit` ~81) |
+| of which `src/` at `-O0` | **~53 µs** ⇒ a G2-shaped rewrite is capped at ~8.3 ms |
+| `G_VTX` | 5.40 ms / 149 — **not the ~48 ms four documents assumed** |
+| every state opcode | ≤ 0.55 ms each. **Stripping state commands is worth nothing** (F8 is answered) |
+| `gap` | 7.92 ms, 18 % of `tot`, unattributed. **OPEN** |
+| `vcull` / `v` | 6,042 / 3,002 = **66.8 % of vertices culled after emu64 paid for them** |
+
+**The single largest addressable block in the frame is `dc_gx_backend_submit` at
+12.2 ms (15.6 % of `draw`) — `dc/src/dc_pvr.c:2448`, ours, already `-O2`, no
+sign-off required.** See §5 before costing anything else.
 
 ## 2. The build lines
 
@@ -138,6 +231,14 @@ bash harness/dc/smoke.sh <copy>.cdi --timeout 900 --fb-writeback -c config:Limit
 python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots
 ```
 
+**G1 — the per-opcode histogram (this is the line that produced §1's numbers):**
+```bash
+  DC_EMU64_HIST=1 DC_XDEFS='-DDC_PERF_PHASE' bash dc/build-dc.sh
+```
+⚠️ **G1 and G2 are mutually exclusive** — both install into emu64's dispatch
+table, G2 wins, and G1 would measure nothing. That is an `#error` now
+(`dc/include/dc_platform.h:417`), not a silent wrong number.
+
 **RELEASE / burn image:** drop `DC_SCIF_FAST`, `DC_AUTOSTART`, `DC_AUTOWALK` and
 every probe; add `DC_CDI_PAD=1`. ⚠️ `DC_SCIF_FAST` on hardware loses the console.
 
@@ -146,6 +247,9 @@ every probe; add `DC_CDI_PAD=1`. ⚠️ `DC_SCIF_FAST` on hardware loses the con
 
 ⚠️ **Build to a COPY of the CDI before a long run.** ⚠️ **Never edit the tree
 while a build runs**; never run two builds at once.
+⚠️ **The harness writes `console.log` only when Flycast EXITS.** Polling it
+mid-run finds nothing and reads exactly like a hang. A 900 s run is ~17-20 min
+of wall clock; wait for it. (`kb/traps.md`.)
 
 ## 2b. THE MEMORY ARITHMETIC THAT ACTUALLY BINDS
 
@@ -165,8 +269,13 @@ Two levers were then applied, and they are what paid for the acre fix:
 | **arena cut**, `DC_ARENA_BYTES` 1,900,000 → 1,200,000 | +700,000 | `[DC/ARENA] zelda used=289536 free=1124944` — **measured in a loaded TOWN**, the first time that probe has been read anywhere but the title screen |
 | **jaudio `.bss` shrink**, keyed to `DC_AUDIO=0` (S8/S9) | +450,368 | the pump is `#if DC_AUDIO` and every downstream function has exactly one caller, so the sequencer never ticks at the default |
 
-Current shipping image: `image_span=11749436 additive_heap=1658752
-margin=3237956 OK`, no OOM.
+Current shipping image after R1 (2026-08-05): **`.bss` 3,945,356**,
+`margin=3191348`, no OOM, `ASSET MISSING 0`.
+
+⚠️ **Do NOT plan the next `.bss` spend against a pool's "non-stub total"** —
+rule 8. R2 was ~break-even and R3 *spends* 115,424 B; neither freed room for
+the interiors, and the section in `kb/STATE.md` that used to promise otherwise
+is corrected.
 
 ## 3. WHAT WAS WRONG WITH THE TEXTURES — it was mostly GEOMETRY
 
@@ -197,9 +306,18 @@ free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
 
 ## 4. STILL BROKEN, ranked
 
-1. **60 of 72 villager NPC models are still stubbed** — 392 KB more, plus
-   ~992 KB of NPC textures. Villagers are randomised per town, so this is the
-   same class as the acres and it does **not** fit. S4 territory.
+1. **THE TOWN HAS NO VILLAGERS AT ALL, and that is a save bug, not an asset
+   bug (found 2026-08-05).** `mNpc_SetNpcList` populates the town from the
+   save's `Animal_c animals[]` (`m_start_data_init.c:559`); the VMU path is
+   unwired, so `[PC] No save file found` and **not one villager actor is ever
+   constructed**. Measured, not inferred: two 900 s runs that reach scene 9 and
+   walk printed zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, because
+   `aNPC_dma_draw_data_proc` (`ac_npc_ctrl.c_inc:687`) never runs.
+   **R2 and R3 exist and are DEFAULTED OFF for exactly this reason** —
+   `DC_NPCTEX_POOL=1` / `DC_NPCMDL_POOL=1` turn them on, and the first honest
+   test of either is after N2b wires the save. ⚠️ The old text here said "60 of
+   72 villager models are stubbed, 392 KB + ~992 KB"; **both figures were
+   non-stub totals** (rule 8) and the model count is 32, not 72.
 2. **The other 74 `obj_s_*` structures** — 333 KB (shop1, museum, tailor,
    police box, shrine, post office…). Each is one building silhouette.
 3. ✅ **Winter ground — FIXED 2026-08-05 by R1.** All 41 `mFM_grd_w_*` textures
@@ -215,18 +333,75 @@ free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
    one-line test of H2. Never run.
 5. **`aram zero=7 (2016 B)`** appeared in the walking run and must be 0. Small,
    new, unexplained.
+6. **The large black wedges in the town are TEV config #007 losing BOTH of its
+   alpha factors — diagnosed 2026-08-05, NOT fixed.** `ef_shadow_out.c:34-35`
+   records as **two** stages, not the three an earlier reading assumed:
+   `stage0 alpha = (ZERO, TEXA, A1, ZERO)` and
+   `stage1 alpha = (ZERO, TEXA, APREV, ZERO)` (`emu64.c:1888-1897`, config #007
+   in `kb/tev-map-table.md:120`). PRIM.a sits on stage 0 in a **mirrored**
+   spelling that `tev_const_alpha()` reaches and then throws away at its
+   `konst != GX_CA_A0` narrowing, and the last stage is `APREV * TEXEL1.a`, the
+   mirror of what `tex1_alpha_active()` tests. **So the batch draws at
+   `vtx.a * T0.a`, where `vtx.a` is the `G_RM_FOG_SHADE_A` fog coefficient — a
+   flat dark quad, exactly the reported symptom.** The two real levers are
+   widening `tev_const_alpha()`'s A1 arm and adding the mirrored shape to
+   `tex1_alpha_active()`; both are widenings, and widenings in this family have
+   regressed before (`dc_pvr.c:1080-1098`), so **both need a screenshot pair.**
+   ⚠️ The new `tev_const_alpha_last()` in the tree (kill switch
+   `-DDC_PVR_NO_TEVALPHA_LAST`, counter `tevalpha_last batches=`) recognises a
+   final stage of shape `APREV * konst` and **does not fix this**. ⚠️ This
+   diagnosis still has to be transcribed into `kb/tev-map-alpha.md` /
+   `kb/tev-map-hard-cases.md`; only `kb/state-log.md` and this file carry it.
 
-## 5. THE OPEN DECISION — the user's call, not engineering's
+## 5. THE RANKED NEXT ACTIONS (2026-08-05)
+
+Same list as `kb/STATE.md`; this is the ordering a fresh context should work
+down. Items 1-3 are frame time, 4 unblocks the villagers, 5 decides the audio
+architecture, 6 is a visible bug.
+
+1. **`dc_gx_backend_submit` — 12.2 ms, ours, `-O2`, no gate.** The first step
+   is free and settles two questions at once: print the vertex-memo hit ratio
+   and a per-batch `count` histogram from `dc_gx_flush_vertices`. That decides
+   whether this is a 3 ms or an 8 ms lever **and** settles the memo-ceiling
+   dispute below. ⚠️ **OPEN, and neither reading may be stated as fact:** the
+   vertex memo is **128 slots** (`dc_pvr.c:1955`) hitting **48.2-48.9 %**, and
+   its ceiling is either 48.2 % (already there, further work worth zero) from
+   6,951 staged references, or ~60 % (~11 points of headroom) from the newly
+   measured `v + vcull = 9,044`. `dc_gx.c:870`'s 6,951 comment is **stale**.
+   The experiment that settles it is a direct count of distinct vertex
+   references per batch.
+2. **Per-slot shadow of `G_MTX`** (2.18 ms over 113 calls) as the proof that
+   the per-slot machinery works — self-contained, no `gfx_p` rewriting, est
+   **0.9-1.4 ms**. ⚠️ **Hazard:** `dc_emu64_hist.c:262` and
+   `dc_emu64_shadow.cpp:492` each `memcpy` **all 64 slots** on frame open and
+   restore all 64 on close, so a third installer must arm slot-wise or
+   initialise strictly before them.
+3. **Slot-60 `TRIN_INDEPEND` cull-only shadow** — an AABB over the index window
+   at entry, tested against `projection_mtx ×` (identity for SHARED /
+   `position_mtx_stack` for NONSHARED), with `dl_G_TRIN` kept as the fallback.
+   Est **4.5-7.0 ms** ⇒ 11.5 → 12.2-12.6 FPS.
+4. **Wire the VMU save path (N2b).** Now blocking rather than optional: it is
+   the only way to get a villager into the town, and therefore the only way to
+   test R2/R3 at all (§4 item 1).
+5. **The audio sequencer floor.** `-Wl,--wrap=_RspStart2` — **note the leading
+   underscore**, §0b/`kb/traps.md` — plus an empty `__wrap_` deletes exactly
+   the work AICA would absorb. Read `synth_us=` against 19,840: **≤2,000 means
+   AICA Stage B is worth 6-10 weeks; ≥8,000 means an `-O2` rspsim shadow
+   outranks it.**
+6. **The TEV shadow-alpha fix** — §4 item 6. Written code exists and does not
+   fix it; the two real levers are named there.
+
+## 5a. The emu64 decision gate — RE-COSTED 2026-08-05, and it shrank
 
 `kb/research-fps-ideas.md` carries this in full.
 
-⚠️ **RE-COSTED 2026-08-05 — G1 RAN, and it shrinks G2 and G3.**
+⚠️ **G1 RAN, and it shrinks G2 and G3.**
 
 | | what | win | gate |
 |---|---|---|---|
 | **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | ✅ **RUN 2026-08-05.** `TRIN_INDEPEND 22.25 ms/146`, `VTX 5.40/149`, `gap 7.92` |
-| G2 | reimplement the dispatch LOOP in `dc/` at `-O2` | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], capped at ~8.3 | needs sign-off, and now barely worth asking for |
-| G3 | `-O2` shadow `dl_G_VTX`/TRI with a runtime AABB cull | ~~25-35 ms~~ → **4.5-7.0 ms** [ESTIMATED] from the cull; the `-O2` half is inside G2's ~8.3 ms cap | needs sign-off |
+| G2 | reimplement the dispatch LOOP in `dc/` at `-O2` | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], capped at ~8.3 | ✅ signed off 2026-08-04; built, +0.8 FPS whole-run, town not separated |
+| G3 | `-O2` shadow `dl_G_VTX`/TRI with a runtime AABB cull | ~~25-35 ms~~ → **4.5-7.0 ms** [ESTIMATED] from the cull; the `-O2` half is inside G2's ~8.3 ms cap | ✅ signed off 2026-08-04. **Build the cull half first** (§5 item 3) — that is where the whole win is |
 | — | `dc_gx_backend_submit` (`dc/src/dc_pvr.c:2448`) | **12.2 ms is the block itself**; win unmeasured | **no gate at all — it is ours** |
 
 **The re-cost, in one line:** 65 % of `G_TRIN_INDEPEND`'s 152 µs/call is already
@@ -291,12 +466,25 @@ DMA rows come off 0-2,240 ns samples. Flycast models neither VRAM latency nor
 Holly contention. **R1/R3/R4/R5/R6 stay gated, now on a CD-R burn rather than on
 an unrun benchmark.** A hardware build must drop `BENCH_BAUD` to 57,600 first.
 
-## 6. What is new in the tree this session
+## 6. What is new in the tree — SESSION 4 (2026-08-05)
+
+| thing | what it is |
+|---|---|
+| `dc/src/dc_bgtex.c`, `DC_BGTEX_DEMAND=0` | **R1.** 96 acre ground textures demand-loaded off `/cd`; −81,856 B `.bss`. The seam is `make_src_shrink.py` rewriting one `bcopy`, not `--wrap` |
+| `dc/src/dc_npctex.c`, `DC_NPCTEX_POOL=1` | **R2**, 16 × 4,832 B villager texture slots. **OFF by default** — there are no villagers to load into it |
+| `dc/src/dc_npcmdl.c`, `DC_NPCMDL_POOL=1` | **R3**, 16 × 7,552 B villager model slots. **OFF by default**, same reason; costs +115,424 B when on |
+| `dc/src/dc_fmath.c`, `-DDC_NO_FSQRT` | binds `sqrtf` to SH-4 `FSQRT` so newlib's software `__ieee754_sqrtf` is never linked. **Bit-identical to newlib for every normal input** — KOS sets `FPSCR = 0x00040000` (DN=1, round-to-nearest-even) at `startup.S:74-85` — so there is nothing to A/B on a screenshot |
+| `DC_MTX_USE_FIPR` now **1**, `-DDC_MTX_NO_FIPR` | the `TODO(M3)` at `dc_mtx.c:71-72` resolved rather than measured; the kill switch is the A/B |
+| `tev_const_alpha_last()`, `-DDC_PVR_NO_TEVALPHA_LAST` | recognises a final TEV stage of shape `APREV * konst`; counter `tevalpha_last batches=`. ⚠️ **Does not fix the black wedges** — §4 item 6 |
+| `vcull=` in `[PHASE]` | `dc_gx_phase_culled_verts` — vertices rejected by the AABB cull, the counter that turned "60 % culled" into a measurement |
+| `#error` in `dc_platform.h:417` | G1 and G2 both install into emu64's dispatch table; building both was silently useless |
+
+<details><summary>session 3's additions</summary>
 
 | thing | what it is |
 |---|---|
 | `[EMU64]` line | the opcode mix, free, under `-DDC_PERF_PHASE` |
-| `DC_EMU64_HIST=<N>` | **G1.** Timing thunks swapped into emu64's dispatch table at runtime; `src/` untouched, one `objcopy --globalize-symbol` is the only build change. **Never run.** |
+| `DC_EMU64_HIST=<N>` | **G1.** Timing thunks swapped into emu64's dispatch table at runtime; `src/` untouched, one `objcopy --globalize-symbol` is the only build change. ✅ **RUN 2026-08-05** |
 | `DC_AUTOWALK=<N>` | deterministic 8-direction stick walk, gated to `DC_AUTOWALK_SCENE` (default 9, the town). ⚠️ Ungated it drives the NAME-ENTRY KEYBOARD and the run never leaves the intro |
 | `DC_AUDIO_SCENES=<list>` | per-scene audio gate; `bash dc/build-dc.sh` derives `DC_AUDIO=1` from it |
 | `DC_AUDIO_HEAPLOG` | jaudio heap high-water; the gate on shrinking `audiomemory` further |
@@ -307,6 +495,8 @@ an unrun benchmark.** A hardware build must drop `BENCH_BAUD` to 57,600 first.
 | unhandled-texture-format log | an unhandled format decoded to a transparent rectangle **in silence**, which is byte-identical to a missing asset |
 | `tools/dcstub/make_keeplist_town.py` | generates `keeplist-town.txt` |
 | `harness/dc/bench/` | bench_mem's build path |
+
+</details>
 
 ---
 

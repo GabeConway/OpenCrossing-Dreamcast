@@ -80,28 +80,67 @@ calls KOS's `frsqrt()`/`fipr` intrinsics explicitly (`kb/perf-dc.md` §3.6). Do
 not "discover" the flags again and do not add
 `-funsafe-math-optimizations` — that is codegen, which §1 bans.
 
-## sh4zam — PASS for this port (2026-08-05)
+## sh4zam — PASS for this port (2026-08-05, re-verified against the library's own source)
 
-kos-ports carries **sh4zam**, an SH-4 math library, and it is flagged as a
-follow-up in `kb/toolchain-components.md` §4.3 and `kb/toolchain-decision.md`
-item 6. **Verdict: do not adopt it.** Four reasons, in order of weight:
+The user asked about **sh4zam** (`https://sh4zam.com/`,
+`https://github.com/gyrovorbis/sh4zam`, MIT) after community advice that GCC
+does not emit the SH-4's T&L instructions. It is also flagged as a follow-up in
+`kb/toolchain-components.md` §4.3 and `kb/toolchain-decision.md` item 6.
+**Verdict: do not adopt it.** The community premise is true in general and
+false here:
 
 1. **The port already emits the instructions it exists to emit**, through KOS
-   `dc/fmath.h`: FTRV at `dc_pvr.c:2666` and `dc_mtx.c:246-427`, FIPR at
-   `dc_pvr.c:188-191`, FSRRA at `dc_pvr.c:187`.
-2. **Its API is `inline` in headers, so its codegen is decided by the including
-   TU's flags.** Included from `src/` that means `-O0` — the library would be
-   compiled *badly* exactly where the frame time is.
-3. **It has no FSQRT at all**, so it does not cover the one case §3.6 found
-   compiled literally.
-4. **`kb/perf-dc.md` §3.7 already measured this class of change at exactly
+   `dc/fmath.h`: FTRV at `dc_pvr.c:2666`, `:2721` and `dc_mtx.c:246-427`, FIPR
+   at `dc_pvr.c:188-191`, FSRRA at `dc_pvr.c:187`.
+2. **Swapping KOS `mat_*` / `fipr` / `frsqrt` for sh4zam's equivalents is a
+   NO-OP** — the same instructions, from a different header. The only
+   measurable delta is one `jsr`/`rts` per `mat_load` where KOS inlines, ~15 µs
+   against a 78.3 ms frame.
+3. **`shz_sqrtf` is NOT FSQRT.** `shz_scalar.inl.h:315-325` defines it as
+   `shz_inv_sqrtf_fsrra(x) * x`, i.e. an **FSRRA approximation** (~2^-21), not
+   a correctly-rounded square root. The one real gap the audit found —
+   272 `sqrtf` sites binding newlib's software `__ieee754_sqrtf` — is closed by
+   `dc/src/dc_fmath.c` calling KOS `fsqrt()`, and sh4zam would have closed it
+   *wrongly*.
+4. **Its API is `inline` in headers (`SHZ_INLINE` = `inline static`), so its
+   codegen is the including TU's.** Included from `src/` that is `-O0` — the
+   library would be compiled badly exactly where the frame time is.
+5. **`kb/perf-dc.md` §3.7 already measured this class of change at exactly
    zero**: four renderer micro-optimisations predicted at 1.5-3 ms/frame came
    back at +0.4 % across 215 counter-matched windows.
 
+**If it is ever adopted, VENDOR it — do not take it from kos-ports.** It is
+header-only for everything relevant, depends on nothing from KOS, and keeps
+**no shadow copy of XMTRX** (so it cannot desynchronise from
+`dc_mtx.c`'s residency cache). `dc/third_party/sh4zam/` costs nothing; a
+kos-ports dependency forces a **~27 min Docker SDK image rebuild**, which is the
+single most expensive thing in this toolchain.
+
 Stated fairly, because the reason is "no room", not "bad library": sh4zam is
-MIT, actively developed, in kos-ports, and shipping in DCA3 and SM64-DC. If a
-future rewrite moves the per-vertex math into a `dc/`-owned `-O2` TU, reason 2
-stops applying and this is worth ten minutes — but not before.
+MIT, actively developed, and shipping in DCA3 and SM64-DC. If a future rewrite
+moves the per-vertex math into a `dc/`-owned `-O2` TU, reason 4 stops applying
+and this is worth ten minutes — but not before.
+
+### Two corollaries banked with it, so they are not re-derived
+
+- **FSQRT needs no precision screenshot.** KOS sets `FPSCR = 0x00040000` at
+  `startup.S:74-85` (DN=1, RM=00 = round-to-nearest-even, every exception
+  enable clear), so FSQRT is the correctly-rounded IEEE-754 square root and is
+  **bit-identical to newlib's software routine for every normal input**. The
+  three divergences are all consequences of that same word: `x < 0` gives qNaN
+  without setting `errno` (nothing in the tree reads `errno` after a `sqrtf`),
+  `sqrt(-0) = -0` on both paths, and DN=1 flushes denormal inputs to zero.
+- **FSCA is not an FPS lever here.** There are only **four** live `sinf`/`cosf`
+  sites in the image (`m_camera2.c:87-90`); everything else goes through
+  `sins()`/`coss()`, which is a table lookup at the same 16-bit angular
+  resolution FSCA takes as its input. There is nothing to convert.
+- **The "camera basis precision" worry has no mechanism in this build.**
+  `PSVECDotProduct`, `PSVECMag`, `PSVECCrossProduct`, `C_MTXLookAt` and
+  `PSMTXMultVecArray` are all in the map's *Discarded input sections* — **not
+  in the image**. Only `PSVECNormalize` is live (`0x8c4cdde4`), with one caller
+  (`emu64.c:4696`) gated on texture-gen batches. ⚠️ This contradicts
+  `dc_mtx.c`'s own older comment about `PSMTXMultVecArray` being "where XMTRX
+  actually pays"; the map is the authority.
 
 ## SH-4 MMU demand paging — VERDICT: DEAD
 
@@ -271,6 +310,23 @@ stated bound is not a bound; what actually caps a batch at 32 distinct sources
 is the 5-bit per-vertex **index** width, not any triangle count (see the
 correction above). **The memo itself is 128 slots as of 2026-08-04**
 (`dc_pvr.c:1955`), hit rate 48.2-48.9 %.
+
+## F8 — stripping RDP/RSP state commands. ANSWERED BY G1, worth ~nothing (2026-08-05)
+
+F8 was reopened on 2026-08-04 on the strength of "2,094 of 2,867 town commands
+per frame — 73 % — are pure state, and at 12.31 µs/cmd that is ~26 ms". The
+12.31 µs was an average (measurement rule 7) and the histogram priced the same
+opcodes directly:
+
+```
+MOVEMEM 0.55/207 · SETTILE_DOLPHIN 0.32/109 · SETCOMBINE 0.28/58 ·
+SETTIMG 0.25/112 · ENDDL 0.18/131 · LOADTLUT 0.13/42
+```
+
+**Every state opcode is ≤ 0.55 ms/frame.** A large *count* of near-free commands
+is worth nothing to strip. **Do not build a strip rule** — not against the
+static count, and now not against the runtime mix either. The frame is in
+`G_TRIN_INDEPEND` (22.25 ms) and in `gap` (7.92 ms, still unexplained).
 
 ## A census cannot produce a town keep list (2026-08-04)
 
