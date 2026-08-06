@@ -1,5 +1,56 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-06 (session 6, later) — AUDIO WORKS ON REAL HARDWARE, AND THE
+## STUTTER IT LEFT KILLED FOUR HYPOTHESES
+
+**The fix was one flag nobody had wired.** `DC_AUDIO=1` alone drops all
+8,300,384 B of `audiorom.img` at `dc_aram.c:317-320`, *before*
+`dc_dvd_provenance()` at `:325`, so the audio half of ARAM had **zero** extents
+and every sample fetch was `memset` to zero. `-DDC_ARAM_AUDIO_DROP=0` fixes it:
+`mapped` 4,982,400 → **13,282,784** (exactly +8,300,384), `ext=3/32`, `zero=0`,
+`[NEOS_OUT] peak` 0 → **3851**, and a human confirmed sound on the console.
+Costs no pool bytes — `dc_aram.c:344` skips block allocation for mapped writes.
+
+⚠️ **Two `synth_us` figures (1,353 and 3,208 µs) were quoted as "audio is
+affordable now" before anyone checked `peak`.** Both were measured on silent
+runs, and synthesising zeros is cheap. Withdrawn. The honest figure, with sound
+actually playing, is a **mean of 3,777 µs** per 17.49 ms DAC frame — which does
+still retire the `-O0` doctrine (19.8 ms, "113 % of the machine, AICA Stage B is
+worth 6-10 weeks"), just for a reason that had to be earned twice.
+
+**THE STUTTER: ~2/s on hardware, and it reproduces at 192 `[STUTTER]`/420 s
+against 14 silent.** Four hypotheses, each killed by a measurement:
+
+| # | hypothesis | how it died |
+|---|---|---|
+| 1 | disc-cache misses | ARAM 4→16 blocks: hit rate 83→97.9 %, disc reads 3.54→0.77/s. **Hardware stutter unchanged.** Kept anyway — right on its own evidence |
+| 2 | multi-frame synthesis burst | `DC_AUDIO_MAX_FRAMES` is 2, capping a pump at ~9.6 ms. `sndf=4` is 2 TICKS × 2 — the per-logic-tick denominator again, same day as rule 9 |
+| 3 | `snd_stream_poll` / G2 / the 10 ms scheduler quantum | `DC_AUDIO_MAX_FRAMES=0` keeps the entire KOS path live (`cb=5692`, `pulled=46,628,864 B`, same fills, same DMA, same semaphore) and costs **0.1 ms**; stutters fall to 13. The quantum fit was coincidence |
+| 4 | jaudio's mean cost | `-O3` on rspsim/driver/system/aictrl: 192→174 events, mean 3,832→3,777 µs. **1.4 %**, where `-Os` bought the decomp draw path 41 %. Not compiler-bound |
+
+**What it actually is, from `smax=`:** `4 × smax == snd` on every spike
+(`snd=39.6 sndf=4 smax=9.9`; `snd=28.2 sndf=4 smax=7.0`). Not one pathological
+call among three cheap ones — **every** call costs ~10 ms during a stutter
+against a 3.78 ms mean. jaudio is **bimodal**, and the budget explains the rest:
+2.57 DAC frames per ~45 ms game frame is ~14 % of the frame at 2.5 ms and
+**~57 % at 10 ms**. At 57 % the frame collapses and the pump hits its 4-frame
+ceiling catching up.
+
+The instruments that did it, and they were cheap: `snd=`/`sndf=` (ten minutes)
+killed hypotheses 2 and 3; `smax=` (five lines) killed 4 and produced the
+answer. Every counter that already existed reported an **average**, and the bug
+was a plateau — invisible to all of them.
+
+Runs: `smoke-oc-dc-audio-20260806-174020` (silent, `peak=0`),
+`-audio-o0-174509` (the `-O0` control that exonerated the optimizer),
+`-audiofix-175714` (`peak=3851`), `-aramwin-183021` (16 blocks),
+`-sndattr-185418` (192), `-nosynth-191545` (13), `-audioO3-192616` (174),
+`-smax-193504` (191).
+
+**Not fixed. The lever is PEAK per-frame synthesis cost** — voice count,
+effects, or rspsim at 22 kHz (`kb/audio-cpu-cost.md` A0-A4) — and those are
+product decisions. `DC_AUDIO_SCENES=3` is the shippable configuration today.
+
 ## ⭐⭐ 2026-08-06 (session 6) — G1 WAS RE-RUN, AND EVERY `[EMU64H]` NUMBER THIS
 ## PROJECT HAS EVER QUOTED IS HALF OF THE TRUTH
 

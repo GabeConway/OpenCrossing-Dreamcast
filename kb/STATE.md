@@ -6,6 +6,56 @@ true *right now*, plus what to do next. Everything else is one hop away.
 it carries the build lines and the **nine** measurement rules; this file is the
 numbers and the queue.
 
+## ⭐⭐⭐ 2026-08-06 (session 6, later) — AUDIO WORKS ON HARDWARE. IT WAS ONE
+## UNWIRED FLAG, AND THE STUTTER IT LEFT IS A BUDGET, NOT A BUG
+
+**`DC_AUDIO=1` needs `-DDC_ARAM_AUDIO_DROP=0` and nothing wires it.**
+`dc_aram.c:313-320` drops every write below `aram_audio_end` *before*
+`dc_dvd_provenance()` at `:325`, so all 8,300,384 B of `audiorom.img` streamed
+in and was discarded, the audio half got **zero** extents, every jaudio sample
+fetch hit `dc_aram.c:401-409` ("no extent covers this offset") and was
+`memset` to zero, and the mixer faithfully mixed silence. `dc/Makefile:801`
+*comments* about the flag; `BUILDING-DC.md:126,163` documents it as a manual
+recipe. **Human-verified working on real hardware once set.**
+
+```
+[DC/ARAM] LRU w:mapped=13282784 ... zero=0(0 B) | ext=3/32   (was ext=2/32, zero=123)
+[NEOS_OUT] peak 0 -> 3851
+```
+
+⚠️ **THE `-O0` AUDIO DOCTRINE IS DEAD.** "One DAC frame costs 19.8 ms, 113 % of
+the machine, so AICA Stage B is worth 6-10 weeks" was measured at `-O0`.
+Measured now: **mean 3,777 µs** against 17.49 ms of audio per frame. Software
+synthesis is affordable; Stage B is not needed for cost reasons.
+
+**THE STUTTER (~2/s on hardware, 192 `[STUTTER]`/420 s vs 14 silent) IS A
+PLATEAU, NOT A TAIL.** New counters `snd=` / `sndf=` / `smax=` on the
+`[STUTTER]` line: `4 × smax == snd` on every spike, so **every** synthesis call
+costs ~10 ms during a stutter against a 3.78 ms mean. jaudio is **bimodal**
+(~2.5 ms / ~10 ms, almost certainly voice count), and the budget is:
+
+| | cheap | expensive |
+|---|---:|---:|
+| per DAC frame | ~2.5 ms | **~10 ms** |
+| × 2.57 frames per ~45 ms game frame | ~14 % | **~57 %** |
+
+At 57 % the frame collapses, the ring falls behind, and the pump hits its
+4-frame ceiling (2 ticks × `DC_AUDIO_MAX_FRAMES=2`) catching up.
+
+**FOUR HYPOTHESES REFUTED BY MEASUREMENT** — disc-cache misses (ARAM 4→16
+blocks took the hit rate 83→97.9 % and disc reads 3.54→0.77/s; **hardware
+stutter unchanged**); a multi-frame burst (`sndf=4` is 2 ticks × 2, not a burst);
+`snd_stream_poll`/G2/the 10 ms scheduler quantum (`DC_AUDIO_MAX_FRAMES=0` keeps
+the whole KOS DMA/semaphore path live at **0.1 ms** and drops stutters to 13);
+and jaudio's mean cost (`-O3` on rspsim/driver/system/aictrl: 192→174 events,
+mean −1.4 %, where `-Os` bought the decomp draw path 41 %). The `-O3` promotion
+is kept anyway; `jammain_2.c` is deliberately NOT promoted with it.
+
+**The remaining lever is PEAK per-frame synthesis cost** — voice count, effects,
+or rspsim at 22 kHz (`kb/audio-cpu-cost.md` A0-A4). That is a product decision.
+**`DC_AUDIO_SCENES=3` is the shippable config today**: the K.K. scene is 888
+verts at the frame cap and can afford 57 %; the town has nothing spare.
+
 ## ⭐⭐ 2026-08-06 (session 6) — G1 RE-RUN: EVERY `[EMU64H]` NUMBER WAS HALF THE
 ## TRUTH, AND RAM HAS STOPPED BEING THE BINDING CONSTRAINT
 

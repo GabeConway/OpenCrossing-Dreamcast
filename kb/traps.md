@@ -1,5 +1,36 @@
 # Traps already paid for — do not re-discover these
 
+## ⭐ AUDIO IS SILENT UNLESS YOU PASS `-DDC_ARAM_AUDIO_DROP=0` (2026-08-06)
+
+- **`DC_AUDIO=1` alone produces a live pipe carrying zeros, and nothing warns
+  you.** `dc_aram.c:313-320` returns from `aram_write()` *before*
+  `dc_dvd_provenance()` at `:325` for every write below `aram_audio_end`, so
+  `audiorom.img`'s 8,300,384 B is discarded, the audio half of ARAM gets **zero
+  extents**, and every jaudio sample fetch lands on `dc_aram.c:401-409` and is
+  `memset` to zero. `dc/Makefile:801` only *comments* about the flag.
+  **The tell is `[NEOS_OUT] ... peak=0` with the pump running and the AICA
+  pulling** — `dc_audio.c:309-311` predicted this exact symptom in a comment.
+  Correct line: `ext=3/32`, `mapped=13282784`, `zero=0`, `peak != 0`.
+- ⚠️ Corollary: **`synth_us` measured on a silent run is meaningless** —
+  synthesising zeros is cheap. Two figures (1,353 and 3,208 µs) were quoted as
+  "audio is affordable now" before anyone checked `peak`.
+
+## `[DC/AUDIO]` MIXES CUMULATIVE AND WINDOWED COUNTERS ON ONE LINE (2026-08-06)
+
+- `dc_audio.c:1031` resets **only** `s_pump_calls`, `s_pump_frames`,
+  `s_pump_budget_hits` and `s_pump_usec`. So `pump calls=` and `us/600=` are a
+  600-pump WINDOW, while `cb=`, `pulled=`, `pollfail=` and `kick=` are
+  **cumulative since boot**. Dividing one by the other is wrong.
+  It reconciles: `kick 16741 + 60` (the arming delay) `= 28 × 600`, and
+  `aicaclk = 16741 × 16` exactly — which also proves the ARM7's Timer-A FIQ
+  contributed literally zero and every tick of that clock was ours.
+- **`synth_us` is a 3:1 EWMA (`dc_audio.c:983`), not a mean**, and it
+  understates the true mean (`us/600 ÷ synth_frames`) by 22 %. Using
+  `sndf × synth_us` to "prove" a cost sat outside synthesis is measurement
+  rule 7 committed by the instrument itself. **An EWMA cannot see a tail, and
+  cannot see a plateau either** — the audio stutter turned out to be every call
+  costing 4× the mean, which only a per-window MAX (`smax=`) could show.
+
 ## ⭐ `[EMU64H]` IS PER LOGIC TICK — DOUBLE IT (2026-08-06)
 
 - **Every number G1 prints must be multiplied by `ticks_per_visual` before it
