@@ -162,6 +162,49 @@ MIT, actively developed, and shipping in DCA3 and SM64-DC. If a future rewrite
 moves the per-vertex math into a `dc/`-owned `-O2` TU, reason 4 stops applying
 and this is worth ten minutes — but not before.
 
+### ⚠️ REOPENED 2026-08-06 — reason 4 is dead, and the library was never the point
+
+**"Not before" arrived the same week.** Reason 4 was "its API is `inline` in
+headers, so its codegen is the including TU's, and it would be included from
+`src/` at `-O0`". There is no `-O0` any more: `src/` is `-Os`/`-O3` and
+`dc/src` is `-O3`. **That objection is void.**
+
+Reasons 1-3 and 5 still stand as stated, and they are all about *swapping
+calls*: the port already emits FTRV/FIPR/FSRRA through KOS, so exchanging
+`mat_*` for `shz_*` is the same instructions from a different header, and
+`shz_sqrtf` is an FSRRA approximation rather than a correctly-rounded FSQRT.
+
+**But the maintainer's own guidance (2026-08-06) is not "swap the calls" — it
+is a different shape of code**, and that part is genuinely untested here:
+
+> All matrix operations are performed within XMTRX registers, rather than
+> within memory. We directly initialise XMTRX into the first transform rather
+> than identity. We use apply operations when a transform only needs to be
+> applied over a submatrix. We directly set the translational component rather
+> than applying it as a transform.
+
+i.e. `shz_xmtrx_init_rotation_xyz` / `apply_scale` / `set_translation` /
+`store_4x4` build a compound transform without ever round-tripping the matrix
+through memory. `dc/src/dc_mtx.c` does the opposite today: it keeps a residency
+cache *because* it assumes matrices live in RAM and XMTRX is a scarce resource
+(`DC_MTX_NO_XMTRX_CACHE` reverts it, and F2's premise was already measured
+FALSE — `dl_G_VTX` alternates two matrices per vertex, so the cache misses
+every call).
+
+**So the open question is not "is sh4zam faster than KOS", it is "should
+`dc_mtx.c` stop staging matrices in memory at all".** That is a rewrite of our
+own code, which sh4zam would then be the natural vocabulary for.
+
+**Cost of finding out, now that a rebuild is 96 s:** vendor into
+`dc/third_party/sh4zam/` (NOT kos-ports — that forces a ~27 min SDK image
+rebuild), and A/B `us/v`, which is already the right instrument: it moved
+4.05 → 3.11 on the `DC_OPT=-O3` change alone, so it is sensitive enough to
+price this.
+
+⚠️ **Do NOT re-run the "swap `mat_load` for `shz_xmtrx_load`" experiment and
+report the result as a verdict on sh4zam.** That experiment is reasons 1-2, it
+was already done, and it measures nothing.
+
 ### Two corollaries banked with it, so they are not re-derived
 
 - **FSQRT needs no precision screenshot.** KOS sets `FPSCR = 0x00040000` at

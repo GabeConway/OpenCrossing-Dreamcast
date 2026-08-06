@@ -281,7 +281,16 @@ else
   $(error DC_OPT_PROFILE='$(DC_OPT_PROFILE)' is not one of: perf size o0)
 endif
 
-DC_OPT ?= -O2
+# dc/src is code we own, and since the decomp stopped being the whole frame it
+# is a much larger share of it: xform was 15.6 % of the draw phase at -O0 and is
+# ~27 % now. MEASURED 2026-08-06, matched town windows, -O2 -> -O3:
+#     us/v      4.05 -> 3.11   (-23 %, the per-vertex transform cost itself)
+#     xform     12.4 -> 9.9 ms
+#     gx        14.6 -> 12.3 ms
+#     town FPS  20.0 -> 20.6
+#     .text     +24,548 B
+# Screenshot-gated against the -O2 build of the same source.
+DC_OPT ?= -O3
 
 # Extra guards that only make sense once the optimizer is actually running.
 # They are appended to UB_GUARDS for decomp TUs and are EMPTY at -O0, so the
