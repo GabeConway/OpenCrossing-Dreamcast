@@ -82,6 +82,23 @@ static void (*vi_post_callback)(u32) = NULL;
 static u64 frame_start_us = 0;
 static int s_logic_tick_count = 0;
 
+/* Audio's per-tick cost, for the [STUTTER] line below. NOT inside the
+ * DC_PERF_PHASE block that follows: the phase externs are gated, the stutter
+ * printer is not, so these have to live where the unguarded printer can reach
+ * them. Defined unconditionally in dc_audio.c (0 at DC_AUDIO=0), so no #if
+ * here either.
+ *
+ * WHY THE FIELD EXISTS: with DC_AUDIO=1 the game hitches ~2x/second on real
+ * hardware — 210 [STUTTER] events in 420 s, against 14 in 600 s silent, 21x
+ * more per second. The line named swap, gx and tex and left ~24 ms of a 67.3 ms
+ * frame unattributed, so the cause had to be guessed, and two guesses were
+ * already spent: disc-cache misses (4x the cache changed nothing on hardware)
+ * and a multi-frame synthesis burst (DC_AUDIO_MAX_FRAMES=2 caps that near
+ * 9.6 ms). `snd=`/`sndf=` make the instrument answer it instead. */
+extern u32 dc_audio_tick_usec;
+extern u32 dc_audio_tick_frames;
+extern u32 dc_audio_tick_synth_max_us;
+
 /* ==========================================================================
  * Frame-phase attribution (-DDC_PERF_PHASE) — see kb/perf-dc.md
  * ==========================================================================
@@ -457,15 +474,35 @@ void VIWaitForRetrace(void) {
         thresh = avg_frame_ms * 1.5;
         if (thresh < 40.0) thresh = 40.0;
         if (frame_ms > thresh && g_pc_verbose) {
+            /* snd/sndf are APPENDED, never inserted: tools/dcqa/run_report.py
+             * greps this line, so the existing fields keep their order and
+             * draws= stays last. */
             DC_LOG("[STUTTER] frame %u: total=%.1fms (avg=%.1fms) "
-                   "swap=%.1fms gx=%.1fms tex=%.1fms draws=%d\n",
+                   "swap=%.1fms gx=%.1fms tex=%.1fms snd=%.1fms sndf=%d "
+                   "smax=%.1fms draws=%d\n",
                    (unsigned)pc_frame_counter, frame_ms, avg_frame_ms,
                    (double)(t_after_swap - t_before_swap) / 1000.0,
                    (double)dc_gx_flush_time_us / 1000.0,
                    (double)dc_gx_texload_time_us / 1000.0,
+                   (double)dc_audio_tick_usec / 1000.0,
+                   (int)dc_audio_tick_frames,
+                   (double)dc_audio_tick_synth_max_us / 1000.0,
                    pc_gx_draw_call_count);
         }
     }
+
+    /* THE PER-TICK RESET, and it belongs here rather than in dc_audio.c so all
+     * five numbers on the line describe ONE window. gx=/tex= are cleared inside
+     * dc_gx_frame_timing_snapshot() (dc_gx.c:614-615), whose only call site is
+     * ~30 lines above; no dc_audio_pump() runs between that call and this
+     * statement — the pump is at the TOP of the tick (line ~300) — so clearing
+     * after the print puts the audio window on the same frame boundary as the
+     * gx pair, and on the same boundary as total=. Read before the print,
+     * cleared after it: a non-stuttering frame is cleared too, so `snd=` is
+     * never a stale sum from an earlier frame. */
+    dc_audio_tick_usec = 0;
+    dc_audio_tick_frames = 0;
+    dc_audio_tick_synth_max_us = 0;
 
     /* Periodic PERF line. The harness greps this; keep the shape stable. */
     {

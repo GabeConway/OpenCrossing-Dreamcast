@@ -211,6 +211,31 @@ static u32 s_pump_budget_hits = 0, s_pump_usec = 0;
 static u32 s_poll_fail = 0;
 static u32 s_synth_avg_us = 0;   /* EWMA of one pc_audio_process_frame() */
 
+/* THE PER-TICK AUDIO COST, published for the [STUTTER] line in dc_vi.c.
+ *
+ * MEASURED: 210 [STUTTER] events in 420 s with DC_AUDIO=1 against 14 in 600 s
+ * silent — 21x more per second, and the game visibly hitches ~2x/second on real
+ * hardware. But [STUTTER] accounts for swap, gx and tex and nothing else, so on
+ * a 67.3 ms frame it left ~24 ms unnamed and the culprit had to be GUESSED.
+ * Two guesses were already wrong: disc-cache misses (4x the cache changed
+ * nothing on hardware) and a multi-frame synthesis burst (DC_AUDIO_MAX_FRAMES
+ * is 2, which caps it near 9.6 ms). These two counters end the guessing — they
+ * put audio's real per-frame cost ON the same line as the number it has to
+ * explain, so `snd=` either accounts for the gap or exonerates this file.
+ *
+ * dc_vi.c OWNS THE RESET and this file never clears them, so the accumulation
+ * window is exactly the frame window: dc_audio_pump() runs once per LOGIC tick
+ * (dc_vi.c:300, before the frameskip early-out), so a presented frame's `snd=`
+ * sums every tick in the batch its `total=` measures — including the skipped
+ * ones. Clearing here instead would report only the last tick.
+ *
+ * Unconditional definitions: at DC_AUDIO=0 or under DC_HOST_STUB nothing ever
+ * writes them and they read 0, which is the honest answer for a build with no
+ * audio, and dc_vi.c needs no #if around the read. */
+u32 dc_audio_tick_usec = 0;      /* us inside dc_audio_pump() since the reset */
+u32 dc_audio_tick_frames = 0;    /* DAC frames synthesised since the reset    */
+u32 dc_audio_tick_synth_max_us = 0; /* worst SINGLE pc_audio_process_frame()  */
+
 /* THE OUTPUT GAIN IS OWNED BY THE CALLBACK, THE TARGET BY THE PUMP, and that
  * split is the whole thread-safety argument. The pump writes s_gain_tgt and
  * nothing else; the callback writes s_gain_q8 and ring_read_pos and nothing
@@ -958,6 +983,20 @@ void dc_audio_pump(void) {
          * unlucky frame does not switch synthesis off for the next second. */
         s_synth_avg_us = s_synth_avg_us ? ((s_synth_avg_us * 3u + cost) >> 2)
                                         : cost;
+        /* THE TAIL, not the mean — and the distinction is the whole reason this
+         * line exists. MEASURED 2026-08-06: a stuttering frame reports
+         * `snd=46.1ms sndf=4` while the mean synthesis cost is 3.78 ms, so four
+         * frames should be ~15 ms. snd_stream_poll is exonerated (a
+         * DC_AUDIO_MAX_FRAMES=0 run keeps the whole KOS DMA/semaphore path live
+         * and costs 0.1 ms), and -O3 on the jaudio tree moved the mean 1.4 %.
+         * So ~31 ms is one or two INDIVIDUAL pc_audio_process_frame() calls, and
+         * every counter we had reported an average — s_synth_avg_us is an EWMA
+         * that already understates the mean by 22 %, which is measurement rule 7
+         * (kb/traps.md) committed by the instrument itself.
+         * This keeps the per-tick MAXIMUM so the [STUTTER] line can say whether
+         * the spike is one expensive frame or many ordinary ones. Cleared by
+         * dc_vi.c alongside dc_audio_tick_usec, so the window matches. */
+        if (cost > dc_audio_tick_synth_max_us) dc_audio_tick_synth_max_us = cost;
         frames++;
     }
     s_pump_frames += (u32)frames;
@@ -968,6 +1007,16 @@ void dc_audio_pump(void) {
     if (s_hnd != SND_STREAM_INVALID) {
         if (snd_stream_poll(s_hnd) < 0) s_poll_fail++;
     }
+
+    /* AFTER the poll, deliberately: s_pump_usec above stops at the synthesis
+     * loop, but snd_stream_poll() is the call that copies up to 8 KB into AICA
+     * RAM over G2, and a store-queue-less G2 burst is exactly the kind of thing
+     * that could own the unattributed ~24 ms. Ending the window before it would
+     * rebuild the blind spot this counter exists to remove. The 600-pump log
+     * block below is outside it, so DC_LOGE over SCIF is never charged to
+     * audio. One extra dc_time_us() per pump, i.e. per logic tick. */
+    dc_audio_tick_usec += (u32)(dc_time_us() - t0);
+    dc_audio_tick_frames += (u32)frames;
 
     if (++s_pump_calls >= 600u) {
         DC_LOGE("[DC/AUDIO] synth_us=%u (one jaudio DAC frame; the FPS cost of "

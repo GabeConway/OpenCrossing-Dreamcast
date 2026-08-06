@@ -57,7 +57,11 @@ OPT_HOT_SRC := \
 	src/game/m_lib.c \
 	src/gfxalloc.c \
 	src/graph.c \
-	src/game.c
+	src/game.c \
+	src/static/jaudio_NES/internal/rspsim.c \
+	src/static/jaudio_NES/internal/driver.c \
+	src/static/jaudio_NES/internal/system.c \
+	src/static/jaudio_NES/internal/aictrl.c
 
 # TIER 1 — measured
 #   emu64.c              THE hot file: ~58 ms of a ~100 ms frame. Holds every
@@ -109,6 +113,31 @@ OPT_HOT_SRC := \
 #                        the visible-block list.
 #   m_lib.c              chase/angle/lerp helpers called from nearly every
 #                        actor mv_proc. Diffuse, but tiny.
+#
+# TIER 1 (audio) — ADDED 2026-08-06, and unlike everything above these four were
+# added to fix a MEASURED STUTTER rather than to chase a mean.
+#   THE MEASUREMENT. With DC_AUDIO=1 the town hitches ~2x/second on real
+#   hardware, and it reproduces: 192 [STUTTER] events / 420 s with audio vs 14
+#   silent. A per-tick `snd=` counter (dc_vi.c) attributed it — and then a
+#   DC_AUDIO_MAX_FRAMES=0 run, which keeps snd_stream_poll and the whole
+#   KOS DMA/semaphore path live while doing NO synthesis, settled it:
+#
+#       synthesis ON    192 events   snd=17-84 ms   sndf=2-4
+#       synthesis OFF    13 events   snd=0.0-0.3ms  sndf=0   (silent baseline 14)
+#
+#   The poll path costs 0.1 ms. The tens of milliseconds are inside
+#   pc_audio_process_frame(), i.e. jaudio itself — and jaudio was the one
+#   per-frame hot tree still at -Os while every other one was at -O3.
+#   ⚠️ THE COST IS A TAIL, NOT A MEAN, and that is why this is worth doing:
+#   synth_us reports 3,144 us (an EWMA, dc_audio.c:983) against a true mean of
+#   3,832 (us/600 / synth_frames), while a stuttering frame spends 44 ms on 4
+#   frames. Judge this change on the [STUTTER] RATE, never on synth_us.
+#   rspsim.c              the software RSP: the sample-mixing inner loops.
+#   driver.c              per-voice update, the largest of the four.
+#   system.c              Nas_StartDma / Nas_FastCopy / the wave-cache path —
+#                         2,541 lines, and where a wave-cache miss is serviced.
+#   aictrl.c              the DAC-frame driver (DAC_SIZE*2 at :292 is the
+#                         17.49 ms figure the whole audio budget rests on).
 #   gfxalloc.c           GRAPH_ALLOC/gfxopen/gfxclose — one allocation per actor
 #                        matrix per frame. Tiny file, called constantly.
 #   graph.c              the frame loop (:401-429 batches the logic ticks) and
@@ -123,10 +152,17 @@ OPT_HOT_SRC := \
 #   c_keyframe.c         skeletal animation — currently near-dead, because the
 #                        port constructs ZERO villagers (kb/RESUME.md §4).
 #   m_npc.c/m_npc_walk.c cold for the same reason. Revisit after N2b.
-#   the jaudio_NES tree  rspsim.c/driver.c/aictrl.c are the audio hot path and
-#                        would be tier 1 with sound on — but DC_AUDIO defaults
-#                        to 0 and they are unreachable. Add them WITH the audio
-#                        work, not before it.
+#   the jaudio_NES tree  ✅ PROMOTED TO TIER 1, 2026-08-06 — this WAS the audio
+#                        work. See the tier-1 note above. The entry that used to
+#                        sit here said "add them WITH the audio work, not before
+#                        it", and that is exactly what happened; kept as a
+#                        record that the deferral was correct rather than lucky.
+#                        ⚠️ jammain_2.c is deliberately NOT promoted with them —
+#                        it is the one C++ TU with a missing return AND 22
+#                        uninitialised reads, i.e. the first quarantine suspect
+#                        (see KNOWN CANDIDATES below). Promote it only after
+#                        these four are proven, and separately, so a regression
+#                        has one cause.
 #   pc/src/*             none of the three DC-compiled files is per-frame.
 #   src/static/dolphin/  the mtx tree is FILTERED OUT of this build entirely;
 #                        the linked PSMTX* are dc/src/dc_mtx.c's.
