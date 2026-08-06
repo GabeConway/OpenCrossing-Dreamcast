@@ -212,32 +212,164 @@ else
 endif
 
 # =============================================================================
-# Optimization level — READ kb/design-shelf-hazards.md §3.4 BEFORE CHANGING
+# Optimization — DC_OPT_PROFILE (KILL SWITCH: DC_OPT_PROFILE=o0)
 # =============================================================================
-# History on the armhf device build (pc/CMakeLists.txt:21-29):
-#   -O2 -> wild-pointer CRASH loop from boot (black screen with music)
-#   -O1 -> hard SIGBUS on the intro train scene
-#   no -O -> stable.
-# *** POLICY (2026-08-01, user decision): DECOMP GAME CODE STAYS AT -O0. ***
+# *** POLICY REVERSED 2026-08-06 BY USER DECISION. The old rule was "decomp
+# game code stays at -O0, settled, not a tuning parameter". It is now a tuning
+# parameter, and the default is NOT -O0. ***
 #
-# This is SETTLED, not a tuning parameter. The armhf history above is treated
-# as authoritative: the port is broken with optimization on. Do not raise
-# DECOMP_OPT, and do not propose raising it as a way to meet the RAM budget.
+# WHY THE OLD RULE EXISTED, and why it did not survive contact:
 #
-# For the record, measured on this tree at M1 (whole-tree rebuilds, sizes in
-# bytes) so nobody has to re-run it — these are REJECTED BY POLICY, recorded
-# only so the number is not mistaken for unknown:
-#     -O0  text 6,318,568   data 2,638,852   bss 13,526,548   total 22,483,968
-#     -O1  text 3,697,460   data 2,525,704   bss 13,526,164   total 19,749,328
-#     -Os  text 3,477,188   data 2,525,704   bss 13,526,132   total 19,529,024
-#     -O2  text 3,825,312   data 2,525,672   bss 13,526,132   total 19,877,116
-# Note that even -Os does NOT get under 16,777,216 — so optimization was never
-# sufficient on its own anyway. The budget has to come out of .bss.
+#   pc/CMakeLists.txt:21-29 records the armhf device build's history — -O2 gave
+#   a wild-pointer crash loop from boot, -O1 a hard SIGBUS on the intro train
+#   scene, no -O was stable. That history is REAL but it is ARM, a different
+#   compiler and a different ABI, and it was inherited into this port as policy
+#   without ever being reproduced on SH-4.
 #
-# NOTE: -O0 (not "empty") is required, because $KOS_CFLAGS already contains
-# -O2 and the LAST -O on the command line wins.
-DECOMP_OPT ?= -O0
-DC_OPT     ?= -O2
+#   The counter-argument, from the KOS/sh4zam maintainer (2026-08-06): GCC's
+#   SH-4 output at -O0 is not "unoptimized", it is pathological — dead branches
+#   still emit instructions, every local round-trips through memory, and whole
+#   codebases run at a third of their -O2 frame rate. -O0 costs more here than
+#   on any other target this decomp has been built for, and this port is
+#   CPU-bound with 77 % of its frame in decomp code.
+#
+# MEASURED ON THIS TREE, sh-elf GCC 15.2, 2026-08-06 (town keep list, stub
+# image, DC_SRC_SHRINK=1 — i.e. the shipping configuration, not M1's):
+#     -O0   text 5,506,964   data 2,337,980   bss 3,945,356
+#     -Os   text 2,680,676   data 2,224,832   bss 3,945,484
+# -Os is 2,826,288 B of .text cheaper, which is RAM as much as it is speed
+# (kb/closed.md: every image byte destroys a heap byte).
+#
+# THE SHAPE OF THE POLICY, and it is the one every major DC port uses: you want
+# -O3's speed on the frame path and -Os's size everywhere else, and 16 MB says
+# you cannot have -O3 everywhere. So:
+#
+#   DECOMP_OPT      -Os   every decomp TU (~3,900 of them: size is the budget)
+#   DECOMP_HOT_OPT  -O3   the reviewed hot list in dc/opt-lists.mk only
+#   -O0                   the QUARANTINE list in dc/opt-lists.mk — TUs that are
+#                         MEASURED to miscompile. Each entry needs a reason,
+#                         a date, and the run that caught it.
+#
+# PROFILES
+#   DC_OPT_PROFILE=perf  (default)  -Os everywhere, -O3 on the hot list
+#   DC_OPT_PROFILE=size             -Os everywhere, hot list gets -Os too.
+#                                   The lever to pull when the image will not
+#                                   fit; costs frame time, saves .text.
+#   DC_OPT_PROFILE=o0               -O0 everywhere, hot list and quarantine
+#                                   both inert. THE KILL SWITCH: this is a
+#                                   byte-identical revert to the pre-2026-08-06
+#                                   build, and it is what you bisect against
+#                                   when an optimized image misbehaves.
+#
+# DECOMP_OPT / DECOMP_HOT_OPT set in the environment still win over the
+# profile, so a one-off `DECOMP_OPT=-O1 bash dc/build-dc.sh` needs no edit here.
+#
+# NOTE: an explicit -O<n> (not "empty") is always required, because $KOS_CFLAGS
+# already contains -O2 and the LAST -O on the command line wins.
+DC_OPT_PROFILE ?= perf
+
+ifeq ($(DC_OPT_PROFILE),perf)
+  DECOMP_OPT     ?= -Os
+  DECOMP_HOT_OPT ?= -O3
+else ifeq ($(DC_OPT_PROFILE),size)
+  DECOMP_OPT     ?= -Os
+  DECOMP_HOT_OPT ?= -Os
+else ifeq ($(DC_OPT_PROFILE),o0)
+  DECOMP_OPT     ?= -O0
+  DECOMP_HOT_OPT ?= -O0
+else
+  $(error DC_OPT_PROFILE='$(DC_OPT_PROFILE)' is not one of: perf size o0)
+endif
+
+DC_OPT ?= -O2
+
+# Extra guards that only make sense once the optimizer is actually running.
+# They are appended to UB_GUARDS for decomp TUs and are EMPTY at -O0, so the
+# kill-switch profile stays byte-identical.
+#
+#   -fno-isolate-erroneous-paths-dereference
+#       On at -O2. It rewrites a path that provably dereferences NULL into a
+#       trap, on the theory that the path is unreachable. Decomp code reaches
+#       such paths for real (the game tolerated the read on GameCube), and a
+#       trap there is exactly the "wild-pointer crash from boot" shape the
+#       armhf record describes. Same intent as -fno-delete-null-pointer-checks,
+#       which is already in UB_GUARDS but does not cover this transform.
+#   -fno-ipa-icf
+#       Identical-code folding merges functions that compare equal. Harmless
+#       for correctness, but it makes a crash address ambiguous in
+#       harness/dc/crash.sh, and the whole point of this change is that we can
+#       triage what it breaks.
+#   -fno-ipa-sra
+#       IPA-SRA rewrites the calling convention of static functions whose
+#       parameters it can prove unused. The decomp defines 968 functions with
+#       K&R empty parameter lists and CALLS SOME OF THEM WITH ARGUMENTS —
+#       m_camera2.c:226 `static f32 Camera2_BorderSize()` is called
+#       `Camera2_BorderSize(play)` at :258,:259,:261 and nine more sites, on
+#       the per-frame camera path. That is real UB and IPA-SRA is the pass
+#       that acts on exactly this shape.
+#   -fno-store-merging
+#       On at -O2. It fuses adjacent narrow stores into one wide store, and
+#       SH-4 traps ANY misaligned mov.w/mov.l — there is no -mno-unaligned-
+#       access on this target (kb/design-shelf-flags.md §7). It was measured
+#       not to fire on GCC 9.3 and has NEVER been re-measured on our GCC 15.2,
+#       so this is insurance against an untested class, not a known bug.
+ifeq ($(DECOMP_OPT),-O0)
+  OPT_GUARDS :=
+else
+  OPT_GUARDS := -fno-isolate-erroneous-paths-dereference -fno-ipa-icf \
+                -fno-ipa-sra -fno-store-merging
+endif
+
+# DC_AUTOVAR_INIT=zero — force every uninitialised local to zero (GCC 12+).
+#
+# NOT a default, and the reason is that it is a DIAGNOSTIC first. Reading an
+# uninitialised local is the one UB class with no guard flag and a confirmed
+# instance in this tree (ac_npc_p_sel.c:141-148 reads `current_frame` from a
+# struct field that sAdos_GetStaffRollInfo's early return never writes —
+# kb/RESUME.md §5b). At -O0 such a read gets whatever was on the stack; at -Os
+# it gets whatever VRP decided, and the two differ.
+#
+# So when an optimized image misbehaves, build it again with
+# DC_AUTOVAR_INIT=zero: if the symptom disappears, the bug is an uninitialised
+# read and the warnscan log names the candidates. It costs .text and cycles on
+# every function with locals, which is why it is off in a shipping image.
+ifneq ($(DC_AUTOVAR_INIT),)
+  OPT_GUARDS += -ftrivial-auto-var-init=$(DC_AUTOVAR_INIT)
+endif
+
+# The hot list and the quarantine list live in their own file because they are
+# data with justifications attached, not build logic. They are resolved into
+# object paths (and validated) further down, after $(stubify)/$(shrinkify).
+include $(DC_DIR)/opt-lists.mk
+
+# =============================================================================
+# WARNSCAN — enumerate the UB that optimization is allowed to punish
+# =============================================================================
+# `make -C dc warnscan` (or DC_TARGET=warnscan bash dc/build-dc.sh) recompiles
+# every TU at -O2 with the warning suppression REMOVED, into a throwaway
+# objdir, and leaves the log at dc/build/warnscan.log.
+#
+# WHY IT EXISTS. The decomp is compiled with -w -fpermissive -Wno-return-type,
+# so the two diagnostics that predict an optimization miscompile are silenced
+# by construction:
+#   * control reaches end of non-void function — UB, and in the four TUs
+#     compiled as C++ (CXXFROMC_SRC, emu64.c among them) G++ turns it into
+#     __builtin_unreachable and deletes the path at -O2.
+#   * may be used uninitialised — the port has already been bitten by one of
+#     these for real (ac_npc_p_sel.c:141-148, kb/RESUME.md §5b).
+# A quarantine list built from this scan is evidence; one built from bisecting
+# crashes costs a run per candidate.
+#
+# It is a separate objdir on purpose: warnscan objects are -O2 regardless of
+# profile and must never be linked or mistaken for build output.
+WARNSCAN_FLAGS := -Wreturn-type -Wuninitialized -Wmaybe-uninitialized \
+	-Warray-bounds -Wstrict-aliasing=2 -Wsequence-point -Wnonnull \
+	-Wno-error=return-type
+ifeq ($(WARNSCAN),1)
+  DECOMP_QUIET :=
+else
+  DECOMP_QUIET := -w
+endif
 
 # =============================================================================
 # Link-time dead-section elimination (KILL SWITCH: DC_GC_SECTIONS=0)
@@ -757,13 +889,20 @@ C_ONLY_DEFINES := -Dnullptr=NULL
 # Decomp uses K&R empty parameter lists: `void f() {}` against a prototype
 # `void f(int,int)`. Under C99+ that is a type conflict; under gnu89 it is
 # "unspecified args" and compatible. Hence gnu89 for decomp C by default.
-DECOMP_C_LANG    := -w -std=gnu89 -fpermissive -Wno-return-type -Wno-error=return-type
+#
+# $(DECOMP_QUIET) is `-w` in a normal build and EMPTY under WARNSCAN=1. It has
+# to be a variable rather than a literal because GCC's -w sets a global
+# inhibit that no later -W option can undo, so the scan cannot simply append
+# warnings to these lines. -Wno-return-type stays put: $(WARNSCAN_FLAGS) is
+# appended to TU_OPT, which the COMPILE rule places AFTER TU_LANG, so the
+# scan's -Wreturn-type is the last word and wins.
+DECOMP_C_LANG    := $(DECOMP_QUIET) -std=gnu89 -fpermissive -Wno-return-type -Wno-error=return-type
 # jaudio_NES / emu64 carry PC-port additions using C99/C11 features.
-DECOMP_C11_LANG  := -w -std=gnu11 -fpermissive -Wno-return-type -Wno-error=return-type
+DECOMP_C11_LANG  := $(DECOMP_QUIET) -std=gnu11 -fpermissive -Wno-return-type -Wno-error=return-type
 # §3.3: VERIFIED that no kept C++ TU uses throw/try/catch/typeid/dynamic_cast,
 # so -fno-exceptions -fno-rtti (KOS_CPPFLAGS convention) are safe and save
 # a meaningful slice of the 16 MB budget.
-DECOMP_CXX_LANG  := -w -fpermissive -fno-exceptions -fno-rtti
+DECOMP_CXX_LANG  := $(DECOMP_QUIET) -fpermissive -fno-exceptions -fno-rtti
 
 # dc/src is code we own: warn on it.
 DC_WARN := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-comment \
@@ -962,8 +1101,52 @@ COMMON  = $(INCLUDES) $(PRELUDE) $(DEFINES) $(GC_CFLAGS)
 $(OBJS): TU_CC    = $(KCC)
 $(OBJS): TU_XLANG =
 $(OBJS): TU_LANG  = $(DECOMP_C_LANG) $(C_ONLY_DEFINES)
-$(OBJS): TU_OPT   = $(DECOMP_OPT) $(UB_GUARDS)
+$(OBJS): TU_OPT   = $(DECOMP_OPT) $(UB_GUARDS) $(OPT_GUARDS)
 $(OBJS): TU_DEFS  =
+
+# =============================================================================
+# The two optimization lists (dc/opt-lists.mk) — resolved and CHECKED here
+# =============================================================================
+# Spelled through both rewriters for the reason the -Dmain= rules below spell
+# it out: a per-TU rule is keyed on the OBJECT path, and $(stubify)/$(shrinkify)
+# change it. A list entry naming a file that a rewriter emits would otherwise
+# land on an object nobody builds, and the TU would silently keep the default
+# flags — the exact failure mode that left G1 unrun (kb/RESUME.md session 3).
+#
+# THE CHECK IS THE POINT. An entry that matches no object in this build is an
+# error, not a no-op: these lists are how a hot file gets its -O3 and how a
+# miscompiling file gets its -O0, and both fail SILENTLY and PLAUSIBLY when the
+# path is stale. (A file the PC filters exclude, or a path typo, both land
+# here.)
+resolve_tu = $(addprefix $(OBJDIR)/,$(addsuffix .o,$(call shrinkify,$(call stubify,$(1)))))
+
+OPT_HOT_OBJS        := $(call resolve_tu,$(OPT_HOT_SRC))
+OPT_QUARANTINE_OBJS := $(call resolve_tu,$(strip $(OPT_QUARANTINE_SRC)))
+
+OPT_HOT_BAD  := $(filter-out $(OBJS),$(OPT_HOT_OBJS))
+OPT_QUAR_BAD := $(filter-out $(OBJS),$(OPT_QUARANTINE_OBJS))
+ifneq ($(OPT_HOT_BAD),)
+  $(error dc/opt-lists.mk: OPT_HOT_SRC names $(words $(OPT_HOT_BAD)) file(s) \
+          this build does not compile: $(patsubst $(OBJDIR)/%.o,%,$(OPT_HOT_BAD)))
+endif
+ifneq ($(OPT_QUAR_BAD),)
+  $(error dc/opt-lists.mk: OPT_QUARANTINE_SRC/DC_OPT_O0_EXTRA names \
+          $(words $(OPT_QUAR_BAD)) file(s) this build does not compile: \
+          $(patsubst $(OBJDIR)/%.o,%,$(OPT_QUAR_BAD)))
+endif
+
+# ORDER IS LOAD-BEARING, and it is the same rule the TU_LANG overrides above
+# rely on: for one target and one variable, the LAST target-specific assignment
+# wins. So hot beats the default, and quarantine beats hot. A file on both
+# lists is therefore quarantined, which is the safe direction.
+$(OPT_HOT_OBJS):        TU_OPT = $(DECOMP_HOT_OPT) $(UB_GUARDS) $(OPT_GUARDS)
+$(OPT_QUARANTINE_OBJS): TU_OPT = -O0 $(UB_GUARDS)
+
+# WARNSCAN=1 forces every decomp TU to -O2 (most of these warnings need the
+# optimizer's dataflow to fire at all) and appends the warning set last.
+ifeq ($(WARNSCAN),1)
+$(OBJS): TU_OPT = -O2 $(UB_GUARDS) $(OPT_GUARDS) $(WARNSCAN_FLAGS)
+endif
 
 # gnu11 decomp C (jaudio_NES + emu64 dirs).
 $(C11_OBJS): TU_LANG = $(DECOMP_C11_LANG) $(C_ONLY_DEFINES)
@@ -1156,7 +1339,9 @@ FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DC_AUDIO=$(DC_AUDIO) DC_BGTEX_DEMAND=$(DC_BGTEX_DEMAND) \
              DC_NPCTEX_POOL=$(DC_NPCTEX_POOL) \
              DC_NPCMDL_POOL=$(DC_NPCMDL_POOL) \
-             DECOMP_OPT=$(DECOMP_OPT) \
+             DC_OPT_PROFILE=$(DC_OPT_PROFILE) \
+             DECOMP_OPT=$(DECOMP_OPT) DECOMP_HOT_OPT=$(DECOMP_HOT_OPT) \
+             OPT_HOT=$(OPT_HOT_SRC) OPT_QUAR=$(strip $(OPT_QUARANTINE_SRC)) \
              DC_OPT=$(DC_OPT) DEFINES=$(DEFINES)
 
 ifneq ($(FLAGSTATE),$(strip $(shell cat $(FLAGSTAMP) 2>/dev/null)))
@@ -1167,7 +1352,7 @@ endif
 # =============================================================================
 # Rules
 # =============================================================================
-.PHONY: all objs clean sources count help
+.PHONY: all objs clean sources count help warnscan optreport
 .SUFFIXES:
 
 all: $(TARGET)
@@ -1187,6 +1372,30 @@ objs: $(OBJS)
 
 help:
 	@sed -n '2,30p' $(firstword $(MAKEFILE_LIST))
+
+# What flags a build is actually using. One line, cheap, and the thing to paste
+# into a state-log entry — the stamp is authoritative but not readable.
+optreport:
+	@echo "DC_OPT_PROFILE = $(DC_OPT_PROFILE)"
+	@echo "DECOMP_OPT     = $(DECOMP_OPT)     ($(words $(OBJS)) TUs, minus the two lists)"
+	@echo "DECOMP_HOT_OPT = $(DECOMP_HOT_OPT) ($(words $(OPT_HOT_OBJS)) TUs)"
+	@echo "quarantined -O0: $(words $(OPT_QUARANTINE_OBJS)) TUs $(strip $(OPT_QUARANTINE_SRC))"
+	@echo "DC_OPT         = $(DC_OPT)     (dc/src, $(words $(DC_C_OBJS) $(DC_CXX_OBJS)) TUs)"
+	@echo "UB_GUARDS      = $(UB_GUARDS)"
+	@echo "OPT_GUARDS     = $(OPT_GUARDS)"
+
+# See the WARNSCAN block near the top. Recursive because it needs DECOMP_QUIET
+# empty at PARSE time, and because its objects must not pollute $(OBJDIR).
+# -k so one hard error does not truncate the scan; the log is the artefact and
+# a nonzero rc here is expected and ignored.
+warnscan:
+	@echo "== warnscan: recompiling every TU at -O2 with warnings ON =="
+	@mkdir -p $(BUILD)
+	-$(MAKE) -C $(DC_DIR) -k -j$(or $(JOBS),4) WARNSCAN=1 \
+	    OBJDIR=$(BUILD)/warnobj objs > $(BUILD)/warnscan.log 2>&1
+	@rm -rf $(BUILD)/warnobj
+	@echo "== warnscan: $(BUILD)/warnscan.log =="
+	@grep -c 'warning:' $(BUILD)/warnscan.log || true
 
 TU_POST = true
 COMPILE = $(Q)mkdir -p $(@D) && $(TU_CC) $(TU_XLANG) $(COMMON) $(TU_DEFS) $(TU_LANG) $(TU_OPT) \

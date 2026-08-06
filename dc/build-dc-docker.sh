@@ -65,11 +65,16 @@ if [ $RC -ne 0 ]; then
     exit $RC
 fi
 
-# `objs` deliberately does not link, so there is nothing to package.
-if [ "$DC_TARGET" = "objs" ]; then
-    echo "-- DC_TARGET=objs: compile-only run, skipping link + CDI."
-    exit 0
-fi
+# `objs` deliberately does not link, so there is nothing to package. Same for
+# the diagnostic targets: `warnscan` compiles into a throwaway objdir it then
+# deletes, and `optreport` only prints. Any of them followed by the link step
+# would either relink stale objects or fail on a missing ELF.
+case "$DC_TARGET" in
+    objs|warnscan|optreport|count|sources)
+        echo "-- DC_TARGET=$DC_TARGET: no link step, skipping CDI."
+        exit 0
+        ;;
+esac
 
 if [ ! -f "$ELF" ]; then
     echo "ERROR: $ELF was not produced." >&2

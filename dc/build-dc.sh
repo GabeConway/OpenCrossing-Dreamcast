@@ -211,6 +211,22 @@ ENVARGS=(
 [ -n "${DECOMP_OPT+x}" ] && ENVARGS+=(-e DECOMP_OPT="$DECOMP_OPT")
 [ -n "${DC_OPT+x}"     ] && ENVARGS+=(-e DC_OPT="$DC_OPT")
 [ -n "${V+x}"          ] && ENVARGS+=(-e V="$V")
+# The optimization profile (dc/Makefile's DC_OPT_PROFILE block, dc/opt-lists.mk).
+# Forward-only for the same reason as everything else here: dc/Makefile picks
+# DECOMP_OPT/DECOMP_HOT_OPT from the profile with ?=, and an empty -e would make
+# the variable "defined" in the container, blanking the default so $KOS_CFLAGS'
+# own -O2 wins silently.
+#
+#   DC_OPT_PROFILE=o0 bash dc/build-dc.sh      # the kill switch, byte-identical
+#                                              # to the pre-2026-08-06 build
+#   DC_OPT_PROFILE=size bash dc/build-dc.sh    # -Os even on the hot list
+#   DC_OPT_O0_EXTRA='src/a.c src/b.c' ...      # quarantine while bisecting
+[ -n "${DC_OPT_PROFILE+x}" ] && ENVARGS+=(-e DC_OPT_PROFILE="$DC_OPT_PROFILE")
+[ -n "${DECOMP_HOT_OPT+x}" ] && ENVARGS+=(-e DECOMP_HOT_OPT="$DECOMP_HOT_OPT")
+[ -n "${DC_OPT_O0_EXTRA+x}" ] && ENVARGS+=(-e DC_OPT_O0_EXTRA="$DC_OPT_O0_EXTRA")
+# The uninitialised-local diagnostic. DC_AUTOVAR_INIT=zero when an optimized
+# image misbehaves; if the symptom goes away the bug is an uninitialised read.
+[ -n "${DC_AUTOVAR_INIT+x}" ] && ENVARGS+=(-e DC_AUTOVAR_INIT="$DC_AUTOVAR_INIT")
 
 # DC_DISC_ROOT=<dir> puts real game data on the disc. The directory is mounted
 # read-only at /discroot and handed to mkdcdisc with -d, so its contents land at

@@ -14,12 +14,16 @@ read the whole `kb/` tree, read the one file the table points at.
 ## 1. Hard rules — violating these breaks the port
 
 - **Stock 16 MB RAM.** A 32 MB mod exists; it must never become a requirement.
-- **`src/` builds at `-O0`. `-O1`/`-O2`/`-Os`/LTO are banned** — user
-  directive, not a preference: "the optimizations cause problems and we cant
-  use them without the port being broken." Do not propose optimization as a
-  size or speed lever, and do not benchmark it as one. **Codegen is banned;
-  layout is fair game** — `--gc-sections`, `.bss` right-sizing, linker
-  placement, moving data to `/cd`, dropping subsystems.
+- **`src/` builds at `-Os`, with a reviewed hot list at `-O3`.** ⚠️ **THIS
+  REVERSES THE OLD `-O0` RULE (2026-08-06, user directive).** The ban came
+  from the armhf port's history and was never reproduced on SH-4; measured on
+  this tree, `-Os` costs **2,826,288 B less `.text`** and took the town from
+  **11.6 to 18.5 FPS**, and the `-O3` hot list took it to **20.0**. The knob is
+  `DC_OPT_PROFILE` (`perf` | `size` | `o0`), the lists are `dc/opt-lists.mk`,
+  and `DC_OPT_PROFILE=o0` is a byte-identical revert. Optimization is now a
+  first-class lever for BOTH speed and RAM — but every raise needs a screenshot
+  pair, not just counters, and a TU proven to miscompile goes on the quarantine
+  list with its evidence rather than dragging the whole tree back to `-O0`.
 - **Never edit `src/` to make it compile.** Compat fixes go in
   `dc/include/dc_prelude.h`, which is force-included. All 3917 TUs build this
   way with zero exclusions. `src/` carries exactly **four** small
@@ -108,7 +112,7 @@ already produced two wrong numbers.
 | `kb/heap-two-pools.md` | the arena-vs-sbrk rule. **Read before touching `DC_ARENA_BYTES` / `DC_ARAM_WINDOW`** |
 | `kb/plan-stages.md` | the agreed S1→S5 RAM plan and the reasoning behind each step |
 | `kb/levers.md` | **the ranked RAM ledger** — applied cuts, and every lever still live |
-| `kb/closed.md` | settled questions: `-O0`, MMU paging (dead), `--icf`, emu64-is-not-an-emulator, strip/compress = 0 |
+| `kb/closed.md` | settled questions: MMU paging (dead), `--icf`, emu64-is-not-an-emulator, strip/compress = 0 — **and the `-O0` post-mortem, the one entry this file got wrong** |
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
 | `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
@@ -121,7 +125,9 @@ already produced two wrong numbers.
 
 | file | contents |
 |---|---|
-| `BUILDING-DC.md` | **the DC build**: entry points, make targets, env knobs, flag assembly, include-path order, prelude, troubleshooting |
+| `BUILDING-DC.md` | **the DC build**: entry points, make targets, env knobs, flag assembly, include-path order, prelude, troubleshooting. Its optimization section is now `DC_OPT_PROFILE`, not the old `-O0` rule |
+| `dc/opt-lists.mk` | **the `-O3` hot list and the `-O0` quarantine list**, each entry with the measurement or symptom that earned it. Read before adding either; a stale entry is a hard error, not a no-op |
+| `tools/dcopt/` | `warnscan_report.py` reduces the `make warnscan` log to the UB classes an optimizer can act on; `bisect_o0.sh` + `predicate_town.sh` binary-search a miscompiling TU through `DC_OPT_O0_EXTRA` |
 | `harness/dc/README.md` | Flycast harness: setup, the scripts, guest-side protocol, env overrides, known limits |
 | `tools/dcqa/run_report.py` | **the regression gate.** Reduces a `console.log` to the ~20 numbers a "did this get worse" call rests on; `--vs` diffs two runs. A game smoke run always exits 1, so this is the verdict, not the exit code. ⚠️ It is the FLOOR — it cannot see colour, so judge a renderer change on a screenshot pair |
 | `kb/design-toolchain.md` | **index** to the M0 toolchain docs below. Everything is tagged [VERIFIED]/[UNVERIFIED] |

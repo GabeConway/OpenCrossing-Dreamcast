@@ -6,6 +6,47 @@ true *right now*, plus what to do next. Everything else is one hop away.
 it carries the build lines and the eight measurement rules; this file is the
 numbers and the queue.
 
+## ⭐⭐ 2026-08-06 — THE `-O0` BAN IS REVERSED. 2.8 MB OF `.text` AND +8 FPS
+## FROM ONE FLAG, AND THE `dc/` CONTROL PHASE DID NOT MOVE
+
+`src/` builds at **`-Os`, with 14 hot TUs at `-O3`** (`DC_OPT_PROFILE=perf`,
+the default). `DC_OPT_PROFILE=o0` is a byte-identical revert. Lists and
+justifications: `dc/opt-lists.mk`. Evidence: `kb/state-log.md`, top entry.
+
+Matched town windows, same acre, `v` within 2 %:
+
+| | `-O0` | `-Os` | **`-Os` + `-O3` hot** |
+|---|---:|---:|---:|
+| `.text` | 5,506,964 | 2,680,676 | **2,729,152** |
+| town FPS | 11.6 | 18.5 | **20.0** |
+| `draw` ms | 79.1 | 50.3 | **46.8** |
+| logic tick ms | 6.6 | 3.3 | **2.8** |
+| `xform` ms (`dc/`, `-O2` throughout — THE CONTROL) | 13.1 | 12.9 | 12.4 |
+| whole-run FPS p50 | 24.5 | 29.8 | 29.8 (capped) |
+
+- **`.text` −2,826,288 B** — bigger than every `.bss` lever this project has
+  landed, combined. Optimization is now a RAM lever as well as an FPS lever.
+- Screenshot-gated: two 900 s `DC_AUTOWALK` runs differing only in
+  `DC_OPT_PROFILE`, frame-matched at the train, the town, the house tour and
+  K.K. — same image. `ASSET MISSING 0`, `crashes=0`, `run_report --vs` clean.
+- ⚠️ **`shot_diff.py` cannot gate an optimization change** — the probe fires per
+  presented frame and the faster build is at a different point in the same
+  camera pan. Compare scenes, not pixels. (`kb/state-log.md`.)
+- ⚠️ **Nothing here has run on hardware.** And the emulator UNDERSTATES this
+  change: Flycast models no instruction cache, and this removed 2.8 MB of
+  `.text`.
+
+**Why it stood for five weeks:** the ban was armhf evidence, never reproduced
+on SH-4, never isolated from a simultaneous NEON/cpu-target change, and its
+most likely real cause was a missing `JUTRomFont::spFontHeader_` definition —
+a LINK bug. `kb/closed.md` carries the full post-mortem.
+
+**The old FPS arithmetic below is now wrong in its absolute numbers.** The
+78.3 ms frame it decomposes is 46.8 ms today, and the `src/`-vs-`dc/` split
+has moved sharply toward `dc/`: `xform` was 15.6 % of the draw phase and is now
+~27 %. ⚠️ **G1 must be re-run before any FPS plan is costed again** — every
+per-opcode number in this file was measured at `-O0`.
+
 ## ⭐ 2026-08-05 — G1 RAN. ONE OPCODE IS 28 % OF THE TOWN FRAME, and it is not
 ## the one every plan was costing against
 

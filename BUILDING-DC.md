@@ -99,7 +99,11 @@ colima (4 cores), `-j4`:
 | `DC_NPCTEX_POOL` | `1` | **R2** — the 236 villager texture sets (993,984 B) are served out of 16 static slots read off `/cd/foresta.rel` (`dc/src/dc_npctex.c`) instead of living in `.bss`. A town holds at most `ANIMAL_NUM_MAX`=15 villagers + 1 islander, so 16 slots is the provable ceiling; the keep list was paying 90,464 B for the 21 sets a census saw and leaving the other 215 species untextured. ⚠️ The SPECIAL NPCs (rows ≥ `ALL_NPC_NUM` — Tom Nook, Rover, K.K., Porter, the raccoons) are **not** pooled and stay on the keep list. `0` restores those 21 keep-list entries and inserts no calls. One value drives both `tools/dcstub` generators and the `-D`; all three generated TUs `#error` if they disagree |
 | `DC_NPCTEX_SLOTS` | `16` | R2's slot count, 4,832 B of `.bss` each. Raise it only against a `[DC/NPCTEX] POOL FULL` line — that is an event/mask NPC borrowing a villager row, which the 15+1 ceiling does not count |
 | `DC_DISC_ROOT` | unset | a directory whose files go on the disc **flat** |
-| `DECOMP_OPT` | `-O0` | optimization level for decomp game code |
+| `DC_OPT_PROFILE` | `perf` | `perf` = `-Os` + `-O3` on `dc/opt-lists.mk`'s hot list · `size` = `-Os` everywhere · **`o0` = byte-identical revert to the pre-2026-08-06 build**. See the optimization section below |
+| `DECOMP_OPT` | from profile | optimization level for decomp game code; overrides the profile |
+| `DECOMP_HOT_OPT` | from profile | optimization level for the hot list; overrides the profile |
+| `DC_OPT_O0_EXTRA` | unset | extra sources forced to `-O0` without editing `dc/opt-lists.mk`. The bisecting knob (`tools/dcopt/bisect_o0.sh`) |
+| `DC_AUTOVAR_INIT` | unset | `zero` → `-ftrivial-auto-var-init=zero`. The A/B for the 99 uninitialised reads the warnscan found |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
 | `DC_ARENA_BYTES` | header | arena size (bucket 6). **Shrink, never grow** — it competes with libc |
 | `DC_ARAM_WINDOW` | header | resident graph-ARAM window. Floor 851,968 (`forest_1st.arc`) |
@@ -257,7 +261,7 @@ DC_XDEFS='-DDC_PVR_NO_UVCLAMP' bash dc/build-dc.sh
 DC_TARGET=objs bash dc/build-dc.sh     # compile-only
 DC_CDI_PAD=1   bash dc/build-dc.sh     # CD-R burn image
 JOBS=8         bash dc/build-dc.sh
-DECOMP_OPT=-O2 bash dc/build-dc.sh     # see the warning below
+DC_OPT_PROFILE=o0 bash dc/build-dc.sh   # the -O0 kill switch
 DC_ASSET_STUB=1 bash dc/build-dc.sh    # bring-up image that actually boots
 ```
 
@@ -342,35 +346,90 @@ Streaming numbers measured against an unpadded image are optimistic.
 
 ---
 
-## Optimization level — `-O0`, and this is not a tunable
+## Optimization — `DC_OPT_PROFILE`, and it is now the biggest lever in the build
 
-**Project directive (2026-08-01): raising `DECOMP_OPT` is banned.** Verbatim:
-*"the optimizations cause problems and we cant use them without the port being
-broken."* This is a decision, not a default to be revisited by whoever next
-looks at the binary size. Do not propose `-O1`/`-O2`/`-Os`/LTO as a size or
-speed lever, and do not benchmark it as one.
+⚠️ **REVERSED 2026-08-06 by user decision.** This section used to say raising
+`DECOMP_OPT` was banned. It is not. Measured on this tree, `-Os` cut `.text`
+by **2,826,288 B** and took the town from **11.6 to 18.5 FPS**; a 14-TU `-O3`
+hot list took it to **20.0**. The post-mortem on why the ban stood — armhf
+evidence, never reproduced on SH-4, never isolated from a simultaneous NEON
+change, most likely a link bug — is in `kb/closed.md`.
 
-The history is in `pc/CMakeLists.txt:21-29`: `-O2` → wild-pointer crash loop
-from boot; `-O1` → SIGBUS on the intro train scene; no `-O` → stable. An
-earlier draft of this file argued those data points were confounded and that
-`-O2`'s 48 % `.text` cut (~3 MB) might make it "a budget requirement, not an
-optimization." **That argument is retired.** A 3 MB saving on an image that
-does not run is worth nothing, and the RAM plan (PLAN §3.1) is built entirely
-from layout-class levers instead.
+```bash
+bash dc/build-dc.sh                        # perf profile: -Os + -O3 hot list
+DC_OPT_PROFILE=size bash dc/build-dc.sh    # -Os everywhere, for when it won't fit
+DC_OPT_PROFILE=o0   bash dc/build-dc.sh    # THE KILL SWITCH: byte-identical revert
+```
 
-What is allowed, because it does not change instruction selection:
-`-ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, `.bss`
-right-sizing, linker script placement, moving data to `/cd`, and dropping
-non-goal subsystems. Codegen is banned; layout is fair game.
+| profile | decomp default | hot list | when |
+|---|---|---|---|
+| `perf` (default) | `-Os` | `-O3` | normal builds |
+| `size` | `-Os` | `-Os` | the image is over budget; trades frame time for `.text` |
+| `o0` | `-O0` | `-O0` | bisecting a suspected miscompile; the guaranteed-good state |
 
-`DECOMP_OPT` remains settable only as a diagnostic escape hatch — e.g. to
-confirm that a suspected miscompile is optimization-dependent. `-O0` here
-literally means `-O0`, not "omit `-O`": `$KOS_CFLAGS` already carries `-O2`
-and the last `-O` on the command line wins.
+**The two lists live in `dc/opt-lists.mk`**, each entry with its evidence:
 
-**Gate, if a per-TU exception is ever argued on measured evidence:** a full
-new-game intro on hardware (KK Slider → train → town arrival). That is the
-sequence that historically exposed the alignment bug class.
+* `OPT_HOT_SRC` — 14 TUs at `-O3`. Costs **+48,476 B** of `.text` over flat
+  `-Os` and buys 3.5 ms. It is short on purpose: `emu64.c` is most of the
+  frame, and **every other `src/` TU shares the ~2.8 ms logic tick**, so a
+  perfect 2× on all of them together is worth well under 1 FPS.
+* `OPT_QUARANTINE_SRC` — TUs forced to `-O0` because they are *measured* to
+  miscompile. Empty today.
+
+**A list entry that matches no TU in the build is a hard error**, not a silent
+no-op — the same failure mode that left G1 unrun for two sessions.
+
+`DECOMP_OPT` / `DECOMP_HOT_OPT` in the environment still override the profile.
+`-O0` there literally means `-O0`, not "omit `-O`": `$KOS_CFLAGS` already
+carries `-O2` and the last `-O` on the command line wins.
+
+### The guard set is what makes this legal
+
+`UB_GUARDS` (unchanged) plus `OPT_GUARDS`, which is empty at `-O0`:
+
+| flag | why |
+|---|---|
+| `-fno-isolate-erroneous-paths-dereference` | stops GCC turning a tolerated NULL deref into a trap — the exact shape of the armhf "wild pointer from boot" report |
+| `-fno-ipa-sra` | the decomp defines 968 functions with K&R `()` parameter lists and calls some of them WITH arguments (`m_camera2.c:226`, called `(play)` at `:258`). IPA-SRA rewrites exactly those calling conventions |
+| `-fno-store-merging` | SH-4 traps *any* misaligned `mov.w`/`mov.l`; there is no `-mno-unaligned-access` on this target |
+| `-fno-ipa-icf` | keeps a crash address attributable to one function, so `harness/dc/crash.sh` stays useful |
+
+### When an optimized image misbehaves
+
+Work down this list; the first two are single builds at 96 s each.
+
+```bash
+DC_OPT_PROFILE=o0 bash dc/build-dc.sh        # 1. is it optimization at all?
+DC_AUTOVAR_INIT=zero bash dc/build-dc.sh     # 2. is it an uninitialised read?
+                                             #    (99 of them; -O0 and -Os
+                                             #     disagree about their value)
+DC_OPT_O0_EXTRA='src/static/libforest/emu64/emu64.c' bash dc/build-dc.sh
+                                             # 3. is it the display list?
+DECOMP_HOT_OPT=-O2 bash dc/build-dc.sh       # 4. -O3 is unproven on emu64.c;
+                                             #    -O2 on it is device-verified
+```
+
+Then bisect properly:
+
+```bash
+DC_TARGET=warnscan bash dc/build-dc.sh                 # ~132 s, all TUs at -O2
+python3 tools/dcopt/warnscan_report.py dc/build/warnscan.log
+python3 tools/dcopt/warnscan_report.py dc/build/warnscan.log --paths > /tmp/cand.txt
+bash tools/dcopt/bisect_o0.sh /tmp/cand.txt
+```
+
+`warnscan` recompiles every TU at `-O2` with the decomp's `-w` removed, into a
+throwaway objdir it then deletes. It exists because the two diagnostics that
+predict a miscompile are silenced by construction in a normal build: a missing
+return (35 of them, and in the four TUs compiled as C++ that is a path G++
+DELETES) and an uninitialised read.
+
+**A culprit found by bisect goes into `OPT_QUARANTINE_SRC` with its evidence —
+the symptom, the run directory and the date — not back into a tree-wide `-O0`.**
+
+**Gate on any raise, unchanged from the old section:** a full new-game intro
+(K.K. → train → town arrival), and a screenshot pair. `run_report.py` is the
+floor and cannot see colour.
 
 ---
 

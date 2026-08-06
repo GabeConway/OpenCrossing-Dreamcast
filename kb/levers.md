@@ -1,5 +1,28 @@
 # RAM levers — the ranked ledger
 
+## ⭐ L0 — OPTIMIZATION, APPLIED 2026-08-06. −2,826,288 B of `.text`
+
+**Bigger than every other lever in this file put together, and it was banned
+until this session.** `src/` at `-Os` (`DC_OPT_PROFILE=perf`, the default):
+
+```
+.text  5,506,964 -> 2,680,676     (-2,826,288)
+.data  2,337,980 -> 2,224,832     (-113,148)
+.bss   3,945,356 -> 3,945,484     (+128, noise)
+```
+
+The 14-TU `-O3` hot list then spends **+48,476 B** of that back for 3.5 ms of
+frame time. `DC_OPT_PROFILE=size` gives it up again if an image will not fit;
+`DC_OPT_PROFILE=o0` is the byte-identical revert.
+
+⚠️ **EVERY NUMBER BELOW THIS LINE WAS COSTED AGAINST A 5.5 MB `.text` IMAGE.**
+The fit inequality, the `margin=` readings, and every "does X fit" verdict in
+this file and in `kb/ram-plan.md` predate a 2.83 MB image shrink. Re-measure
+before spending it — and read rule 6 first (`margin=` is not headroom).
+
+Evidence: `kb/state-log.md` 2026-08-06. Post-mortem on the ban: `kb/closed.md`.
+
+
 Every way found so far to close the RAM gap, with status. **Read this before
 planning any size work.** Read `kb/closed.md` before *proposing* any — several
 obvious ideas are already dead.

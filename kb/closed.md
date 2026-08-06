@@ -9,19 +9,60 @@ gotchas).
 
 ---
 
-## The `-O0` directive — settled by the user, not by engineering
+## ⚠️ THE `-O0` DIRECTIVE IS REOPENED AND REVERSED (2026-08-06)
 
-> "the optimizations cause problems and we cant use them without the port
-> being broken"
+**This entry is kept, struck through, because it is the largest thing this file
+ever got wrong and the shape of the error is worth keeping.**
 
-**`-O1` / `-O2` / `-Os` / LTO are banned.** Not "risky" — banned, by user
-decision. The armhf record is why: `-O2` gave a wild-pointer crash loop from
-boot, `-O1` a hard SIGBUS on the intro train scene.
+> ~~"the optimizations cause problems and we cant use them without the port
+> being broken"~~
+>
+> ~~**`-O1` / `-O2` / `-Os` / LTO are banned.** Not "risky" — banned, by user
+> decision. The armhf record is why: `-O2` gave a wild-pointer crash loop from
+> boot, `-O1` a hard SIGBUS on the intro train scene. Do not propose or
+> benchmark optimization as a size or speed lever. That argument has been had
+> and retired.~~
 
-Do not propose or benchmark optimization as a size or speed lever. That
-argument has been had and retired. If the levers do not close the gap, cutting
-content or declaring a stock-16 MB build infeasible are the honest options;
-quietly reopening this is not.
+**What is true now:** `src/` builds at `-Os`, with a 14-TU hot list at `-O3`.
+`DC_OPT_PROFILE` selects it, `dc/opt-lists.mk` holds the lists,
+`DC_OPT_PROFILE=o0` is a byte-identical revert. Measured on this tree
+(`kb/state-log.md`, 2026-08-06):
+
+| | `-O0` | `-Os` | `-Os` + `-O3` hot |
+|---|---:|---:|---:|
+| `.text` | 5,506,964 | 2,680,676 | 2,729,152 |
+| town FPS (matched window) | 11.6 | 18.5 | **20.0** |
+| `draw` ms | 79.1 | 50.3 | **46.8** |
+
+**Why the ban stood for five weeks, and the three lessons:**
+
+1. **It was ARM evidence applied to SH-4.** The whole record traces to one
+   armhf session on 2026-07-13 and survives only as a comment block in
+   `pc/CMakeLists.txt:21-29`. No log, no commit, no test case. It was never
+   reproduced on this target — and `kb/design-shelf-flags.md` §9 had already
+   said so ("Achievable, and probably mandatory"), in a document this file
+   overrode.
+2. **The armhf failure was never isolated.** `-O2` was changed together with
+   `-mcpu=cortex-a53 -mfpu=neon-vfpv4` (`pc/build-armhf-docker.sh:14`), so
+   auto-vectorisation and 64-bit VFP load/store were in the same experiment.
+   And upstream's own "compile everything at -O2" commit needed one line —
+   a missing definition of `JUTRomFont::spFontHeader_` — which is a *link*
+   bug that would present exactly as "wild pointer from boot". ⚠️ That symbol
+   is still undefined in this tree; it is absent from both ELFs because
+   `--gc-sections` drops its callers, and it is deliberately left undefined so
+   that an optimized build which starts referencing it fails LOUDLY at link
+   rather than dereferencing NULL.
+3. **"Settled" was doing work that "measured" should have done.** The entry
+   forbade *benchmarking*, which is what closed the question in 96 seconds the
+   day someone tried it. A user decision can settle a preference; it cannot
+   settle a fact about a compiler nobody had run.
+
+**What is still true from the old entry:** raising optimization is not free and
+not automatically safe. The decomp's UB is real — 35 missing returns, 99
+uninitialised reads, and heavy type-punning on the per-vertex path
+(`kb/state-log.md` has the scan). The guard set in `dc/Makefile` (`UB_GUARDS` +
+`OPT_GUARDS`) is what makes `-Os` legal, and the quarantine list is how a TU
+that miscompiles gets handled — not a tree-wide retreat.
 
 ## `-DTARGET_PC` is non-negotiable and must stay
 

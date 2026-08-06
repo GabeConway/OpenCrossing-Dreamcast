@@ -1,5 +1,23 @@
 # Traps already paid for — do not re-discover these
 
+## A full rebuild is 96 SECONDS, and nobody had measured it (2026-08-06)
+
+3,926 TUs, `JOBS=8`, colima on an M4. The `warnscan` variant is 132 s. Several
+plans in this kb are written as if a rebuild were expensive enough to avoid —
+they were costing a guess. A flag-stamp change forces a whole-tree rebuild and
+that is fine; bisecting a bad TU costs a run, not a build.
+
+## `shot_diff.py` CANNOT gate a change that alters the frame rate (2026-08-06)
+
+It scored an `-Os` build against an `-O0` build of the SAME source at
+24-78 % changed, with every scene visually identical. The probe fires every N
+**presented** frames, and the game runs a variable number of logic ticks per
+presented frame — so at probe index 60 the faster build is at a different point
+in the same camera pan. The tool is correct for a renderer change at a fixed
+frame rate; for an optimization change, compare the SCENES by eye, or build a
+probe that fires on a logic-tick count.
+
+
 Each one cost real debugging time. **Read this before touching the build, the
 harness, or the prelude.** These are mechanical gotchas, not design decisions —
 for those see `kb/closed.md`.

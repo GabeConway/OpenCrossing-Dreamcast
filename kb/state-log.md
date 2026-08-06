@@ -1,5 +1,149 @@
 # Session log — what was observed running, in order
 
+## ⭐ 2026-08-06 — THE `-O0` BAN WAS ARM EVIDENCE, AND IT COST 2.8 MB AND 8 FPS
+
+**Session 5, and the largest single result the project has had.** The user
+reversed the `-O0` directive on advice from the KOS/sh4zam maintainer: GCC's
+SH-4 output at `-O0` is not "unoptimized" but pathological, and no DC port
+ships that way. Every number below is from this tree, sh-elf GCC 15.2, the
+shipping build line (town keep list, `DC_ASSET_STUB=1`, `DC_SRC_SHRINK=1`,
+`DC_ARENA_BYTES=1200000`, audio off).
+
+### The measurement, in one table
+
+Matched town windows — same acre, `v` within 2 %, `cmds` within 3 %:
+
+| | `-O0` | `-Os` | `-Os` + `-O3` hot list |
+|---|---:|---:|---:|
+| `.text` | 5,506,964 | 2,680,676 | 2,729,152 |
+| `.data` | 2,337,980 | 2,224,832 | 2,224,832 |
+| `.bss` | 3,945,356 | 3,945,484 | 3,945,484 |
+| town FPS | 11.6 / 11.4 | 18.5 / 17.9 | **20.0 / 19.7** |
+| `draw` ms | 79.1 / 80.8 | 50.3 / 51.9 | **46.8 / 47.5** |
+| logic tick (`skip`) ms | 6.6 / 6.5 | 3.3 / 3.4 | **2.8 / 2.7** |
+| `xform` ms (`dc/`, already `-O2`) | 13.1 / 14.4 | 12.9 / 14.3 | 12.4 / 13.6 |
+| whole-run FPS p50 | 24.5 | 29.8 | 29.8 (at the cap) |
+
+**`xform` is the control and it did not move.** That is what proves the win is
+decomp code and not measurement drift: the phase this work could not touch —
+`dc/src/dc_pvr.c`, `-O2` before and after — stayed inside 4 % while the phase
+it did touch fell 41 %.
+
+**`.text` −2,826,288 B is the same size as roughly every `.bss` lever this
+project has landed put together.** It is RAM, not just speed (`kb/closed.md`:
+every image byte destroys a heap byte).
+
+Runs: `smoke-oc-dc-Os-20260806-121509-8620` (flat `-Os`),
+`smoke-oc-dc-perfprof-20260806-122605-10356` (`-Os` + `-O3` hot list),
+against `smoke-sh4math-20260805-204911-6201` (`-O0` baseline).
+`ASSET MISSING 0`, `crashes=0`, `ASSERT 0`, `ptdrop 0`, `LOST 0` on all three.
+`run_report.py --vs`: **no regression detected** on either.
+
+### The screenshot gate (rule 2 — counters cannot see colour)
+
+Two 900 s `DC_AUTOWALK` runs built from the SAME source with only
+`DC_OPT_PROFILE` differing: `smoke-oc-dc-shot-perf-20260806-123722-10646` and
+`smoke-oc-dc-shot-o0-20260806-123744-10710`, 108 and 84 probes decoded with
+`fbimg_to_png.py`. Frame-matched pairs at the train (Porter), the town (Tom
+Nook outside a house), the house tour, and the K.K. scene are the same image:
+same geometry, same textures, same balloon text, same lighting, and the same
+pre-existing black shadow wedges (TEV #007, still unfixed, unchanged).
+
+⚠️ **`shot_diff.py` IS NOT A VALID GATE ACROSS TWO OPTIMIZATION LEVELS, and
+this cost a confusing five minutes.** It scored the pairs at 24-78 % changed.
+The probe fires every N *presented* frames, but the game runs a variable number
+of logic ticks per presented frame, so the faster build is at a different point
+in the same camera pan at the same probe index. The pixels are not comparable;
+the SCENES are. Judge these by eye, or write a probe that fires on a logic-tick
+count. `run_report --vs` confirms the counter half:
+`pvr_dropped 1,314 → 1,300` and `aram_zero 7 → 7` — both pre-existing on the
+autowalk path, neither caused by optimization.
+
+### What the ban actually rested on
+
+Audited this session, and it does not survive:
+
+1. **It was never reproduced on SH-4.** The entire record is one armhf session
+   (2026-07-13) surviving as a comment in `pc/CMakeLists.txt:21-29`. No log,
+   no commit, no test case. `kb/design-shelf-flags.md` §9 had already called
+   `-O2` "achievable, and probably mandatory" on this target; `kb/closed.md`
+   overrode it with the ARM story.
+2. **The armhf `-O2` was never isolated** — it shipped together with
+   `-mcpu=cortex-a53 -mfpu=neon-vfpv4` (`pc/build-armhf-docker.sh:14`), i.e.
+   auto-vectorisation and 64-bit VFP load/store in the same change. The `-O1`
+   SIGBUS was attributed to "unaligned LDRD/VFP", which **cannot happen on
+   SH-4**: max alignment is 4 and there are no 64-bit integer loads.
+3. **Upstream's own "compile everything at -O2" commit needed one line** — a
+   definition for `JUTRomFont::spFontHeader_`, missing from the decomp. An
+   `-O2` build that starts referencing an undefined static pointer is an
+   extremely good match for "wild-pointer crash loop from boot". ⚠️ **That
+   symbol is still undefined in this tree** — absent from both ELFs because
+   `--gc-sections` drops its callers — and it is being left that way
+   deliberately: if an optimized build ever emits a reference, the linker
+   fails loudly instead of the game dereferencing NULL.
+4. **`-O2` on `emu64.c` was device-verified SAFE on armhf** (`kb/perf.md` #8:
+   train passes, crashes=0) — the same TU, and the same intro train scene the
+   `-O1` SIGBUS was blamed on.
+
+### What the decomp's UB actually looks like, measured
+
+`DC_TARGET=warnscan bash dc/build-dc.sh` recompiles all 3,926 TUs at `-O2`
+with the decomp's `-w` removed (132 s). 64,729 warnings; reduced by
+`tools/dcopt/warnscan_report.py` to the classes an optimizer can act on:
+
+```
+return-type=35 (in 30 files)   uninit=99   bounds=8   sequence=3   aliasing=0
+```
+
+- ✅ **`emu64.c` — the hot file, and one of the four TUs compiled as C++ — has
+  ZERO return-type warnings.** That is the single most reassuring line in the
+  scan: in C++ a missing return is UB that G++ turns into
+  `__builtin_unreachable` and deletes the path outright.
+- ⚠️ **`jammain_2.c` is the one file where both halves meet**: C++ *and* a
+  missing return *and* 22 uninitialised reads, the most in the tree. Not
+  quarantined, because at `DC_AUDIO=0` it never ticks — but it is the first
+  file to suspect the day the audio work starts.
+- The other 28 are ordinary C, where a missing return costs the caller a
+  garbage value rather than a deleted path, and the port walks the whole town
+  with all 35 outstanding.
+
+### What was built to make this safe rather than lucky
+
+| thing | what it is |
+|---|---|
+| `DC_OPT_PROFILE=perf\|size\|o0` | `perf` = `-Os` + `-O3` on the hot list (default); `size` = `-Os` everywhere, the lever for when the image will not fit; **`o0` = byte-identical revert** |
+| `dc/opt-lists.mk` | the `-O3` hot list (14 TUs) and the `-O0` quarantine list (empty), each entry with its evidence. A stale path is a **hard error**, not a silent no-op |
+| `OPT_GUARDS` | `-fno-isolate-erroneous-paths-dereference` (stops a tolerated NULL deref becoming a trap — the "wild pointer" shape), `-fno-ipa-sra` (the decomp calls 968 K&R `()` functions, some WITH arguments), `-fno-store-merging` (SH-4 traps any misaligned store), `-fno-ipa-icf` (keeps crash addresses unambiguous) |
+| `DC_AUTOVAR_INIT=zero` | the uninitialised-read A/B. If a symptom disappears under it, the bug is in the 99 |
+| `make warnscan` + `tools/dcopt/warnscan_report.py` | the scan above, and its reducer |
+| `tools/dcopt/bisect_o0.sh` + `predicate_town.sh` | binary search for a miscompiling TU via `DC_OPT_O0_EXTRA`, with both sanity gates (the failure must reproduce with nothing quarantined, and must vanish with everything quarantined) |
+
+### The hot list, and the arithmetic that keeps it short
+
+`-O3` on 14 TUs costs **+48,476 B** of `.text` over flat `-Os` and bought
+**3.5 ms** (18.5 → 20.0 FPS). It is short on purpose: the frameskipped tick
+runs ALL of `game_main` and skips only the draw, and it costs 2.8 ms against
+the drawn tick's 46.8 — so `emu64.c` is most of the frame and **every other
+`src/` TU in the port shares those 2.8 ms**. `m_player.c` (114,350 B of
+`.text`, the largest object in the image) and `m_collision_bg.c` are
+deliberately NOT on the list for that reason.
+
+⚠️ **`-O3` on `emu64.c` is unproven anywhere in this port's history; `-O2` on
+it is device-verified on armhf.** If an optimized image misbehaves in the
+display list, `DC_OPT_O0_EXTRA=src/static/libforest/emu64/emu64.c` is the first
+experiment, and `DECOMP_HOT_OPT=-O2` is the second.
+
+### What this does NOT change
+
+- The town still has zero villagers (save path unwired, N2b).
+- The black shadow wedges are still there (TEV config #007).
+- `gap=7.92 ms` is still unexplained.
+- **Nothing here has run on hardware.** Flycast models no cache and no bus
+  contention, and `-Os` shrinks `.text` by 2.8 MB — which on real hardware also
+  means far better instruction-cache behaviour than the emulator can show. The
+  hardware number could be better than 20 FPS or worse; it is unmeasured.
+
+
 ## 2026-08-05 — G1 ran, and ONE opcode is 28 % of the town frame
 
 Run `smoke-G1-20260805-160640-92325`, town (scene 9), probe-free,

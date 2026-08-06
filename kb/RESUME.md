@@ -5,6 +5,44 @@ Rewritten 2026-08-05 (session 4). **This file is the handoff — start here, the
 every figure below are in `kb/state-log.md`, top entry. Everything under "Older
 material" is kept because it is still the reasoning behind items now closed.
 
+## ⭐ SESSION 5 (2026-08-06) — READ THIS BEFORE ANYTHING BELOW IT
+
+**The `-O0` directive is REVERSED by user decision.** `src/` builds at `-Os`
+with 14 hot TUs at `-O3`; `DC_OPT_PROFILE=o0` is the byte-identical revert.
+
+1. **Town 11.6 → 20.0 FPS, `.text` 5,506,964 → 2,729,152 B (−2.78 MB).**
+   Matched windows, `ASSET MISSING 0`, `crashes=0`, screenshot-gated against a
+   same-source `DC_OPT_PROFILE=o0` control. `kb/state-log.md` has everything.
+2. **The `dc/` phase is the control and it did not move** (`xform` 13.1 →
+   12.4 ms). That is what makes this a real result and not drift.
+3. **EVERY FPS NUMBER WRITTEN BEFORE TODAY IS `-O0` AND IS NOW WRONG.** §1's
+   78.3 ms frame is 46.8 ms; G1's per-opcode histogram was measured at `-O0`
+   and **must be re-run before any opcode is costed again**. The `src/`-heavy
+   framing that justified G2/G3 has shifted toward `dc/`, which is where
+   `dc_gx_backend_submit` already was.
+4. **A full rebuild is 96 seconds.** It was never measured before; every plan
+   in this kb that treats a rebuild as expensive was costing a guess. Bisecting
+   a bad TU is now cheap — `tools/dcopt/bisect_o0.sh`.
+5. **The build knows what UB it is standing on.** `DC_TARGET=warnscan` +
+   `tools/dcopt/warnscan_report.py`: 35 missing returns in 30 files, 99
+   uninitialised reads. `emu64.c` is CLEAN on missing returns; `jammain_2.c`
+   is the one C++ TU that is not, and it is audio-only.
+6. ⚠️ **`shot_diff.py` cannot gate an optimization change** — probes fire per
+   presented frame, so a faster build samples a different point in the same
+   camera pan. Judge the SCENE, not the pixels.
+7. ⚠️ **`-O3` on `emu64.c` is unproven; `-O2` on it is device-verified (armhf).**
+   First two experiments if the display list misbehaves:
+   `DC_OPT_O0_EXTRA=src/static/libforest/emu64/emu64.c`, then
+   `DECOMP_HOT_OPT=-O2`.
+8. ⚠️ **`JUTRomFont::spFontHeader_` is still undefined and is being LEFT that
+   way** — if an optimized build emits a reference, the link fails loudly
+   instead of the game dereferencing NULL. Do not "fix" it by defining it.
+9. **Nothing here has run on hardware.** Flycast models no instruction cache,
+   so it understates a change that deleted 2.8 MB of `.text`.
+10. **The RAM picture changed as much as the FPS picture.** −2.78 MB of `.text`
+    is bigger than every `.bss` lever landed so far, combined; `kb/levers.md`
+    and `kb/ram-plan.md` are costed against an image that no longer exists.
+
 ## SESSION 4 IN TEN LINES (2026-08-05)
 
 1. **G1 RAN, and it moved the FPS argument off `G_VTX`.**
