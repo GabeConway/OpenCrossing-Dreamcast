@@ -29,8 +29,13 @@ a town census would drop the animal textures the player-select scene needs).
 WHAT IT KEEPS
 -------------
   1. every entry of keeplist-opening.txt, verbatim
-  2. every acre display-list/vertex TU under src/data/field/bg/acre/
-  3. every summer town structure src/data/model/obj_s_*.c
+  2. every acre display-list/vertex TU under src/data/field/bg/acre/,
+     INTERIORS INCLUDED (`--no-interiors` drops them again)
+  3. every town structure src/data/model/obj_s_*.c, BOTH SEASONS
+     (`--no-winter` restores the summer-only `#!obj_w_` filter)
+  4. EXTRA_SOURCES: the map overlay, the clock HUD, Tom Nook and the
+     raccoons, and the 132-file gyroid set -- none of them reachable by any
+     glob this generator runs, all of them geometry that VANISHES if stubbed
 
 Ground textures -- summer AND winter -- are absent from this list on purpose
 and must NOT be added back. R1 demand-loads all 96 `mFM_grd_*` source arrays
@@ -68,8 +73,33 @@ species the geometry they never had. The number that makes the pool the right
 shape is the alternative, not today: keeping all 32 is 194,400 B.
 `DC_NPCMDL_SLOTS=<N>` cuts it without turning it off.
 
-⚠️⚠️ COST — THE FULL LIST DOES NOT FIT TODAY. MEASURED 2026-08-04.
-------------------------------------------------------------------
+COST — THE WIDE LIST FITS. MEASURED 2026-08-06.
+-----------------------------------------------
+The `-O0` ban was reversed (CLAUDE.md §1): `src/` at `-Os` + an `-O3` hot list
+dropped `.text` by 2,826,288 B, and that bought ~2.48 MB of measured real
+headroom. The two content exclusions this generator carried -- interiors and
+the winter half of every structure -- were both scarcity decisions, and the
+scarcity is gone. Built and run with BOTH switched on:
+
+    .bss          3,945,484 -> 4,428,076   (+482,592)
+    image span    8,926,124 -> 9,446,380
+    MEMLEDGER FIT ... margin=5541012 OK,  ASSET MISSING 0
+
+It reaches the town, screenshot-verified -- and unlike the 2026-08-04 run
+below, this OK was checked against a run, not just against the ledger.
+
+So both are ON by default now. The kill switches are `--no-interiors` (drops
+the 269,312 B of interior/scratch acres) and `--no-winter` (restores the
+`#!obj_w_` filter, dropping 223,456 B of winter structure). `--interiors` is
+still accepted as a no-op so old invocations keep working.
+
+⚠️⚠️ SUPERSEDED 2026-08-06 by the measurement above — the `-Os`/`-O3` reversal
+is what superseded it, not any change to this list. Kept because the METHOD is
+still the rule: a ledger `OK` is not a boot (kb/heap-two-pools.md), and the
+headroom number that matters comes from an OOM pair.
+
+COST — THE FULL LIST DOES NOT FIT TODAY. MEASURED 2026-08-04.
+-------------------------------------------------------------
 Built and run: `.bss` 3,296,236 -> 4,804,620, image span 11,084,460 ->
 12,681,100, and `MEMLEDGER FIT ... margin=1606292 **OK**`.
 
@@ -102,8 +132,11 @@ The two ways forward, in order:
      instead of keeping them resident. This list is a stopgap for a stub
      image; S4 is the answer for a real one.
 
-Until then this file is a MEASUREMENT ARTEFACT and an aspiration, not a build
-input. `keeplist-opening.txt` is what boots.
+Route 1 is what happened, by a different door: the optimizer profile handed the
+image back 2.83 MB and route 2 (S4) is still the answer for a real one. This
+file stopped being a measurement artefact on 2026-08-06 -- it is the list the
+town build uses. `keeplist-opening.txt` stays the list for size experiments and
+title-screen work.
 
     python3 tools/dcstub/make_keeplist_town.py > tools/dcstub/keeplist-town.txt
 
@@ -150,37 +183,45 @@ def acre_sources():
     return sorted(out)
 
 
-def structure_sources():
-    """The summer town structures: obj_s_*.c under src/data/model/.
+def structure_sources(no_winter=False):
+    """The town structures: obj_s_*.c under src/data/model/, BOTH seasons.
 
     `obj_s_` is the season prefix the field-make tables use for the
     non-winter set, the same convention as `mFM_grd_s_*`.
     ⚠️ EACH obj_s_*.c CARRIES BOTH SEASONS, so a plain whole-file keep buys
     winter too. obj_s_house1.c is 42,624 B of obj_s_house1_* and 42,720 B of
     obj_w_house1_*; across the 84 files it is 328,736 B of summer against
-    223,456 B of winter. The season is chosen at runtime (ac_shop.c:92-94,
-    ac_shop_draw.c_inc:52), so in a summer town the winter half can never be
-    drawn and is pure dead weight -- and at ~146-181 KB of real headroom
-    (kb/RESUME.md §2b) it is the difference between "all 84 structures fit" and
-    "they do not".
+    223,456 B of winter.
 
-    So every entry gets make_stub_data.py's exclusion filter '#!obj_w_'.
+    DEFAULT: emit the bare path, NO filter -- keep everything. The 223,456 B
+    of winter fits since the `-Os`/`-O3` reversal (header, 2026-08-06), and
+    keeping it retires the dated time bomb below instead of rescheduling it.
 
-    ⚠️ EXCLUSION, not the '#obj_s_' inclusion form: 3,680 B across nine of
-    these files are season-NEUTRAL and named neither obj_s_ nor obj_w_
-    (obj_kanban_pal, hakushi_tex, obj_lotus_leaf_tex_txt,
+    `--no-winter` restores the old behaviour: make_stub_data.py's EXCLUSION
+    filter '#!obj_w_' on every entry. That was the right call while headroom
+    was ~146-181 KB (kb/RESUME.md §2b), when the winter half -- unreachable at
+    runtime in a summer town (ac_shop.c:92-94, ac_shop_draw.c_inc:52) -- was
+    the difference between "all 84 structures fit" and "they do not".
+    SUPERSEDED as a default 2026-08-06 by the measured 2.48 MB of headroom;
+    kept as the kill switch.
+
+    ⚠️ WHEN FILTERING, EXCLUSION, never the '#obj_s_' inclusion form: 3,680 B
+    across nine of these files are season-NEUTRAL and named neither obj_s_ nor
+    obj_w_ (obj_kanban_pal, hakushi_tex, obj_lotus_leaf_tex_txt,
     obj_shop4_grass_tex_pic_i4 ...). Keeping only 'obj_s_' would stub those,
     and a stubbed palette does not fail loudly -- it renders its model in
-    garbage colours.
+    garbage colours. Dropping the filter entirely, which is what the default
+    now does, keeps them for the same reason and cannot hit this hazard.
 
-    ⚠️ DATED TIME BOMB. A winter town built from this list draws every one of
-    these 84 structures as a black spiky mess, exactly like the winter ground
-    (kb/RESUME.md §4 item 3). Both need a DC_SEASON=winter build.
+    ⚠️ The dated time bomb -- a winter town drawing all 84 structures as a
+    black spiky mess (kb/RESUME.md §4 item 3) -- is armed only under
+    `--no-winter` now. The winter GROUND is separately handled by R1.
     """
+    suffix = "#!obj_w_" if no_winter else ""
     out = []
     for fn in sorted(os.listdir(MODEL_DIR)):
         if fn.startswith("obj_s_") and fn.endswith(".c"):
-            out.append(rel(os.path.join(MODEL_DIR, fn)) + "#!obj_w_")
+            out.append(rel(os.path.join(MODEL_DIR, fn)) + suffix)
     return sorted(out)
 
 
@@ -209,6 +250,52 @@ def structure_sources():
 #                                            entry for them and the pool cannot
 #                                            serve them. Deleting them here is
 #                                            deleting Tom Nook.
+#   hnw_* / *_haniwa / int_hnw*              the GYROIDS. Reported by a human
+#                                            as rendering wrong in the town:
+#                                            only 12 gyroid files were kept out
+#                                            of the 132 in the tree (5 base +
+#                                            127 int_hnw*), so the rest were
+#                                            stubbed, their Vtx arrays are
+#                                            zero-filled and every triangle
+#                                            collapses to the origin -- the
+#                                            identical failure shape as the Tom
+#                                            Nook black spiky mess. hnw_model.c
+#                                            is the one the TOWN gyroid draws
+#                                            (hnw_v, 276 Vtx, ac_haniwa.c:117
+#                                            -> cKF_Si3_draw_R_SV) and is the
+#                                            reported bug; hnw_face.c is its
+#                                            palette, and ⚠️ a stubbed palette
+#                                            does not fail loudly, it renders
+#                                            the model in garbage colours (the
+#                                            same hazard structure_sources()'s
+#                                            filter block warns about).
+#                                            COST 432,160 B of image span
+#                                            (.bss +363,808, .text +60,824),
+#                                            from the LINK, 2026-08-06 --
+#                                            against ~2.48 MB of measured real
+#                                            headroom that day, leaving ~2.05.
+#                                            ⚠️ AN EARLIER FIGURE OF 155,360 B
+#                                            IN THIS COMMENT WAS 2.8x LOW. It
+#                                            summed the Vtx arrays only (base
+#                                            4,544 + 127 int_hnw* 150,816); each
+#                                            int_hnw*.c also carries textures
+#                                            and display lists. Cost a keep-list
+#                                            addition from two links, never from
+#                                            summing the arrays you went looking
+#                                            for.
+#                                            ⚠️ DO NOT "FIX" THE STILLNESS.
+#                                            Gyroids animate in sync with the
+#                                            music via
+#                                            sAdo_GetRhythmAnimCounter(); at
+#                                            DC_AUDIO=0 get_rhythm_buffer()
+#                                            returns -2.0f (rhythm.c:148-155)
+#                                            and ac_hnw_common.c:456-458
+#                                            correctly reads that as "hold the
+#                                            idle cKF_ba_r_int_hnw_off pose".
+#                                            That is the intended fallback, the
+#                                            same shape as K.K.'s frozen strum
+#                                            (kb/RESUME.md §5b). Restoring the
+#                                            geometry is the whole fix.
 # ---------------------------------------------------------------------------
 EXTRA_SOURCES = (
     # START map overlay
@@ -239,19 +326,48 @@ EXTRA_SOURCES = (
     "src/data/npc/model/tex/rcn_1.c",
     "src/data/npc/model/tex/rcs_1.c",
     "src/data/npc/model/tex/tuk_1.c",
+    # the gyroids: the five base files. hnw_model.c is the town gyroid's
+    # geometry, hnw_face.c its palette, hnw_move.c its motion data; the other
+    # two are the dropped-item and inventory-icon forms.
+    "src/data/model/hnw_face.c",
+    "src/data/model/hnw_model.c",
+    "src/data/model/hnw_move.c",
+    "src/data/model/obj_item_haniwa.c",
+    "src/data/model/inv_mwin_haniwa.c",
 )
 
+
+def gyroid_interior_sources():
+    """The 127 indoor gyroid variants: src/data/model/int_hnw*.c.
+
+    Globbed rather than typed as 127 literals, but kept HERE next to
+    EXTRA_SOURCES rather than folded into acre_sources()/structure_sources():
+    these are hand-added for a reported bug, not part of either sweep, and the
+    intent has to stay visible. They go through the same existence check as the
+    rest of EXTRA_SOURCES, so a rename fails loudly.
+    """
+    out = []
+    for fn in sorted(os.listdir(MODEL_DIR)):
+        if fn.startswith("int_hnw") and fn.endswith(".c"):
+            out.append(rel(os.path.join(MODEL_DIR, fn)))
+    return sorted(out)
+
+
 # ---------------------------------------------------------------------------
-# INTERIOR acres, excluded by default.
+# INTERIOR acres, INCLUDED by default since 2026-08-06.
 #
 # acre_sources() globs the whole tree, which sweeps in building interiors and
-# the developers' scratch rooms. They cost 269,312 B -- against 109,936 B for
-# every summer structure and roughly 146-181 KB of measured headroom
-# (kb/RESUME.md §2b), so keeping both is not a choice this list can make.
+# the developers' scratch rooms. They cost 269,312 B, and they are kept:
+# the `-Os`/`-O3` reversal bought ~2.48 MB and a build with interiors AND
+# winter structures measured margin=5541012 OK, ASSET MISSING 0, reaching the
+# town (header, 2026-08-06). `--no-interiors` is the kill switch.
 #
-# The outdoor town is what the port currently walks, so interiors are off by
-# default and --interiors turns them on. When the villager pool lands and frees
-# room, this is the next thing to switch on.
+# SUPERSEDED, kept for the reasoning: the exclusion existed because 269,312 B
+# stood against 109,936 B for every summer structure and roughly 146-181 KB of
+# measured headroom (kb/RESUME.md §2b), so keeping both was not a choice this
+# list could make, and the outdoor town was what the port walked. What
+# superseded it is the optimizer profile, not any change to the acres.
+# `--interiors` stays accepted as a no-op alias so old invocations still work.
 # ---------------------------------------------------------------------------
 INTERIOR_PREFIXES = (
     "rom_",      # museum, tailor, shop interiors, lighthouse, tent, fortune
@@ -275,14 +391,17 @@ def main():
         if not os.path.isdir(d):
             sys.exit("missing tree: %s" % d)
 
-    want_interiors = "--interiors" in sys.argv
+    # `--interiors` is a NO-OP alias: interiors are on by default now, and
+    # accepting the old flag keeps every existing invocation working.
+    want_interiors = "--no-interiors" not in sys.argv
+    want_winter = "--no-winter" not in sys.argv
 
     opening = opening_entries()
     acres = acre_sources()
     if not want_interiors:
         acres = [a for a in acres if not is_interior(a)]
-    structs = structure_sources()
-    extras = [e for e in EXTRA_SOURCES]
+    structs = structure_sources(no_winter=not want_winter)
+    extras = list(EXTRA_SOURCES) + gyroid_interior_sources()
 
     missing = [e for e in extras if not os.path.isfile(os.path.join(ROOT, e))]
     if missing:
@@ -292,8 +411,10 @@ def main():
     # ⚠️ DEDUPE ON THE PATH, NOT ON THE WHOLE ENTRY. keeplist-opening.txt names
     # 13 of these structures WITHOUT a filter, and 'foo.c' != 'foo.c#!obj_w_'
     # as strings -- so a naive set would emit both, make_stub_data.py would see
-    # the unfiltered one too, and every byte of winter this list exists to drop
-    # would come straight back in. The structures are emitted last and win,
+    # the unfiltered one too, and every byte of winter --no-winter exists to
+    # drop would come straight back in. (With winter kept, the default since
+    # 2026-08-06, there is no filter to lose and this is a no-op -- it is the
+    # --no-winter path that still needs it.) The structures are emitted last,
     # which is why this keeps the LATER entry for a path already seen.
     # Pass 1: resolve. A path may appear in more than one section, and the
     # filtered form must win wherever it does.
@@ -354,24 +475,33 @@ def main():
     print("# ---- censused opening/train/town working set (keeplist-opening.txt) ----")
     n_open = emit(opening)
     print("")
-    print("# ---- every acre (%d files): vertex arrays, or the acre draws nothing ----"
-          % len(acres))
+    print("# ---- every acre (%d files, interiors %s): vertex arrays, or the acre draws nothing ----"
+          % (len(acres), "INCLUDED" if want_interiors else "EXCLUDED"))
     n_acre = emit(acres)
     print("")
-    print("# ---- every summer town structure (obj_s_*), winter excluded ----")
+    if want_winter:
+        print("# ---- every town structure (obj_s_*.c), BOTH seasons, no filter ----")
+    else:
+        print("# ---- every summer town structure (obj_s_*), winter excluded (--no-winter) ----")
     n_str = emit(structs)
     print("")
-    print("# ---- map overlay, clock HUD, Tom Nook and the raccoons ----")
+    print("# ---- map overlay, clock HUD, Tom Nook and the raccoons, the gyroids ----")
     print("# Not derivable from a glob. These used to be typed into the")
     print("# generated file by hand, so regenerating it deleted them -- caught")
     print("# by a human noticing Tom Nook. See EXTRA_SOURCES.")
+    print("# The gyroids joined them 2026-08-06: hnw_model.c is the town")
+    print("# gyroid's geometry (ac_haniwa.c:117), hnw_face.c its palette, and")
+    print("# the 127 int_hnw* are the indoor variants. Stubbed, they collapse")
+    print("# to the origin. Their stillness at DC_AUDIO=0 is the intended idle")
+    print("# pose (rhythm.c:148-155), not a bug -- do not chase it.")
     n_extra = emit(extras)
 
     sys.stderr.write(
         "keeplist-town: %d entries (%d censused + %d acre + %d structure "
-        "+ %d extra)%s\n"
+        "+ %d extra)  [interiors %s, winter %s]\n"
         % (len(seen), n_open, n_acre, n_str, n_extra,
-           "" if want_interiors else "  [interiors excluded]"))
+           "in" if want_interiors else "OUT",
+           "in" if want_winter else "OUT"))
 
 
 if __name__ == "__main__":
