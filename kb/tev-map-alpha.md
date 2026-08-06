@@ -124,4 +124,49 @@ and with what frequency. If the answer is "144 for 95 % of PT draws" — which
 is the expectation, since `G_SETTEXEDGEALPHA` is a rarely-emitted DL command
 — option (a) alone is sufficient.
 
+### 5.6 🔴 CONFIG #007 LOSES BOTH ALPHA FACTORS — the black wedges `[F]` (diagnosed 2026-08-05)
+
+Transcribed here 2026-08-06 from `kb/state-log.md` and `kb/RESUME.md` §4 item 6,
+which were the only two files carrying it. **Still open, not fixed.**
+
+The large flat dark quads a human reported in the town are `ef_shadow_out.c:34-35`,
+which records as **two** TEV stages, not the three an earlier reading assumed:
+
+```
+stage0 alpha = (ZERO, TEXA, A1,    ZERO)
+stage1 alpha = (ZERO, TEXA, APREV, ZERO)      emu64.c:1888-1897
+```
+
+= config **#007**, `kb/tev-map-table.md:120`, folded `A = A1·T0a·T1a`, listed in
+`kb/tev-map-hard-cases.md` §6.1 as the alpha-only product of two masks.
+
+**Both factors are dropped, for two independent reasons** `[F]`:
+
+- `PRIM.a` sits on stage 0 in a **mirrored** spelling that `tev_const_alpha()`
+  reaches and then throws away at its `konst != GX_CA_A0` narrowing;
+- the last stage is `APREV · TEXEL1.a`, the **mirror** of the shape
+  `tex1_alpha_active()` tests for.
+
+So the batch draws at `vtx.a · T0.a`, and on these draws `vtx.a` is the
+`G_RM_FOG_SHADE_A` **fog coefficient** — a flat dark quad, which is exactly the
+reported symptom. This is the same mechanism as the punch-through
+`MODULATEALPHA` problem in `kb/traps.md`: the vertex alpha byte on an N64 render
+mode is not an opacity.
+
+**The two real levers**, both **widenings**, and widenings in this family have
+regressed before (`dc_pvr.c:1080-1098`) — so **both need a screenshot pair**:
+
+1. widen `tev_const_alpha()`'s A1 arm to accept the mirrored spelling;
+2. add the mirrored shape to `tex1_alpha_active()`.
+
+⚠️ **`tev_const_alpha_last()` (in the tree, kill switch
+`-DDC_PVR_NO_TEVALPHA_LAST`, counter `tevalpha_last batches=`) recognises a final
+stage of shape `APREV · konst` and DOES NOT FIX THIS.** Do not re-try it.
+
+⚠️ **See `kb/tev-map-hard-cases.md` §6.6 for the colour-side twin: config #037
+loses both COLOUR constants, because class P3 is unimplemented and `pv.oargb` is
+hardcoded to 0.** #007 and #037 are the same failure in opposite halves of the
+combiner — the folded polynomials in `kb/tev-map-table.md` are right, and the
+recognisers in `dc_pvr.c` are narrower than the table.
+
 ---

@@ -1,5 +1,61 @@
 # Where the town frame actually goes — measured, 2026-08-02
 
+> ## 🔴 [2026-08-06, session 6] G1 WAS RE-RUN — AND §2b's NUMBERS ARE HALF THEIR
+> ## REAL VALUE, INDEPENDENTLY OF THE `-O0` PROBLEM BELOW
+>
+> ⚠️ **`[EMU64H]` reports per LOGIC TICK, not per presented frame.** G1 arms at
+> the end of every tick (`dc_vi.c:405` frameskip, `dc_vi.c:633` presented) and
+> `s_frames` counts ticks, so at `ticks_per_visual = 2` every §2b figure must be
+> **doubled**. Proof: `tot 24.28 × 2 = 48.56` vs `draw 45.6 + skip 2.9 = 48.5`,
+> and this document's own `42.86 × 2 = 85.7` vs `78.3 + 8.2 = 86.5`.
+> **So §2b's `G_TRIN_INDEPEND` was 44.5 ms of an 86.5 ms frame — 51 % of the
+> frame, not the 28 % the table states.** Measurement rule 9, `kb/traps.md`.
+>
+> Re-run `smoke-oc-dc-g1b-20260806-164033-15671`, town, probe-free, medians over
+> 47 windows, ×2-corrected, against the `-O0` figures also ×2-corrected:
+>
+> | | `-O0` | **`-Os` + `-O3`** |
+> |---|---:|---:|
+> | `draw` | 78.3 | **45.6** |
+> | `G_TRIN_INDEPEND` | 44.5 / 292 | **34.4 ms / 306 = 112.5 µs, 75 % of the frame** |
+> | `G_VTX` | 10.8 | **1.84** |
+> | `G_MTX` / `G_TEXRECT` | 4.36 / 4.34 | **1.72 / 2.88** |
+> | `gap` | 15.8 | **5.96** |
+> | `[EMU64H] tot` | 85.7 | **48.56** |
+>
+> `[PHASE] draw=45.6 skip=2.9 vi=0.4 | cull=2.0 xform=8.8 | v=2899 vlit=2689
+> vcull=5250 us/v=3.06`, `cmds=3562`.
+>
+> **Three things this does to §2b:**
+>
+> 1. ✅ **`gap` is CLOSED, and §2b's "do not describe it as dispatch overhead"
+>    is now answered: it IS dispatch overhead.** Slot `HIST_GAP = 64`
+>    (`dc_emu64_hist.c:87`), accumulated in `hist_enter()` (`:124-131`) when
+>    `s_prev == HIST_GAP` — `emu64_taskstart_r`'s loop control
+>    (`emu64.c:5807-5824` prologue, `:5847-5855` dispatch guard, `:5874`
+>    `gfx_p++`) plus frame prologue/epilogue. Confirmed by 15.8 → 5.96 ms when
+>    that loop went `-O3`. ⚠️ `probe=` is **not** subtracted from `tot` or from
+>    `gap` (`dc_emu64_hist.c:300` only prints it), and both probes land inside
+>    `gap` by construction.
+> 2. ⭐ **The 65/35 split §2b reading 2 records is superseded by a better
+>    decomposition.** Of TRIN's 34.4 ms, `cull 2.0 + xform 8.8 = 10.8 ms` is
+>    measured `dc/`. **The other ~23.6 ms — 52 % of the frame — is `dl_G_TRIN`'s
+>    index expansion PLUS our own `GX*` attribute setters in `dc_gx.c`, and
+>    those two have never been separated.** That is the largest unattributed
+>    block in the project and the next measurement to take.
+> 3. ⭐ **The cull rate section below stands, and the lever grew.** `vcull=5250`
+>    against `v=2899` = **64 %**, and it is now known that those references are
+>    fully expanded and pushed through the GX setters before rejection — so the
+>    4.5-7.0 ms range in that table was costed against a halved frame and is
+>    low.
+>
+> ✅ Also closed here: **`pvr_dropped` has no speed mechanism.** `s_tris_dropped`
+> (`dc_pvr.c:134`) fires only on near-plane geometry (`:2149` all-behind,
+> `:2162` straddle under `-DDC_PVR_NO_NEARCLIP`, `:2181` Sutherland-Hodgman
+> emitting `< 3`), so it tracks camera position and nothing else.
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06 (session 6).
+
 > ## ⚠️ [STALE 2026-08-06] EVERY FRAME NUMBER BELOW WAS MEASURED AT `-O0`.
 >
 > **The `-O0` directive was reversed on 2026-08-06.** `src/` builds at `-Os`

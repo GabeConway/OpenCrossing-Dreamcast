@@ -29,6 +29,15 @@ re-costed every known lever. Its brief was explicitly *not* to re-measure
 > instruction is still right, but the file it points at now records that a
 > closed entry resting on another architecture's evidence is a claim, not a
 > verdict.
+>
+> ⚠️ **[Later the same day] AND THE GAP ITSELF IS GONE.** Real headroom is
+> **~2.05 MB** (`margin` 5,109,364 minus the 3,056,276 B libc peak), after
+> spending 952,416 B on interiors, winter and gyroids. **Every idea on this page
+> whose case was "we are desperate for bytes" needs re-ranking against its
+> risk** — the surviving case for a lever is now *what content it delivers per
+> byte*, because residency is what binds: 8,813,054 B of asset destination
+> arrays can never all be resident. T1 is unaffected and is the strongest item
+> here on the new criterion as well as the old one.
 
 ⚠️ **These are CONCEPTS, not measurements.** Each carries its own confidence and
 its own cheapest-experiment line. Nothing here is banked. Treat every number as
@@ -43,6 +52,45 @@ wrong numbers.
 ---
 
 ## T1. Texture assets are VRAM-resident and never pooled ⭐
+
+> ### ✅ [2026-08-06] T1 IS DESIGNED, AND IT IS MUCH CHEAPER THAN THIS ENTRY SAYS
+>
+> **It has graduated from a concept to a lever — `kb/levers.md` L10 carries the
+> ledger, the hazard, the falsification experiment and the seek analysis. Read
+> that, not this.** Three of this entry's assumptions were pessimistic:
+>
+> 1. **The seam is `GXLoadTexObj` (`dc_gx.c:2288`) →
+>    `dc_gx_backend_texture_upload` (`dc_gx.c:2333` →
+>    `dc_pvr_texture.c:1060`)** — this entry names `dc_gx.c:2052`, which has
+>    moved, but the shape was right. **No `src/` rewrite, no
+>    `make_src_shrink.py` rule, no `--wrap`, and no 8-byte trampoline stub:
+>    cheaper than R1's seam.**
+> 2. **There is no pool.** This entry budgets a transient scratch of up to
+>    `max_chunk_bytes` = 137,856 B. The PVR already holds every texture twiddled
+>    in VRAM behind a content-keyed LRU (`uploads=306 hits=894442
+>    evictions=0`); the main-RAM array is read on every bind **only to compute
+>    the cache key** (`tex_content_hash`, `dc_pvr_texture.c:1092`). Replace that
+>    key with a synthetic one and the array is needed **only on a miss** ⇒ one
+>    **24,576 B** staging buffer, ~38,800 B of fixed cost in total.
+> 3. **The numbers.** This entry's ~4.4-4.6 MB is the **non-stub** total (rule
+>    8). Re-measured: textures are **5,053,824 B total and 752,640 B resident**.
+>    So **phase 1 is −579,248 B** and **phase 2 buys 5,685 textures /
+>    2,782,080 B of content for +68,000 B**.
+>
+> **The failure mode this entry predicted was real and is answered.** "CPU code
+> that reads texture bytes for non-texture purposes": 27 of 8,761
+> `gsDPSetTextureImage_Dolphin` sites use pointer arithmetic, **all** in
+> `src/data/model/hnw_model.c`, all `anime_4_txt + 0x…` — which is
+> `SEGMENT_ADDR(0x0B,0)`, not a `.bss` symbol, so it resolves through
+> `gSPSegment` and is safe. The poison-pattern detector this entry proposed is
+> superseded by a cheaper one: `DC_TEXPOOL_PROBE=1` with `interior` / `mutated`
+> / `oversize` counters, **one build, one run, zero behaviour change**.
+>
+> ⚠️ **The one risk this entry did not see is disc seeks**: ~306 per run,
+> 6-30 s on hardware as mid-scene hitches, mitigated by a 32 KB read-ahead
+> window (~306 seeks → ~40) that `dc_keep_sweep()` already implements.
+> **A wholesale sorted prefetch is NOT the answer** — resident offsets span
+> 10.9 MB, ~22 s of linear read.
 
 **This is the strongest idea in the set, and it attacks the binding constraint
 directly.**

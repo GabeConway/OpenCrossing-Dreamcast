@@ -1,11 +1,70 @@
 # RESUME — pick the session back up here
 
-Rewritten 2026-08-05 (session 4). **This file is the handoff — start here, then
-`kb/STATE.md` for the current numbers.** The narrative and the evidence behind
-every figure below are in `kb/state-log.md`, top entry. Everything under "Older
-material" is kept because it is still the reasoning behind items now closed.
+Top rewritten 2026-08-06 (session 6). **This file is the handoff — start here,
+then `kb/STATE.md` for the current numbers.** The narrative and the evidence
+behind every figure below are in `kb/state-log.md`, top entry. Everything under
+"Older material" is kept because it is still the reasoning behind items now
+closed.
 
-## ⭐ SESSION 5 (2026-08-06) — READ THIS BEFORE ANYTHING BELOW IT
+## ⭐⭐ SESSION 6 (2026-08-06) — READ THIS FIRST. IT CORRECTS THE INSTRUMENT
+## EVERY FPS PLAN IS COSTED AGAINST
+
+1. ⚠️ **`[EMU64H]` IS PER LOGIC TICK. DOUBLE EVERY NUMBER IT PRINTS.** G1 arms
+   at the end of every tick — `dc_vi.c:405` (frameskip) and `dc_vi.c:633`
+   (presented) — and `s_frames` counts ticks. At `ticks_per_visual = 2`,
+   `tot 24.28 × 2 = 48.56` matches `draw 45.6 + skip 2.9 = 48.5`, and the
+   2026-08-05 run's `42.86 × 2 = 85.7` matches `78.3 + 8.2 = 86.5`.
+   **Two sessions quoted the halved numbers.** This is measurement rule **9**
+   (§0b, which now says NINE). ⚠️ `probe=` is not subtracted from `tot` or
+   `gap` — `dc_emu64_hist.c:300` only prints it.
+2. **G1 was re-run** (`smoke-oc-dc-g1b-20260806-164033-15671`). Corrected to
+   per presented frame: **`G_TRIN_INDEPEND` 34.4 ms / 306 calls = 112.5 µs, and
+   75 % of a 45.6 ms frame.** `G_VTX` 1.84 (was 10.8), `G_MTX` 1.72, `gap`
+   5.96 (was 15.8), `tot` 48.56.
+3. ⭐ **~23.6 ms of the frame is unattributed and it is the largest block in the
+   project.** `cull 2.0 + xform 8.8 = 10.8 ms` of TRIN is measured `dc/`; the
+   remaining **~23.6 ms (52 % of the frame) is emu64's `dl_G_TRIN` index
+   expansion PLUS our own `GX*` attribute setters in `dc_gx.c`, never
+   separated.** Splitting them is queue item 1 and **nothing else should be
+   costed first**.
+4. ⭐ **G3 is the biggest lever in the project.** `vcull=5250` against
+   `v=2899`: **64 % of vertex references are fully expanded and pushed through
+   the GX setters before the batch is rejected.**
+5. ✅ **`gap` is CLOSED** — emu64's own dispatch-loop overhead (slot
+   `HIST_GAP=64`, `dc_emu64_hist.c:87`, accumulated in `hist_enter()`
+   `:124-131`; `emu64_taskstart_r` `:5807-5824`, `:5847-5855`, `:5874`).
+   Confirmed by 15.8 → 5.96 ms when that loop went `-O3`.
+6. ❌ **G2 is DEAD** — its target *was* `gap`. Delete `dc_emu64_shadow.cpp`
+   after one A/B: it costs nothing when off, **but it blocks G1** via the
+   `#error` at `dc_platform.h:417`.
+7. ✅ **`pvr_dropped` is CLOSED and has no speed mechanism** — `s_tris_dropped`
+   (`dc_pvr.c:134`) fires only on near-plane geometry, so it tracks **where the
+   camera is standing**. Never read it as a regression.
+8. ⭐ **RAM HAS STOPPED BEING THE BINDING CONSTRAINT.** Real headroom
+   **~146 KB → ~2.05 MB**, after spending 952,416 B on interiors, winter and
+   gyroids (`296a1d2`). What binds now is **residency**. And the opposite
+   extreme is closed by a boot: a full `DC_ASSET_STUB=0` image prints
+   `margin=-781036 OVER`, fails a **15,638,528 B contiguous malloc**, and comes
+   back with **all 14,495 assets MISSING** (`kb/closed.md`).
+   ⚠️ **Cost a keep-list addition from two links** — the gyroids were estimated
+   at 155,360 B by summing `Vtx` arrays and cost 432,160 B of span.
+9. **T1 is designed and much cheaper than its concept note** — the seam is
+   already ours, **no pool is needed**, phase 1 is **−579,248 B** and phase 2
+   buys **5,685 textures / 2,782,080 B of content for +68,000 B**.
+   `kb/levers.md` **L10**.
+10. **A whole TEV class is unimplemented and it is visible.** The name-entry
+    keyboard renders black: 18 of its 26 display lists are **config #037, class
+    P3**, and `dc_pvr.c` implements no part of P3 — `pv.oargb` is hardcoded `0`
+    at `:1988`. **27 of the 101 configs.** §4 item 7,
+    `kb/tev-map-hard-cases.md` §6.6.
+11. ⚠️ **Correction to the record: the per-lit-vertex block at `dc_pvr.c:2868`
+    is ALREADY OPTIMAL** and must stop being listed as an sh4zam candidate —
+    `mv`/`nm` are hoisted per batch at `:2779-2781` and the seven ops at
+    `:2875-2886` are already `fipr()`. Holding `nm` in XMTRX **loses**, because
+    `comb` needs XMTRX for the position FTRV at `:2863`. The live light-loop
+    candidate is `chan_eval` (`dc_pvr.c:837-902`).
+
+## ⭐ SESSION 5 (2026-08-06) — the `-O0` reversal
 
 **The `-O0` directive is REVERSED by user decision.** `src/` builds at `-Os`
 with 14 hot TUs at `-O3`; `DC_OPT_PROFILE=o0` is the byte-identical revert.
@@ -44,8 +103,10 @@ with 14 hot TUs at `-O3`; `DC_OPT_PROFILE=o0` is the byte-identical revert.
     is off by default on precision grounds. What it did find: that function's
     residency probe was **dead code** and is gone. The two experiments still
     worth running with it are the AABB cull (`dc_gx.c:495`, ~2.0 ms/frame,
-    scalar, never touches the matrix unit) and the per-lit-vertex block
-    (`dc_pvr.c:2868`). Composing `P·MV` in XMTRX is **costed and dropped** —
+    scalar, never touches the matrix unit) and ~~the per-lit-vertex block
+    (`dc_pvr.c:2868`)~~ — ⚠️ **[CORRECTED 2026-08-06, §6 item 11: that block is
+    ALREADY OPTIMAL. `chan_eval` (`dc_pvr.c:837-902`) is the real candidate.]**
+    Composing `P·MV` in XMTRX is **costed and dropped** —
     67 µs of a 45 ms frame. `kb/state-log.md` top entry.
 11. **The RAM picture changed as much as the FPS picture.** −2.78 MB of `.text`
     is bigger than every `.bss` lever landed so far, combined; `kb/levers.md`
@@ -137,7 +198,9 @@ do not go hunting in your own diff. (`kb/traps.md`.)
 
 ## 0. What is committed on `dev`
 
-**The main thread commits; agents do not.** Session 4 so far:
+**The main thread commits; agents do not.** ⚠️ **This list stops at session 4 —
+sessions 5 and 6 landed the `-O0` reversal, sh4zam, and the interiors/winter/
+gyroid content spend on top of it. Check the log, not this block.** Session 4:
 
 ```
 35cb00c feat(dc): villager texture and model pools -- written, and OFF,
@@ -167,7 +230,7 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
 
 </details>
 
-## 0b. THE MEASUREMENT RULES. Now EIGHT — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05.
+## 0b. THE MEASUREMENT RULES. Now NINE — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, **9 on 2026-08-06**.
 
 1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
    any visual comparison.
@@ -202,6 +265,19 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
    **Cost a pool against the alternative — keeping the class — never against
    the class total.** The acres are the only class where the old framing still
    holds. `kb/levers.md`.
+9. ⚠️ **STATE THE DENOMINATOR. `[EMU64H]` IS PER LOGIC TICK, NOT PER PRESENTED
+   FRAME — DOUBLE IT.** G1 arms at the end of *every* tick (`dc_vi.c:405` the
+   frameskip path, `dc_vi.c:633` the presented path) and `s_frames` increments
+   on every `dc_emu64_hist_frame_close()`, so at `ticks_per_visual = 2` every
+   printed figure is a half-frame. Proof in both directions: `tot 24.28 × 2 =
+   48.56` vs `draw 45.6 + skip 2.9 = 48.5`, and `42.86 × 2 = 85.7` vs
+   `78.3 + 8.2 = 86.5`. **Two sessions quoted the halved numbers**, so the
+   `-O0` `G_TRIN_INDEPEND` was 51 % of the frame and not 28 %. ⚠️ `probe=` is
+   **not** subtracted from `tot` or `gap` (`dc_emu64_hist.c:300` prints it and
+   stops), and both probes land inside `gap` by construction. Generalised: an
+   instrument that samples per logic tick and a phase counter that samples per
+   presented frame have **different denominators**, and any new counter must say
+   which one it is. `kb/traps.md`.
 
 ## 1. Where the port is
 
@@ -213,45 +289,46 @@ parity on compute: the only hardware FPS figure is still "~11 FPS in the town".
 In Flycast it reaches the town, walks around it, meets Tom Nook and is taken to
 the houses. `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`.
 
-**Current numbers (2026-08-05, probe-free, audio off, town keep list, post-R1):**
+**Current numbers (2026-08-06, probe-free, audio off, town keep list, `-Os` +
+`-O3` hot list, `dc/src` `-O3`, interiors + winter + gyroids in the image):**
 
 | | |
 |---|---|
-| FPS whole run | p50 **24.2**, max 29.9 |
-| the town (scene 9) | **11.5-12.1** |
-| `MEMLEDGER margin` | 3,191,348 (⚠️ read rule 6 before spending it) |
-| `ASSET MISSING` / `ptdrop` / `LOST` | 0 / 0 / 0 |
+| the town (scene 9) | **~20 FPS**, `draw` **45.6 ms** |
+| `MEMLEDGER margin` | 5,109,364 — ⚠️ real headroom is **~2.05 MB** (`margin` − the 3,056,276 libc peak, rule 6) |
+| image span / `.text` / `.bss` | 9,878,540 / 2,854,108 / 4,791,884 |
+| `ASSET MISSING` / `aram LOST` / `deepest_scene` | 0 / 0 / 18 |
 
-### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN — REWRITTEN BY G1
+### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN — RE-RUN 2026-08-06
 
-The old framing was "19-27 % renderer, 77-80 % `src/`, so deleting the renderer
-takes the worst frames from 11.8 to 15.2 FPS". **That split is still true of the
-`gx=` counter and it is no longer the useful decomposition**, because the
-per-opcode histogram shows most of the "emu64" bucket is our own code:
+⚠️ **All `[EMU64H]` figures below are ×2-corrected (rule 9).** Run
+`smoke-oc-dc-g1b-20260806-164033-15671`, town, probe-free, medians over 47
+windows:
 
 ```
-[PHASE]  draw=78.3 skip=8.2 (n=30) vi=0.4 | cull=2.2 xform=12.2 |
-         v=3002 vsrc=3002 vlit=2517 vcull=6042 us/v=4.07
-[EMU64]  cmds=3458 noop=1 vtx=298 tri=295 dl=276 | cullvis=7 cullrej=2
-[EMU64H] tot=42.86ms gap=7.92ms probe=79.9ns | TRIN_INDEPEND 22.25/146
-         VTX 5.40/149 MTX 2.18/113 TEXRECT 2.17/25 MOVEMEM 0.55/207
-         SETTILE_DOLPHIN 0.32/109 DL 0.29/138 SETCOMBINE 0.28/58
-         SETTIMG 0.25/112 TRI2 0.19/2 ENDDL 0.18/131 LOADTLUT 0.13/42
+[PHASE]  draw=45.6 skip=2.9 vi=0.4 | cull=2.0 xform=8.8 |
+         v=2899 vlit=2689 vcull=5250 us/v=3.06        cmds=3562
+[EMU64H] (raw, PER TICK)  f=60 tot=20.27ms gap=2.78ms probe=79.9ns |
+         TRIN_INDEPEND 14.75/126 VTX 0.77/132 MTX 0.65/94 MOVEMEM 0.25/207
+         TRI2 0.25/2 DL 0.12/124 SETCOMBINE 0.11/47 ENDDL 0.08/116
+         LOADTLUT 0.07/40 SETTILE_DOLPHIN 0.07/64 SETTIMG 0.06/68 MOVEWORD 0.06/78
 ```
 
-| | |
+| | ×2, per presented frame |
 |---|---|
-| `G_TRIN_INDEPEND` | **22.25 ms / 146 calls = 152 µs each** — 63 % of dispatch, **28 % of the frame** |
-| of which already `dc/` at `-O2` | ~96 µs (AABB cull ~15 + `dc_gx_backend_submit` ~81) |
-| of which `src/` at `-O0` | **~53 µs** ⇒ a G2-shaped rewrite is capped at ~8.3 ms |
-| `G_VTX` | 5.40 ms / 149 — **not the ~48 ms four documents assumed** |
-| every state opcode | ≤ 0.55 ms each. **Stripping state commands is worth nothing** (F8 is answered) |
-| `gap` | 7.92 ms, 18 % of `tot`, unattributed. **OPEN** |
-| `vcull` / `v` | 6,042 / 3,002 = **66.8 % of vertices culled after emu64 paid for them** |
+| `G_TRIN_INDEPEND` | **34.4 ms / 306 calls = 112.5 µs each — 75 % of the frame** |
+| of which measured `dc/` | `cull 2.0 + xform 8.8` = **10.8 ms** |
+| **of which UNATTRIBUTED** | ⭐ **~23.6 ms = 52 % of the frame** — `dl_G_TRIN`'s index expansion **plus** our own `GX*` attribute setters in `dc_gx.c`, **never separated from each other** |
+| `G_VTX` | **1.84 ms** (was 10.8 at `-O0`) — finished as a topic |
+| `G_MTX` / `G_TEXRECT` | 1.72 / 2.88 |
+| every state opcode | **≤ 0.5 ms.** Stripping state commands stays worth nothing (F8) |
+| `gap` | **5.96 ms** (was 15.8) — ✅ **CLOSED**, it is `emu64_taskstart_r`'s loop control |
+| `vcull` / `v` | 5,250 / 2,899 = ⭐ **64 % of vertex references expanded and pushed through the GX setters before the batch is rejected** |
 
-**The single largest addressable block in the frame is `dc_gx_backend_submit` at
-12.2 ms (15.6 % of `draw`) — `dc/src/dc_pvr.c:2448`, ours, already `-O2`, no
-sign-off required.** See §5 before costing anything else.
+**The largest addressable block in the frame is the ~23.6 ms nobody has
+attributed, and it is at least partly ours.** Splitting it is §5 item 1, and it
+decides whether the next piece of work belongs in emu64 (G3) or in our own
+renderer. **Do not cost anything else first.**
 
 ## 2. The build lines
 
@@ -298,6 +375,37 @@ mid-run finds nothing and reads exactly like a hang. A 900 s run is ~17-20 min
 of wall clock; wait for it. (`kb/traps.md`.)
 
 ## 2b. THE MEMORY ARITHMETIC THAT ACTUALLY BINDS
+
+> ### ⭐ [2026-08-06] THE HEADROOM IS ~2.05 MB, AND FIT IS NO LONGER THE PROBLEM
+>
+> | | shipping | + interiors/winter | **+ gyroids (now)** |
+> |---|---:|---:|---:|
+> | `.text` | 2,753,700 | 2,793,284 | **2,854,108** |
+> | `.bss` | 3,945,484 | 4,428,076 | **4,791,884** |
+> | image span | 8,926,124 | 9,446,380 | **9,878,540** |
+> | `margin` | 6,061,268 | 5,541,012 | **5,109,364** |
+>
+> Real headroom (`margin` − the 3,056,276 libc peak) went **~146 KB → ~2.05 MB**
+> after spending **952,416 B** on content (`296a1d2`), with `MEMLEDGER OK`,
+> `ASSET MISSING 0`, `aram LOST 0`, `deepest_scene 18`, `run_report --vs` clean
+> and the gyroids confirmed rendering by a human. Most of it came from `-Os`:
+> `.text` alone fell 2.83 MB.
+>
+> **What binds now is RESIDENCY, not fit** — 8,813,054 B of asset destination
+> arrays can never all be resident, so the keep list still decides what exists.
+> ✅ And the other extreme is closed **by a boot, not by arithmetic**: a full
+> `DC_ASSET_STUB=0` image prints `margin=-781036 OVER`, fails a **15,638,528 B
+> contiguous malloc** (that is the whole of `foresta.rel`), and comes back with
+> **all 14,495 assets MISSING**. `kb/closed.md`.
+>
+> ⚠️ **Cost a keep-list addition from TWO LINKS.** The gyroid set was estimated
+> at 155,360 B by summing its `Vtx` arrays and cost **432,160 B** of span —
+> 2.8× low, because the files carry textures and display lists too.
+> ⚠️ **S6 is NOT a demand loader** — it deletes `s_assets[]`'s `path` field and
+> 14,495 string literals (598,648 B of `.rodata`) and nothing else. The real
+> demand loader is `dc_stub_keep_assets()` / `dc_stub_keep_load_one()`
+> (`dc_main.c:885-1135`), inside `#ifdef DC_ASSET_STUB`. And `rom_src=0` means
+> **`SRC_REL`**, not "row 0".
 
 `margin=` is not headroom. The real number, from the pair of runs that produced
 rule 6:
@@ -395,66 +503,102 @@ free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
    regressed before (`dc_pvr.c:1080-1098`), so **both need a screenshot pair.**
    ⚠️ The new `tev_const_alpha_last()` in the tree (kill switch
    `-DDC_PVR_NO_TEVALPHA_LAST`, counter `tevalpha_last batches=`) recognises a
-   final stage of shape `APREV * konst` and **does not fix this**. ⚠️ This
-   diagnosis still has to be transcribed into `kb/tev-map-alpha.md` /
-   `kb/tev-map-hard-cases.md`; only `kb/state-log.md` and this file carry it.
+   final stage of shape `APREV * konst` and **does not fix this**.
+   ✅ **Transcribed 2026-08-06 into `kb/tev-map-alpha.md` §5.6**, which is now
+   the reference copy.
+7. 🔴 **THE NAME-ENTRY KEYBOARD RENDERS BLACK, and it is a whole unimplemented
+   TEV class — not a stub (found 2026-08-06).** The widget draws at
+   `m_editor_ovl.c:2221-2258` (`mED_KeyDraw`), 26 display lists; its assets
+   `kai_sousa.c`, `kai_sousa2.c`, `lat_sp.c` are on **both** keep lists and in
+   the generated loader, and alpha here is `TEXEL0`, so a zeroed texture would
+   be **invisible, not black**. 18 of the 26 DLs — every structural piece —
+   are `gsDPSetCombineLERP(PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT,
+   0,0,0,TEXEL0)` = **config #037, class P3**. `dc_pvr.c` implements **no part
+   of P3**: `tev_const_color()` rejects it at its first test (`:1000`),
+   `tev_fold_color()` rejects it at `tev_carg_affine()` (`:1162`, `GX_CC_TEXC`)
+   — so **`-DDC_PVR_TEVFOLD` will not fix it, which is a free falsification
+   test** — and **`pv.oargb` is hardcoded `0` at `:1988`: PVR offset colour has
+   never been wired.** The DL clears `G_LIGHTING`, so the result is
+   `rgb = vtx.rgb * T0.rgb` and both PRIM and ENV are lost; 21 of 26 DLs are
+   wrong and the 5 that survive use the flat `(0,0,0,PRIMITIVE)` shape.
+   **P3 is 27 of the 101 configs.** Fix, native and no second pass: vertex base
+   colour `= PRIM − ENV`, per-vertex `oargb = ENV`, `PVR_TXRENV_MODULATE` + the
+   offset-colour bit — per-vertex cost ~zero because `pv.oargb` is already
+   stored. Needs its own kill switch and a screenshot pair.
+   ⚠️ **Falsifiable prediction: the panel is black but the 40 key caps are
+   correctly coloured** (`m_editor_ovl.c:2092` uses the recognised shape). **If
+   the caps are black too, the diagnosis is wrong.** Full write-up:
+   `kb/tev-map-hard-cases.md` §6.6. Note the relationship to item 6: **#007
+   loses both ALPHA factors, #037 loses both COLOUR constants.**
 
-## 5. THE RANKED NEXT ACTIONS (2026-08-05)
+## 5. THE RANKED NEXT ACTIONS (2026-08-06)
 
-Same list as `kb/STATE.md`; this is the ordering a fresh context should work
-down. Items 1-3 are frame time, 4 unblocks the villagers, 5 decides the audio
-architecture, 6 is a visible bug.
+**Same list as `kb/STATE.md` — the two must agree.** This is the ordering a
+fresh context should work down. It **supersedes the 2026-08-05 list**, whose top
+two items were costed against halved `[EMU64H]` numbers and an `-O0` frame.
 
-1. **`dc_gx_backend_submit` — 12.2 ms, ours, `-O2`, no gate.** The first step
-   is free and settles two questions at once: print the vertex-memo hit ratio
-   and a per-batch `count` histogram from `dc_gx_flush_vertices`. That decides
-   whether this is a 3 ms or an 8 ms lever **and** settles the memo-ceiling
-   dispute below. ⚠️ **OPEN, and neither reading may be stated as fact:** the
-   vertex memo is **128 slots** (`dc_pvr.c:1955`) hitting **48.2-48.9 %**, and
-   its ceiling is either 48.2 % (already there, further work worth zero) from
-   6,951 staged references, or ~60 % (~11 points of headroom) from the newly
-   measured `v + vcull = 9,044`. `dc_gx.c:870`'s 6,951 comment is **stale**.
-   The experiment that settles it is a direct count of distinct vertex
-   references per batch.
-2. **Per-slot shadow of `G_MTX`** (2.18 ms over 113 calls) as the proof that
-   the per-slot machinery works — self-contained, no `gfx_p` rewriting, est
-   **0.9-1.4 ms**. ⚠️ **Hazard:** `dc_emu64_hist.c:262` and
-   `dc_emu64_shadow.cpp:492` each `memcpy` **all 64 slots** on frame open and
-   restore all 64 on close, so a third installer must arm slot-wise or
-   initialise strictly before them.
-3. **Slot-60 `TRIN_INDEPEND` cull-only shadow** — an AABB over the index window
-   at entry, tested against `projection_mtx ×` (identity for SHARED /
-   `position_mtx_stack` for NONSHARED), with `dl_G_TRIN` kept as the fallback.
-   Est **4.5-7.0 ms** ⇒ 11.5 → 12.2-12.6 FPS.
-4. **Wire the VMU save path (N2b).** Now blocking rather than optional: it is
-   the only way to get a villager into the town, and therefore the only way to
-   test R2/R3 at all (§4 item 1).
-5. **The audio sequencer floor.** `-Wl,--wrap=_RspStart2` — **note the leading
-   underscore**, §0b/`kb/traps.md` — plus an empty `__wrap_` deletes exactly
-   the work AICA would absorb. Read `synth_us=` against 19,840: **≤2,000 means
-   AICA Stage B is worth 6-10 weeks; ≥8,000 means an `-O2` rspsim shadow
-   outranks it.**
-6. **The TEV shadow-alpha fix** — §4 item 6. Written code exists and does not
-   fix it; the two real levers are named there.
+1. ⭐ **Split the ~23.6 ms TRIN remainder.** One build, one run: a
+   `dc_time_us()` bracket around the `GX*` attribute setters in `dc_gx.c`. It
+   decides whether the next piece of work goes into emu64 (item 2) or into our
+   own renderer. **Nothing below should be costed until it lands.**
+2. ⭐ **G3 — cull at TRIN entry.** An AABB over the index window at entry,
+   tested against `projection_mtx ×` (identity for SHARED / `position_mtx_stack`
+   for NONSHARED), `dl_G_TRIN` kept as the fallback. **64 % of vertex references
+   are wasted** (`vcull=5250` vs `v=2899`). ⚠️ **Hazard for any installer into
+   the dispatch table:** `dc_emu64_hist.c:262` and `dc_emu64_shadow.cpp:492`
+   each `memcpy` **all 64 slots** on frame open and restore all 64 on close — arm
+   slot-wise, or initialise strictly before them.
+3. **TEV P3 / `oargb`** — fixes the black keyboard and 27 of the 101 configs.
+   §4 item 7, `kb/tev-map-hard-cases.md` §6.6. Kill switch + screenshot pair.
+4. **AABB cull via XMTRX.** `dc_gx_batch_is_offscreen` (`dc_gx.c:435`, math at
+   `:495-519`) puts 8 corners through **two scalar stages each** — MV 3 dots
+   (`:503-505`), P 4 dots (`:506-509`) = **200 mults per batch** — and never
+   touches the matrix unit, while `dc_pvr.c:2782-2799` builds the same `P·MV`
+   one line later but **after** the cull (`:559` cull, `:591` submit). Est
+   **0.4-0.8 ms** of 45.6. Kill switch `-DDC_GX_NO_FTRV_CULL`.
+   ⚠️ **Must call `dc_mtx_xmtrx_invalidate()`**, as `dc_pvr.c:2812` does.
+5. **`chan_eval`'s light loop** (`dc_pvr.c:837-902`) — 3 FIPRs per light per
+   vertex, ~35-70k FIPR/frame. ⚠️ **Correction to the record: the
+   per-lit-vertex block at `dc_pvr.c:2868` is ALREADY OPTIMAL** — `mv`/`nm` are
+   hoisted per batch at `:2779-2781` and the seven ops at `:2875-2886` are
+   already `fipr()` via `DC_DOT4`/`DC_DOT3` (`:187-191`). **Holding `nm` in
+   XMTRX loses**, because `comb` needs XMTRX for the position FTRV at `:2863`.
+6. **T1 phase 1 (−579,248 B), then phase 2** — every remaining texture for
+   **+68,000 B**. `kb/levers.md` **L10**; run the zero-behaviour-change
+   `DC_TEXPOOL_PROBE=1` falsifier (`interior`/`mutated`/`oversize`) first, and
+   read the seek analysis before writing the loader.
+7. **Wire the VMU save path (N2b).** Unchanged: still the only way to get a
+   villager into the town, and therefore the only way to test R2/R3 (§4 item 1).
+8. **Burn to hardware.** Nothing this session ran on silicon, and Flycast models
+   no instruction cache against a 2.83 MB `.text` cut — it **understates** the
+   optimization work rather than flattering it.
+9. **Re-cost the audio.** The 19.8 ms/DAC-frame figure that drove the whole
+   AICA-vs-software verdict was measured at `-O0`; jaudio is `-Os` now and has
+   **never been re-measured**. The old probe still applies:
+   `-Wl,--wrap=_RspStart2` — **note the leading underscore**, §0b/`kb/traps.md`
+   — plus an empty `__wrap_`, reading `synth_us=` against 19,840.
+   ⚠️ **`jammain_2.c` is the first quarantine suspect the moment `DC_AUDIO=1`:**
+   C++ TU, missing return, 22 uninitialised reads (`dc/opt-lists.mk`).
 
-## 5a. The emu64 decision gate — RE-COSTED 2026-08-05, and it shrank
+## 5a. The emu64 decision gate — RE-COSTED 2026-08-06. G2 IS DEAD, G3 GREW
 
-`kb/research-fps-ideas.md` carries this in full.
-
-⚠️ **G1 RAN, and it shrinks G2 and G3.**
+`kb/research-fps-ideas.md` carries this in full. ⚠️ All figures ×2-corrected
+(rule 9).
 
 | | what | win | gate |
 |---|---|---|---|
-| **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | ✅ **RUN 2026-08-05.** `TRIN_INDEPEND 22.25 ms/146`, `VTX 5.40/149`, `gap 7.92` |
-| G2 | reimplement the dispatch LOOP in `dc/` at `-O2` | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], capped at ~8.3 | ✅ signed off 2026-08-04; built, +0.8 FPS whole-run, town not separated |
-| G3 | `-O2` shadow `dl_G_VTX`/TRI with a runtime AABB cull | ~~25-35 ms~~ → **4.5-7.0 ms** [ESTIMATED] from the cull; the `-O2` half is inside G2's ~8.3 ms cap | ✅ signed off 2026-08-04. **Build the cull half first** (§5 item 3) — that is where the whole win is |
-| — | `dc_gx_backend_submit` (`dc/src/dc_pvr.c:2448`) | **12.2 ms is the block itself**; win unmeasured | **no gate at all — it is ours** |
+| **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | ✅ **RE-RUN 2026-08-06.** `TRIN_INDEPEND 34.4 ms/306`, `VTX 1.84`, `gap 5.96`, `tot 48.56` |
+| ~~G2~~ | ~~reimplement the dispatch LOOP in `dc/` at `-O2`~~ | ❌ **DEAD** | **Its target IS `gap`, which is 5.96 ms and already `-O3`. The compiler did G2's job.** Delete `dc_emu64_shadow.cpp` after one A/B — it costs nothing when off but **blocks G1** (`#error`, `dc_platform.h:417`). `kb/closed.md` |
+| **G3** | AABB cull at `TRIN_INDEPEND` entry | ⭐ **the biggest lever in the project**, and bigger than the old 4.5-7.0 ms estimate | ✅ signed off 2026-08-04. **Build the cull half only** — the `-O2`-shadow half died with G2 |
+| — | the **~23.6 ms unattributed** inside TRIN | unknown, and it is 52 % of the frame | **no gate — at least partly ours.** §5 item 1 splits it |
 
-**The re-cost, in one line:** 65 % of `G_TRIN_INDEPEND`'s 152 µs/call is already
-`dc/` code at `-O2` (`GXEnd` at `emu64.c:4935` → the AABB cull ~15 µs +
-`dc_gx_backend_submit` ~81 µs); only ~53 µs is `src/` at `-O0`. Interposing on
-emu64 buys much less than the decision assumed, and the largest single
-addressable block in the frame needs no sign-off.
+**The re-cost, in one line:** `G_TRIN_INDEPEND` is 34.4 ms of a 45.6 ms frame;
+`cull 2.0 + xform 8.8 = 10.8 ms` of that is measured `dc/`, and the remaining
+~23.6 ms is emu64's index expansion plus **our own `GX*` attribute setters**,
+which have never been separated. **Interposing on emu64 is not the question any
+more — attributing that 23.6 ms is.** And the cull is worth more than ever:
+64 % of vertex references are expanded and pushed through those setters before
+the batch is rejected.
 
 **⚠️ F1 (offline bbox-CULLDL injection) is NO LONGER RECOMMENDED.** A full design
 pass found its cost is **594 KB of `.data`** for town scope — 5-16× its own

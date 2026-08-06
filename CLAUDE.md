@@ -65,14 +65,21 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 
 **The port walks the town.** It boots on retail hardware with **loading at
 parity with the emulator**, and in Flycast it reaches the town, walks around it,
-meets Tom Nook and is taken to the houses. Every summer acre is in the image.
-Read `kb/RESUME.md` first — in particular the **eight** measurement rules.
-Three were paid for recently: `MEMLEDGER FIT … OK` does not mean the image
-boots; an average cost per command is not the cost of any command; and — new on
-2026-08-05 — **in a stubbed image, an asset class's resident cost is what the
-KEEP LIST kept, not what the class totals.** A pool is worth building when it
-delivers content the keep list cannot afford, not when it "frees" bytes the
-stub system already dropped.
+meets Tom Nook and is taken to the houses. Every summer acre is in the image —
+plus, since 2026-08-06, the interiors, the winter set and the gyroids.
+Read `kb/RESUME.md` first — in particular the **nine** measurement rules.
+Four were paid for recently: `MEMLEDGER FIT … OK` does not mean the image
+boots; an average cost per command is not the cost of any command; **in a
+stubbed image, an asset class's resident cost is what the KEEP LIST kept, not
+what the class totals** (so a pool is worth building when it delivers content
+the keep list cannot afford, not when it "frees" bytes the stub system already
+dropped); and — new on 2026-08-06 — **state the denominator: `[EMU64H]` is per
+LOGIC TICK, not per presented frame, so every figure it prints must be doubled.
+Two sessions quoted the halved numbers.**
+
+⚠️ **RAM has stopped being the binding constraint** (2026-08-06): real headroom
+is ~2.05 MB, `-Os` having paid for it. What binds now is **residency** — the
+keep list still decides what exists. `kb/STATE.md` is the current arithmetic.
 
 <details><summary>the older status line, kept for the sequence</summary>
 
@@ -111,13 +118,13 @@ already produced two wrong numbers.
 | `kb/state-log.md` | the evidence behind those numbers: what was observed running, when, and what it cost. Newest first |
 | `kb/heap-two-pools.md` | the arena-vs-sbrk rule. **Read before touching `DC_ARENA_BYTES` / `DC_ARAM_WINDOW`** |
 | `kb/plan-stages.md` | the agreed S1→S5 RAM plan and the reasoning behind each step |
-| `kb/levers.md` | **the ranked RAM ledger** — applied cuts, and every lever still live |
+| `kb/levers.md` | **the ranked RAM ledger** — applied cuts, and every lever still live. ⚠️ Its top section now says RAM is **not** the binding constraint; **L10 (T1, textures)** is the live one |
 | `kb/closed.md` | settled questions: MMU paging (dead), `--icf`, emu64-is-not-an-emulator, strip/compress = 0 — **and the `-O0` post-mortem, the one entry this file got wrong** |
 | `kb/traps.md` | mechanical gotchas: `fsqrt`, POSIX `link()`, `scif_flush()`, `bash -lc`, mkdcdisc padding |
 | `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
 | `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved) and roof clip-through — **now reproducible for the first time**, since `DC_AUTOWALK` can walk a character under it |
-| `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram (`DC_EMU64_HIST=<N>`). Thunks swapped into emu64's dispatch table at runtime; `src/` untouched. **In the tree, never run**, and `kb/RESUME.md` §5 says run it before costing any FPS idea |
+| `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram (`DC_EMU64_HIST=<N>`). Thunks swapped into emu64's dispatch table at runtime; `src/` untouched. **Run 2026-08-05 and again 2026-08-06**, and it is the only thing allowed to price an opcode. ⚠️ **Its output is per LOGIC TICK — double it** (measurement rule 9) |
 | `harness/dc/bench/` | `bench_mem.c` plus the build path it never had. It passes — and Flycast cannot answer it (`kb/closed.md`) |
 | `PLAN.md` | milestones, the four hard problems, risk register, open questions |
 
@@ -168,7 +175,7 @@ already produced two wrong numbers.
 | `kb/research-mmu-game-impact.md` | [DEAD] the five semantic breakages in `src/` (DMA first); why `.text` need not page |
 | `kb/research-mmu-reopening.md` | [DEAD] precedent, the four preconditions to reopen, all sources |
 | `kb/research-n64-origin.md` | why the 22.5 MB image is *not* an emulation artefact |
-| `kb/research-creative-ram.md` | **unbanked CONCEPTS**, ranked, each with a failure mode and a cheapest experiment. T1 (textures never pooled) is the highest-value open idea in the project |
+| `kb/research-creative-ram.md` | **unbanked CONCEPTS**, ranked, each with a failure mode and a cheapest experiment. ⚠️ **T1 has GRADUATED — it is designed, much cheaper than this page says, and lives in `kb/levers.md` L10** (−579,248 B, then all 5,685 remaining textures for +68,000 B). The rest of the page needs re-ranking now that the gap is gone |
 | `kb/research-second-tier-memory.md` | ⚠️ salvaged fragment, not a finished doc. VRAM/AICA bandwidth, never run |
 
 ### Assets & disc
@@ -208,7 +215,7 @@ already produced two wrong numbers.
 | `kb/upstream-pc-port.md` | what the upstream ACGC-PC-Port releases do and do NOT give us. **Their perf work does not transfer** (shader variants; the PVR has none, and we are CPU-bound). Read before mining their changelog |
 | `kb/research-fps-ideas.md` | **unbanked FPS concepts**, ranked, each with a failure mode and a cheapest experiment. Carries the 60 %-of-vertices-culled-after-the-fact finding, the emu64 `G_CULLDL` route, and the **decision gate** on interposing on emu64's dispatch table |
 | `kb/research-ram-tiers.md` | **second-tier memory concepts** (VRAM/AICA as eviction tiers, cold `.text` relocation, `--wrap=malloc`), plus **two corrections to `kb/ram-plan.md`'s arithmetic** |
-| `kb/perf-dc.md` | **where the town frame actually goes**, measured. ⚠️ The old "58 % emu64 / 26 % renderer" split was a PHASE-level attribution and G1 has since taken it apart: `GXEnd` is live inside `dl_G_TRIN`, so `dc_gx_backend_submit` (12.2 ms, *ours*, `-O2`) was being charged to emu64. §2b carries the per-opcode histogram — **`TRIN_INDEPEND` alone is 22.25 ms of a 78.3 ms frame**, and 65 % of it is already `dc/` code. Also the instruments, the applied per-vertex wins, and what was ruled out |
+| `kb/perf-dc.md` | **where the town frame actually goes**, measured. ⚠️ Its §2b numbers are stale twice over — `-O0`, *and* halved by the per-tick denominator. Re-run 2026-08-06: **`G_TRIN_INDEPEND` is 34.4 ms of a 45.6 ms frame (75 %)**, of which only `cull 2.0 + xform 8.8` is attributed — **~23.6 ms is `dl_G_TRIN`'s index expansion plus our own `GX*` setters, never separated**, and that is the largest unattributed block in the project. `gap` is CLOSED (it is the dispatch loop). Also the instruments, the applied per-vertex wins, and what was ruled out |
 | `kb/texture-path.md` | **what happens to a GC texture on its way to VRAM** — filtering, format, per-format colour loss, mipmaps, the VRAM budget, the NPOT pad. Read before proposing any texture-quality work: paletted and VQ are both closed here with reasons |
 | `kb/renderer.md` | the GX→GLES layer. **armhf-era** — accurate on the GX layer's behavior, wrong on hardware |
 | `kb/design-platform-api.md` | **index** to the platform-API split below — every symbol `dc/` must provide, derived from `pc/src` |

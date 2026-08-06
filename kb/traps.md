@@ -1,5 +1,38 @@
 # Traps already paid for — do not re-discover these
 
+## ⭐ `[EMU64H]` IS PER LOGIC TICK — DOUBLE IT (2026-08-06)
+
+- **Every number G1 prints must be multiplied by `ticks_per_visual` before it
+  can be compared with `[PHASE] draw=`.** G1 arms at the end of **every** tick —
+  `dc_vi.c:405` is the frameskip path and `dc_vi.c:633` the presented path — and
+  `s_frames` increments on every `dc_emu64_hist_frame_close()`. At
+  `ticks_per_visual = 2`, `[EMU64H] tot=` is a **half-frame** figure.
+  **Proof, from two runs a day apart:** `tot 24.28 × 2 = 48.56` against
+  `draw 45.6 + skip 2.9 = 48.5`; and the `-O0` run's `42.86 × 2 = 85.7` against
+  `78.3 + 8.2 = 86.5`. **Two sessions quoted the halved numbers** — the `-O0`
+  `G_TRIN_INDEPEND` was 44.5 ms of an 86.5 ms frame (51 %), not 22.25 of 78.3
+  (28 %). This is measurement rule **9** (`kb/RESUME.md` §0b).
+- ⚠️ **`probe=` is not subtracted from anything.** `dc_emu64_hist.c:300` prints
+  it and stops; it is inside `tot`, and the two probes per frame land inside
+  `gap` by construction. Do not treat a small `probe=` as "the instrument is
+  free of the numbers below it".
+- The general shape, and it is the reusable half: **an instrument that samples
+  per logic tick and a phase counter that samples per presented frame are
+  different denominators.** Any new counter has to say which one it is in its
+  own output, or the first person to divide by frames will be wrong by the skip
+  factor.
+
+## Cost a keep-list addition from TWO LINKS, never from summing arrays (2026-08-06)
+
+- **The gyroid set was costed at 155,360 B by summing its `Vtx` arrays. The link
+  said 432,160 B of span — 2.8× low.** The files carry textures and display
+  lists too, and keeping is per-FILE. Summing the arrays you went looking for
+  measures your search, not the image.
+- The correct method is the one the `obj_s_*` work used: link with the addition,
+  link without it, subtract `_end`. A rebuild is 96 s (above), so there is no
+  excuse for the estimate. ⚠️ And take the span from `_end`, not from
+  `sh-elf-size`'s `dec` column — see "Measuring the image" below.
+
 ## A full rebuild is 96 SECONDS, and nobody had measured it (2026-08-06)
 
 3,926 TUs, `JOBS=8`, colima on an M4. The `warnscan` variant is 132 s. Several

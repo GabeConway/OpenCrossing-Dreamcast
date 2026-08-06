@@ -1,5 +1,61 @@
 # Unbanked FPS concepts — ranked, each with a failure mode
 
+> ## 🔴 [2026-08-06, session 6] G1 WAS RE-RUN. G2 IS DEAD, G3 GREW, AND EVERY
+> ## HISTOGRAM NUMBER ON THIS PAGE IS HALF ITS REAL VALUE
+>
+> ⚠️ **`[EMU64H]` is per LOGIC TICK, not per presented frame — double it.** G1
+> arms at the end of every tick (`dc_vi.c:405`, `dc_vi.c:633`) and `s_frames`
+> counts ticks. `tot 24.28 × 2 = 48.56` matches `draw 45.6 + skip 2.9 = 48.5`;
+> the `-O0` run's `42.86 × 2 = 85.7` matches `78.3 + 8.2 = 86.5`. So **this
+> page's `TRIN_INDEPEND 22.25 / VTX 5.40 / gap 7.92` were 44.5 / 10.8 / 15.8**,
+> and `G_TRIN_INDEPEND` was **51 %** of the `-O0` frame, not 28 %. Measurement
+> rule 9, `kb/traps.md`.
+>
+> Re-run `smoke-oc-dc-g1b-20260806-164033-15671`, ×2-corrected, `draw` 45.6 ms:
+>
+> | | `-O0` | `-Os`+`-O3` |
+> |---|---:|---:|
+> | `G_TRIN_INDEPEND` | 44.5 / 292 | **34.4 ms / 306 = 112.5 µs, 75 % of the frame** |
+> | `G_VTX` | 10.8 | **1.84** |
+> | `G_MTX` / `G_TEXRECT` | 4.36 / 4.34 | **1.72 / 2.88** |
+> | `gap` | 15.8 | **5.96** |
+>
+> **What this settles on this page:**
+>
+> - ❌ **G2 is DEAD, and now for a measured reason as well as a structural one.**
+>   Its target *is* `gap` — emu64's own dispatch-loop overhead — which is
+>   **5.96 ms and already `-O3`**. `gap` is therefore also **CLOSED** as an open
+>   question: slot `HIST_GAP=64` (`dc_emu64_hist.c:87`), accumulated in
+>   `hist_enter()` (`:124-131`), i.e. `emu64_taskstart_r`'s loop control
+>   (`emu64.c:5807-5824`, `:5847-5855`, `:5874`) plus frame prologue/epilogue.
+>   ⚠️ `probe=` is **not** subtracted from `tot` or `gap` and both probes land
+>   inside `gap`. **Recommend deleting `dc_emu64_shadow.cpp` after one A/B** —
+>   it costs nothing when off, but it blocks G1 (`#error`,
+>   `dc_platform.h:417`).
+> - ⭐ **G3's cull half is the biggest lever in the project**, and bigger than
+>   the 4.5-7.0 ms this page estimates: `vcull=5250` against `v=2899` means
+>   **64 % of vertex references are fully expanded and pushed through the `GX*`
+>   attribute setters before the batch is rejected.**
+> - ⭐ **A new item outranks everything here: ~23.6 ms is unattributed.** Of
+>   `G_TRIN_INDEPEND`'s 34.4 ms, `cull 2.0 + xform 8.8 = 10.8` is measured
+>   `dc/`; the rest is `dl_G_TRIN`'s index expansion **plus our own `GX*`
+>   attribute setters in `dc_gx.c`**, and those two have **never been separated
+>   from each other**. That is **52 % of the frame**. One `dc_time_us()`
+>   bracket, one build, one run — and **nothing on this page should be costed
+>   until it lands** (`kb/RESUME.md` §5 item 1).
+> - ✅ **`G_VTX` is finished** (1.84 ms) and **F8 stays answered** — every state
+>   opcode is ≤ 0.5 ms.
+> - **Two new candidates, both `dc/` and both outside this page's frame:** the
+>   AABB cull via XMTRX (`dc_gx.c:435`, math `:495-519` — 200 scalar mults per
+>   batch, never touches the matrix unit, est 0.4-0.8 ms, kill switch
+>   `-DDC_GX_NO_FTRV_CULL`, ⚠️ must call `dc_mtx_xmtrx_invalidate()`), and
+>   `chan_eval`'s light loop (`dc_pvr.c:837-902`). ⚠️ **The per-lit-vertex block
+>   at `dc_pvr.c:2868` is ALREADY OPTIMAL** — `mv`/`nm` hoisted per batch at
+>   `:2779-2781`, the seven ops at `:2875-2886` already `fipr()`; holding `nm`
+>   in XMTRX loses because `comb` needs XMTRX for the FTRV at `:2863`.
+>
+> Evidence: `kb/state-log.md`, top entry, 2026-08-06 (session 6).
+
 > ## 🔴 [2026-08-06] THE BIGGEST UNBANKED FPS IDEA WAS NOT ON THIS PAGE — IT WAS BANNED
 >
 > **`-O0` was reversed on 2026-08-06.** `src/` builds at `-Os` with a 14-TU

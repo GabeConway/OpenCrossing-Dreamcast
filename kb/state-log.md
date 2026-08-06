@@ -1,5 +1,284 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐ 2026-08-06 (session 6) — G1 WAS RE-RUN, AND EVERY `[EMU64H]` NUMBER THIS
+## PROJECT HAS EVER QUOTED IS HALF OF THE TRUTH
+
+Run `smoke-oc-dc-g1b-20260806-164033-15671`, town, probe-free,
+`DC_EMU64_HIST=1 DC_XDEFS='-DDC_PERF_PHASE'`. It was launched to re-cost the
+opcode mix at `-Os`/`-O3` — which it did — but the first thing it returned was
+a correction to the instrument.
+
+### The ×2. Read this before quoting any histogram figure, new or old
+
+⚠️ **`[EMU64H]` reports per LOGIC TICK, not per presented frame.** G1 arms at
+the end of EVERY tick — `dc_vi.c:405` is the frameskip path, `dc_vi.c:633` the
+presented path — and `s_frames` increments on every
+`dc_emu64_hist_frame_close()`. At `ticks_per_visual = 2` every printed number
+must be **doubled** before it can be set against `[PHASE] draw=`.
+
+Proof, from two runs a day apart, in both directions:
+
+| | `tot` as printed | ×2 | `draw` + `skip` |
+|---|---:|---:|---:|
+| this run, `-Os` + `-O3` | 24.28 | **48.56** | 45.6 + 2.9 = **48.5** |
+| 2026-08-05, `-O0` | 42.86 | **85.7** | 78.3 + 8.2 = **86.5** |
+
+**Two sessions quoted the halved numbers.** `G_TRIN_INDEPEND` was never 28 % of
+the `-O0` frame; it was **44.5 ms of an 86.5 ms frame, i.e. 51 %**. This is
+measurement rule **9** now (`kb/RESUME.md` §0b) and an entry in `kb/traps.md`.
+
+### The histogram, corrected to per presented frame
+
+```
+[EMU64H] f=60 tot=20.27ms gap=2.78ms probe=79.9ns | TRIN_INDEPEND 14.75/126
+         VTX 0.77/132 MTX 0.65/94 MOVEMEM 0.25/207 TRI2 0.25/2 DL 0.12/124
+         SETCOMBINE 0.11/47 ENDDL 0.08/116 LOADTLUT 0.07/40
+         SETTILE_DOLPHIN 0.07/64 SETTIMG 0.06/68 MOVEWORD 0.06/78
+[PHASE]  draw=45.6 skip=2.9 vi=0.4 | cull=2.0 xform=8.8 |
+         v=2899 vlit=2689 vcull=5250 us/v=3.06        cmds=3562
+```
+
+(the `[EMU64H]` line above is the raw per-tick print; the medians below are
+over 47 windows and are **×2-corrected**)
+
+| | `-O0`, ×2 corrected | `-Os`/`-O3`, ×2 corrected |
+|---|---:|---:|
+| `draw` | 78.3 | **45.6** |
+| `G_TRIN_INDEPEND` | 44.5 ms / 292 calls | **34.4 ms / 306 calls, 112.5 µs/call, 75 % of the frame** |
+| `G_VTX` | 10.8 | **1.84** |
+| `G_MTX` | 4.36 | **1.72** |
+| `G_TEXRECT` | 4.34 | **2.88** |
+| `gap` | 15.8 | **5.96** |
+| `[EMU64H] tot` | 85.7 | **48.56** |
+
+### What the corrected histogram decides
+
+- ⭐ **The largest unattributed block in the project is ~23.6 ms, and it is
+  inside one opcode.** Of `G_TRIN_INDEPEND`'s 34.4 ms, `cull 2.0 + xform 8.8 =
+  10.8 ms` is measured `dc/` code. **The other ~23.6 ms — 52 % of the whole
+  frame — is emu64's `dl_G_TRIN` index expansion PLUS our own `GX*` attribute
+  setters in `dc_gx.c`, and those two have never been separated from each
+  other.** Splitting them is now the top of the queue: one `dc_time_us()`
+  bracket, one build, one run.
+- ⭐ **G3 (cull at TRIN entry) is the biggest lever in the project, and bigger
+  than its old estimate.** `vcull=5250` against `v=2899` means **64 % of vertex
+  references are fully expanded and pushed through the GX setters before the
+  batch is rejected.** The old 4.5-7.0 ms was costed against a halved frame.
+- **G2 is DEAD.** Its target was the dispatch loop, which is exactly `gap` —
+  5.96 ms, and already `-O3`. Recommend deleting `dc_emu64_shadow.cpp` after one
+  A/B. ⚠️ It costs **nothing** when off (the whole body is inside
+  `#if DC_EMU64_SHADOW_LOOP > 0`; 20 KB only when on) but it **does block G1**
+  through the `#error` at `dc_platform.h:417`, which is the real reason to
+  remove it.
+- **`G_VTX` is finished as a topic.** 10.8 → 1.84 ms from a compiler flag. Four
+  documents once costed G3 against "~48 ms of `G_VTX`".
+- **Every state opcode is ≤ 0.5 ms.** F8 stays answered: stripping state
+  commands is worth nothing.
+
+### `gap` IS ATTRIBUTED — it was open since 2026-08-05
+
+`gap` is emu64's own dispatch-loop overhead, and it is not a mystery bucket:
+slot `HIST_GAP = 64` (`dc_emu64_hist.c:87`) is accumulated in `hist_enter()`
+(`:124-131`) whenever `s_prev == HIST_GAP` — i.e. `emu64_taskstart_r`'s loop
+control (`emu64.c:5807-5824` prologue, `:5847-5855` dispatch guard, `:5874`
+`gfx_p++`) plus the frame prologue and epilogue. Confirmed by its own response
+to the flag: **15.8 → 5.96 ms when that loop went `-O3`.**
+
+⚠️ **`probe=` is NOT subtracted from `tot` or from `gap`** —
+`dc_emu64_hist.c:300` only prints it — and two probes per frame land inside
+`gap` by construction. The `gap unexplained / OPEN` items in `kb/STATE.md` and
+`kb/RESUME.md` are **CLOSED**.
+
+### `pvr_dropped` is CLOSED — there is no speed mechanism behind it
+
+`s_tris_dropped` (`dc_pvr.c:134`) increments on near-plane geometry and nothing
+else: all three vertices behind the plane (`:2149`, `w <= 0.001f`), a straddle
+under `-DDC_PVR_NO_NEARCLIP` (`:2162`), or Sutherland-Hodgman emitting fewer
+than three vertices (`:2181`). It is **purely data-dependent on camera
+position**. The `1,300 → 0` that `run_report --vs` reported on the `dc/src`
+`-O3` change was **where the camera was, not what `-O3` did**. Goes to
+`kb/closed.md`; the "noisy counter" warning in `kb/STATE.md` now cites the
+mechanism instead of just the observation.
+
+### "PUT ALL THE ASSETS IN RAM" IS REFUTED BY A BOOT, NOT BY ARITHMETIC
+
+A full `DC_ASSET_STUB=0` image was linked and run —
+`smoke-oc-dc-nostub-20260806-165321-16857` — because the RAM picture had moved
+far enough that the question deserved an experiment rather than an estimate.
+
+```
+text 3,050,152   data 2,224,820   bss 10,493,196   _end 0x8cf19b6c
+MEMLEDGER FIT image_span=15768428 additive_heap=1658752 usable=16646144
+              margin=-781036 OVER            <- the first OVER ever printed
+Out of memory. Requested sbrk_base 8d016000, was 8cf36000, diff 917504
+Out of memory. Requested sbrk_base ...                   diff 15638528
+```
+
+`diff 917504` is `main.dol`; `diff 15638528` is the whole of `foresta.rel`. Both
+fail, so `rom_src=0` and **all 14,495 asset rows come back MISSING** — the
+non-stub image contains LESS content than the stubbed one it was meant to
+replace.
+
+**The structural reason it can never work, at any margin:** the non-stub path
+asks libc for **one contiguous 15,638,528 B buffer**. No lever in `kb/levers.md`
+makes a 15.6 MB `malloc` fit in 16 MB next to a 15.8 MB image.
+
+```
+image span 15,768,428 + additive 1,658,752 + libc peak 3,056,276 = 20,483,456
+usable                                                             16,646,144
+                                                        short by    3,837,312
+```
+
+⚠️ **Two live misconceptions corrected while proving this:**
+
+- **S6 is NOT a demand loader.** It deletes `s_assets[]`'s `path` field and
+  14,495 string literals (`make_src_shrink.py:467`) — 598,648 B of `.rodata`,
+  and nothing else. The rewritten loader still does
+  `memcpy(dest, rom + rom_off, size)` against the whole resident REL. **The real
+  demand loader is `dc_stub_keep_assets()` / `dc_stub_keep_load_one()`
+  (`dc_main.c:885-1135`), which lives entirely inside `#ifdef DC_ASSET_STUB`.**
+- **`rom_src=0` means `SRC_REL`**, not "row 0".
+
+### THE RAM PICTURE, RE-COSTED — and RAM is no longer the binding constraint
+
+Committed today as `296a1d2`. Runs `smoke-oc-dc-wide-20260806-165816-17270`
+(the interiors/winter step) and `smoke-oc-dc-full-20260806-171552-18975` (the
+current image):
+
+| | shipping | + interiors/winter | + gyroids (now) |
+|---|---:|---:|---:|
+| `.text` | 2,753,700 | 2,793,284 | **2,854,108** |
+| `.bss` | 3,945,484 | 4,428,076 | **4,791,884** |
+| image span | 8,926,124 | 9,446,380 | **9,878,540** |
+| `margin` | 6,061,268 | 5,541,012 | **5,109,364** |
+
+Real headroom — `margin` minus the 3,056,276 B libc peak, which is the only
+honest form (rule 6) — went from **~146 KB on 2026-08-04 to ~2.05 MB**, *after*
+spending 952,416 B on content. `MEMLEDGER OK`, `ASSET MISSING 0`, `aram LOST 0`,
+`deepest_scene 18`, `run_report --vs` no regression, town `us/v` 3.07 → 3.09,
+and **a human confirmed the gyroids render**.
+
+**Say it plainly, because four documents are still written the other way: the
+RAM problem is no longer the binding constraint.** `kb/STATE.md`'s old line —
+"the full image still does not fit, that is the only thing between here and a
+playable build" — is **void**. What remains is **residency**: 8,813,054 B of
+asset destination arrays can never all be resident at once, so the keep list
+still decides what exists. That is a content question, not a fit question.
+
+⚠️ **Method error worth more than the bytes.** The gyroid set was first costed
+at **155,360 B** by summing its `Vtx` arrays. The link says **432,160 B** of
+span — **2.8× low**, because those files also carry textures and display lists.
+**Cost a keep-list addition from two links, never from summing the arrays you
+went looking for.** (`kb/traps.md`.)
+
+### T1 IS DESIGNED, AND IT IS MUCH CHEAPER THAN THE CONCEPT NOTE SAID
+
+`kb/research-creative-ram.md` T1 has been the highest-value open idea in the
+project since 2026-08-01. Designed against the tree today, it is smaller and
+better-placed than its own write-up:
+
+- **The seam is already ours.** `GXLoadTexObj` (`dc_gx.c:2288`) →
+  `dc_gx_backend_texture_upload` (`dc_gx.c:2333` → `dc_pvr_texture.c:1060`).
+  **No `src/` rewrite, no `make_src_shrink.py` rule, no `--wrap`** — cheaper
+  than R1's seam, which needed a rewriter.
+- **No N-slot pool is needed, and this is the part the concept note missed.**
+  The PVR already holds every texture twiddled in VRAM behind a content-keyed
+  LRU (`uploads=306 hits=894442 evictions=0`). The main-RAM array is read on
+  every bind **only to compute the cache key** (`tex_content_hash`,
+  `dc_pvr_texture.c:1092`, ~109 binds/frame). Replace that with a synthetic key
+  built from the asset row and the array is needed **only on a miss** ⇒ one
+  24,576 B staging buffer, ~38,800 B of fixed cost in total.
+- **Inventory** (method: `make_stub_data.py`'s own `IFDEF_RE`/`DECL_RE`,
+  cross-checked because it reproduces `kb/levers.md`'s independent acre figure
+  of 815,024 B **exactly**): whole asset population **8,813,054 B / 16,341
+  syms**, of which **1,885,176 B / 1,742 syms resident**. Textures **5,053,824 B
+  total, 752,640 B resident**. Max texture 4,096 B with one outlier
+  (`FONT_nes_tex_font1`, 24,576 B); **99.4 % are ≤ 2,048 B**. Every texture is
+  `rom_src=0`, `swap=0` — a pure `pread`, no byte-swap.
+
+| | resident before | cost | net | delivers |
+|---|---:|---:|---:|---|
+| **T1 phase 1** — 669 case-1 textures (excl. NPC, segment-bound, file-static) | 618,048 | ~38,800 | **−579,248** | same content |
+| **T1 phase 2** — extend the map to all 6,354 eligible | — | **+68,000** | +68,000 | **5,685 textures / 2,782,080 B that render as nothing today** |
+
+Phase 1 is **a real saving, not a rule-8 content swap** — the first lever since
+R1 that frees bytes rather than converting MISSING into PRESENT.
+
+**The hazard it found, and its mitigation.** 27 of 8,761
+`gsDPSetTextureImage_Dolphin` sites use pointer arithmetic. All 27 are in
+`src/data/model/hnw_model.c`, all of the form `anime_4_txt + 0x…` — and
+`anime_4_txt` is `SEGMENT_ADDR(0x0B,0)`, not a `.bss` symbol, so it resolves
+through `gSPSegment` and is **safe**. Mitigation: exclude the 14
+`gSPSegment`-argument symbols (1 resident, 512 B) and all of `src/data/npc/**`
+(R2's domain).
+
+**Falsification experiment: one build, one run, ZERO behaviour change.**
+`DC_TEXPOOL_PROBE=1` with counters `interior` / `mutated` / `oversize`. **Any
+one of them non-zero kills the design as specified.**
+
+⚠️ **Seek risk, and the fix already exists in the tree.** T1 issues one seek per
+distinct texture — ~306 per run — which is **6-30 s of seeks on hardware,
+concentrated as mid-scene hitches**. Resident texture ROM offsets are clustered
+(median gap 512 B; 863 of 905 gaps ≤ 32 KB), so a 32 KB read-ahead window
+collapses ~306 seeks to ~40. **`dc_keep_sweep()` (`dc_main.c:977-1108`) already
+implements exactly that window discipline, and R1 does not use it** — R1 is
+still paying 27 unbatched seeks per acre load. ⚠️ **Do NOT reach for a wholesale
+sorted prefetch instead:** resident texture offsets span 10.9 MB, which is ~22 s
+of linear read.
+
+### A WHOLE TEV CLASS IS UNIMPLEMENTED, IT IS VISIBLE, AND IT IS NOT A STUB
+
+A human reported the name-entry keyboard rendering **BLACK**. Root-caused, and
+for once it is not the keep list:
+
+- The widget draws at `m_editor_ovl.c:2221-2258` (`mED_KeyDraw`), 26 display
+  lists. Its assets — `kai_sousa.c`, `kai_sousa2.c`, `lat_sp.c` — are on **both**
+  keep lists and in the generated loader. Stub ruled out **statically and by
+  argument**: alpha here is `TEXEL0`, so a zeroed texture would be INVISIBLE,
+  not black.
+- **18 of 26 DLs**, including every structural piece (`mojibanT`,
+  `controllerT`, `controller2T`, `shitaT`, `controllpadT`, `cursorT`, `3DT` and
+  the button caps) use
+  `gsDPSetCombineLERP(PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, 0,0,0,TEXEL0)`
+  — **TEV config #037, class P3**, `kb/tev-map-table.md` §4 row 37.
+- **`dc_pvr.c` implements no part of P3.** `tev_const_color()` rejects it at its
+  first test (`:1000` needs `b`/`c` == ZERO; here they are ENVIRONMENT and
+  TEXEL0). `tev_fold_color()` rejects it too — `tev_carg_affine()` falls through
+  at `:1162` for `GX_CC_TEXC` — so **`-DDC_PVR_TEVFOLD` will not fix it**, which
+  is a free falsification test. And `pv.oargb` is a **hardcoded 0** at `:1988`:
+  **PVR offset colour has never been wired at all.**
+- The DL clears `G_LIGHTING`, so the material source is VTX — the same mechanism
+  as `mFont_SetVertex_dol` (`dc_pvr.c:1209-1216`). The result is
+  `rgb = vtx.rgb * T0.rgb`, and **both PRIM and ENV are lost**. 21 of the 26 DLs
+  are wrong; the 5 that survive use the flat `(0,0,0,PRIMITIVE)` shape that
+  `tev_const_color()` does recognise.
+- **P3 is 27 of the 101 configs.** The native PVR fix needs no second pass:
+  vertex base colour = `PRIM − ENV`, per-vertex `oargb` = `ENV`,
+  `PVR_TXRENV_MODULATE` plus the offset-colour bit. `pv.oargb` is already
+  stored, so the per-vertex cost is ~zero. Needs its own kill switch and a
+  screenshot pair — **widenings in this family have regressed before**.
+- **Falsifiable prediction:** the panel is black but the 40 key caps are
+  correctly coloured (`m_editor_ovl.c:2092` uses the recognised shape). **If the
+  caps are black too, the diagnosis is wrong.**
+- Relationship to the open #007 bug: **#007 loses both ALPHA factors, #037 loses
+  both COLOUR constants.** Same family, opposite halves.
+
+### The queue this session leaves
+
+Rewritten in `kb/STATE.md` and `kb/RESUME.md` §5, which must agree. The old list
+was `-O0`-era and its top two items are now wrong. In order: split the ~23.6 ms
+TRIN remainder → G3 → TEV P3/`oargb` → the AABB cull via XMTRX → `chan_eval` →
+T1 phase 1 then 2 → N2b → a hardware burn → the audio re-cost.
+
+⚠️ **One correction to the record, item 5's neighbour:** the per-lit-vertex
+block at `dc_pvr.c:2868` is **ALREADY OPTIMAL** and should stop being listed as
+an sh4zam candidate. `mv`/`nm` are hoisted per batch at `:2779-2781`, and the
+seven ops at `:2875-2886` are already `fipr()` through `DC_DOT4`/`DC_DOT3`
+(`:187-191`). Holding `nm` in XMTRX **loses**, because `comb` needs XMTRX for
+the position FTRV at `:2863`. The live light-loop candidate is `chan_eval`
+(`dc_pvr.c:837-902`) — 3 FIPRs per light per vertex, ~35-70k FIPR/frame.
+
+
 ## 2026-08-06 (later) — sh4zam vendored; the FIPR experiment measures FLAT
 
 Falco's direction, followed and measured. Recorded because the NEGATIVE result
@@ -50,8 +329,15 @@ hand fold it would replace is ~96 batches × ~140 instructions ≈ **67 µs of a
 `dc_gx_batch_is_offscreen` (`dc_gx.c:495`) puts 8 AABB corners through two
 scalar matrix stages per batch — ~2.0 ms/frame — and never touches the matrix
 unit, despite using the same `P·MV` product `dc_pvr.c` builds a line later.
-And the per-lit-vertex block (`dc_pvr.c:2868`) re-reads `mv`/`nm` from RAM per
-vertex for 6-7 FIPRs, on ~2,900 of ~3,100 town vertices.
+~~And the per-lit-vertex block (`dc_pvr.c:2868`) re-reads `mv`/`nm` from RAM per
+vertex for 6-7 FIPRs, on ~2,900 of ~3,100 town vertices.~~
+⚠️ **[CORRECTED 2026-08-06, session 6] That second candidate does not exist.**
+`mv`/`nm` are **hoisted per batch** at `:2779-2781`, and the seven ops at
+`:2875-2886` are already `fipr()` via `DC_DOT4`/`DC_DOT3` (`:187-191`) — the
+block is optimal as written, and holding `nm` in XMTRX *loses*, because `comb`
+needs XMTRX for the position FTRV at `:2863`. **The live light-loop candidate is
+`chan_eval` (`dc_pvr.c:837-902`)**: 3 FIPRs per light per vertex,
+~35-70k FIPR/frame.
 
 ⚠️ **sh4zam currently contributes ZERO bytes to the image** — its four `.c`
 files gc-section away and the one path that used a header is off by default.

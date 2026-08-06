@@ -1,12 +1,140 @@
 # Session state — resume here
 
-Updated 2026-08-05 (session 4). This file is **short on purpose**: only what is
+Updated 2026-08-06 (session 6). This file is **short on purpose**: only what is
 true *right now*, plus what to do next. Everything else is one hop away.
 **A fresh context should read `kb/RESUME.md` first** — that is the handoff and
-it carries the build lines and the eight measurement rules; this file is the
+it carries the build lines and the **nine** measurement rules; this file is the
 numbers and the queue.
 
-## ⭐⭐ 2026-08-06 — THE `-O0` BAN IS REVERSED. 2.8 MB OF `.text` AND +8 FPS
+## ⭐⭐ 2026-08-06 (session 6) — G1 RE-RUN: EVERY `[EMU64H]` NUMBER WAS HALF THE
+## TRUTH, AND RAM HAS STOPPED BEING THE BINDING CONSTRAINT
+
+⚠️ **`[EMU64H]` is per LOGIC TICK, not per presented frame — DOUBLE IT.** G1
+arms at the end of every tick (`dc_vi.c:405` frameskip, `dc_vi.c:633` presented)
+and `s_frames` counts ticks. Proof: `tot 24.28 × 2 = 48.56` against
+`draw 45.6 + skip 2.9 = 48.5`, and the `-O0` run's `42.86 × 2 = 85.7` against
+`78.3 + 8.2 = 86.5`. **Two sessions quoted the halved numbers.** Measurement
+rule **9** (`kb/RESUME.md` §0b), `kb/traps.md`.
+
+Run `smoke-oc-dc-g1b-20260806-164033-15671`, town, probe-free, medians over 47
+windows, **×2-corrected**:
+
+| | `-O0` | **`-Os` + `-O3`** |
+|---|---:|---:|
+| `draw` | 78.3 | **45.6** |
+| `G_TRIN_INDEPEND` | 44.5 / 292 | **34.4 ms / 306 calls = 112.5 µs, 75 % of the frame** |
+| `G_VTX` | 10.8 | **1.84** |
+| `G_MTX` | 4.36 | **1.72** |
+| `G_TEXRECT` | 4.34 | **2.88** |
+| `gap` | 15.8 | **5.96** |
+| `[EMU64H] tot` | 85.7 | **48.56** |
+
+`[PHASE] draw=45.6 skip=2.9 vi=0.4 | cull=2.0 xform=8.8 | v=2899 vlit=2689
+vcull=5250 us/v=3.06`, `cmds=3562`.
+
+- ⭐ **~23.6 ms is unattributed and it is the largest block in the project.** Of
+  TRIN's 34.4 ms, `cull 2.0 + xform 8.8 = 10.8` is measured `dc/`. The rest is
+  **emu64's `dl_G_TRIN` index expansion PLUS our own `GX*` attribute setters in
+  `dc_gx.c` — and those two have never been separated.** 52 % of the frame.
+  **Nothing below is costed until that split lands** (queue item 1).
+- ⭐ **G3 is the biggest lever in the project**, and bigger than its old
+  4.5-7.0 ms estimate: `vcull=5250` vs `v=2899` means **64 % of vertex
+  references are fully expanded and pushed through the GX setters before the
+  batch is rejected.**
+- ✅ **`gap` IS ATTRIBUTED — CLOSED.** It is emu64's own dispatch-loop overhead:
+  slot `HIST_GAP=64` (`dc_emu64_hist.c:87`) accumulated in `hist_enter()`
+  (`:124-131`) when `s_prev == HIST_GAP`, i.e. `emu64_taskstart_r`'s loop
+  control (`emu64.c:5807-5824`, `:5847-5855`, `:5874`) plus frame
+  prologue/epilogue. Confirmed by 15.8 → 5.96 when that loop went `-O3`.
+  ⚠️ `probe=` is **not** subtracted from `tot` or `gap` (`dc_emu64_hist.c:300`
+  only prints it) and both probes land inside `gap` by construction.
+- ❌ **G2 is DEAD** — its target *was* `gap`, now 5.96 ms and already `-O3`.
+  Delete `dc_emu64_shadow.cpp` after one A/B: it costs nothing when off (all
+  inside `#if DC_EMU64_SHADOW_LOOP > 0`, 20 KB only when on) **but it blocks G1**
+  via the `#error` at `dc_platform.h:417`. `kb/closed.md`.
+- ✅ **`G_VTX` is finished as a topic.** 10.8 → 1.84 ms from a compiler flag.
+- ✅ **Every state opcode is ≤ 0.5 ms.** Stripping state commands stays worth
+  nothing (F8).
+
+### RAM: the problem is no longer "does it fit"
+
+Committed `296a1d2`. Three links:
+
+| | shipping | + interiors/winter | **+ gyroids (now)** |
+|---|---:|---:|---:|
+| `.text` | 2,753,700 | 2,793,284 | **2,854,108** |
+| `.bss` | 3,945,484 | 4,428,076 | **4,791,884** |
+| image span | 8,926,124 | 9,446,380 | **9,878,540** |
+| `margin` | 6,061,268 | 5,541,012 | **5,109,364** |
+
+Real headroom (`margin` − 3,056,276 libc peak, rule 6) went **~146 KB on
+2026-08-04 → ~2.05 MB**, after spending 952,416 B on content. `MEMLEDGER OK`,
+`ASSET MISSING 0`, `aram LOST 0`, `deepest_scene 18`, `run_report --vs` no
+regression, town `us/v` 3.07 → 3.09, **gyroids confirmed rendering by a human**.
+
+**The old line "the full image still does not fit, and that is the only thing
+between here and a playable build" is VOID.** What binds now is **residency**:
+8,813,054 B of asset destination arrays can never all be resident, so the keep
+list still decides what exists. ✅ And the other extreme is closed by
+experiment — a full `DC_ASSET_STUB=0` image boots to
+`MEMLEDGER … margin=-781036 OVER`, fails a **15,638,528 B contiguous malloc**,
+and comes back with **all 14,495 assets MISSING** (`kb/closed.md`).
+
+⚠️ **Cost a keep-list addition from two links.** The gyroids were estimated at
+155,360 B by summing `Vtx` arrays and cost **432,160 B** of span — 2.8× low,
+because the files carry textures and display lists too (`kb/traps.md`).
+
+### Two more results, both with their own file
+
+- **T1 is designed and much cheaper than its concept note** — the seam is
+  already ours (`GXLoadTexObj` → `dc_gx_backend_texture_upload`), **no pool is
+  needed** (the PVR's VRAM LRU already holds every texture; main RAM is read
+  only to compute the cache key), so **phase 1 is −579,248 B** and **phase 2
+  buys 5,685 textures / 2,782,080 B of content for +68,000 B**.
+  `kb/levers.md` **L10**.
+- **A whole TEV class is unimplemented and it is visible.** The name-entry
+  keyboard renders black because 18 of its 26 display lists are **config #037,
+  class P3** — and `dc_pvr.c` implements no part of P3: `pv.oargb` is hardcoded
+  `0` at `:1988`. **27 of the 101 configs.** Not a stub, ruled out statically
+  and by argument. `kb/tev-map-hard-cases.md` §6.6.
+
+### Ranked next actions (2026-08-06) — supersedes every earlier list in this file
+
+**`kb/RESUME.md` §5 carries the same list and the two must agree.**
+
+1. ⭐ **Split the ~23.6 ms TRIN remainder.** One build, one run: a
+   `dc_time_us()` bracket around the `GX*` attribute setters in `dc_gx.c`. It
+   decides whether the work goes into emu64 (G3) or into our own renderer.
+   **Nothing below should be costed until it lands.**
+2. ⭐ **G3 — cull at TRIN entry.** 64 % of vertex references are wasted.
+3. **TEV P3 / `oargb`** — fixes the black keyboard and 27 configs. Needs a kill
+   switch and a screenshot pair. `kb/tev-map-hard-cases.md` §6.6.
+4. **AABB cull via XMTRX.** `dc_gx_batch_is_offscreen` (`dc_gx.c:435`, math at
+   `:495-519`) runs two scalar stages per corner — MV 3 dots (`:503-505`), P 4
+   dots (`:506-509`) = **200 mults/batch** — and never touches the matrix unit,
+   while `dc_pvr.c:2782-2799` builds the same `P·MV` one line later but **after**
+   the cull (`:559` cull, `:591` submit). Est **0.4-0.8 ms** of 45.6. Kill
+   switch `-DDC_GX_NO_FTRV_CULL`. ⚠️ Must call `dc_mtx_xmtrx_invalidate()` as
+   `dc_pvr.c:2812` does.
+5. **`chan_eval`'s light loop** (`dc_pvr.c:837-902`) — 3 FIPRs per light per
+   vertex, ~35-70k FIPR/frame. ⚠️ **Correction to the record: the per-lit-vertex
+   block at `dc_pvr.c:2868` is ALREADY OPTIMAL** — `mv`/`nm` are hoisted per
+   batch at `:2779-2781` and the seven ops at `:2875-2886` are already `fipr()`
+   via `DC_DOT4`/`DC_DOT3` (`:187-191`). Holding `nm` in XMTRX **loses**, because
+   `comb` needs XMTRX for the position FTRV at `:2863`.
+6. **T1 phase 1 (−579 KB), then phase 2** (every texture for +68 KB).
+   `kb/levers.md` L10 — run the `DC_TEXPOOL_PROBE` falsifier first.
+7. **N2b — wire the VMU save path.** Unchanged, and still the only way to get a
+   villager into the town.
+8. **A hardware burn.** Nothing this session ran on silicon, and Flycast models
+   no instruction cache against a 2.83 MB `.text` cut.
+9. **Re-cost the audio.** The 19.8 ms/DAC-frame figure that drove the whole
+   AICA-vs-software verdict was `-O0`; jaudio is `-Os` now and has never been
+   re-measured. ⚠️ `jammain_2.c` is the first quarantine suspect the moment
+   `DC_AUDIO=1` — C++ TU, missing return, 22 uninitialised reads
+   (`dc/opt-lists.mk`).
+
+## ⭐ 2026-08-06 — THE `-O0` BAN IS REVERSED. 2.8 MB OF `.text` AND +8 FPS
 ## FROM ONE FLAG, AND THE `dc/` CONTROL PHASE DID NOT MOVE
 
 `src/` builds at **`-Os`, with 14 hot TUs at `-O3`** (`DC_OPT_PROFILE=perf`,
@@ -50,6 +178,14 @@ per-opcode number in this file was measured at `-O0`.
 ## ⭐ 2026-08-05 — G1 RAN. ONE OPCODE IS 28 % OF THE TOWN FRAME, and it is not
 ## the one every plan was costing against
 
+⚠️ **[SUPERSEDED 2026-08-06 — every `[EMU64H]` figure in this section is HALF
+its real value.]** The histogram is per logic tick; at `ticks_per_visual = 2`
+these must be doubled. `G_TRIN_INDEPEND` was **44.5 ms of an 86.5 ms frame
+(51 %)**, not 22.25 of 78.3 (28 %); `G_VTX` was 10.8, `gap` 15.8. The section
+above carries the re-run at `-Os`/`-O3`. **`gap` is CLOSED** — it is
+`emu64_taskstart_r`'s loop control. Kept for the sequence and for the `G_VTX`
+correction, which stands.
+
 Run `smoke-G1-20260805-160640-92325`, town, probe-free, 11.5-12.1 FPS:
 
 ```
@@ -70,8 +206,10 @@ Run `smoke-G1-20260805-160640-92325`, town, probe-free, 11.5-12.1 FPS:
 - **The biggest addressable block in the frame is ours:
   `dc_gx_backend_submit`, 12.2 ms = 15.6 % of the draw phase**
   (`dc/src/dc_pvr.c:2448`). No trampoline, no sign-off.
-- **`gap=7.92 ms` (18 % of `tot`) is inside the draw phase, outside any emu64
-  command, and unexplained. OPEN.**
+- ~~**`gap=7.92 ms` (18 % of `tot`) is inside the draw phase, outside any emu64
+  command, and unexplained. OPEN.**~~ ✅ **CLOSED 2026-08-06** — it is emu64's
+  own dispatch-loop overhead (`HIST_GAP=64`, `dc_emu64_hist.c:87`,
+  `hist_enter()` `:124-131`), and it was 15.8 ms, not 7.92. See the top section.
 - **`vcull=6042` against `v=3002`: 66.8 % of vertices are culled after emu64
   paid full `-O0` price.** ⚠️ That is **not** worth 14.9 ms — culled vertices
   already cost `xform` nothing. An ideal cull at TRIN entry is
@@ -112,7 +250,10 @@ One RAM find: `dc/src/dc_misc.c:421` calls **double** `sin()` to build a startup
 table and drags in **5,940 B** of libm — 44 % of the image's libm, in our own
 code, removable without touching `src/` (`kb/levers.md`).
 
-### Ranked next actions (2026-08-05)
+### Ranked next actions (2026-08-05) — ⚠️ SUPERSEDED. Use the 2026-08-06 list at the top of this file.
+
+Kept for the reasoning only. Items 1-3 were costed against halved `[EMU64H]`
+numbers and an `-O0` frame; item 6's two levers are still the right ones.
 
 1. **`dc_gx_backend_submit` — 12.2 ms, ours, `-O2`, no gate.** First step is
    free: print the vertex-memo hit ratio and a per-batch `count` histogram from
@@ -287,10 +428,15 @@ build whose offsets were fine: `dl_G_DL`, `dl_G_ENDDL`, `dl_G_CULLDL` and
 correctly disagree afterwards. The mechanism behaved exactly as designed —
 it refused to run rather than corrupt — but it was refusing for a bogus reason.
 
-⚠️ **`pvr_dropped` is a NOISY counter across runs of identical code**: 0, 1,305,
-1,314 and 0 across four runs this session, including two that differed only in
-keep list. `run_report.py --vs` will call it a REGRESSION. Do not act on it
-without a second run.
+⚠️ **`pvr_dropped` is CLOSED, and it was never noise in the statistical sense
+(2026-08-06).** `s_tris_dropped` (`dc_pvr.c:134`) increments **only** on
+near-plane geometry — all three vertices behind (`:2149`, `w <= 0.001f`), a
+straddle under `-DDC_PVR_NO_NEARCLIP` (`:2162`), or Sutherland-Hodgman emitting
+`< 3` vertices (`:2181`) — so it is **purely data-dependent on camera
+position**. The 0 / 1,305 / 1,314 / 0 spread across four identical-code runs and
+the `1,300 → 0` on the `dc/src` `-O3` change were both *where the camera was
+standing*, not what the build did. `run_report.py --vs` will keep calling it a
+REGRESSION and keep being wrong. `kb/closed.md`.
 
 ⚠️ **Its documented 7-14 ms/frame estimate is above its own ceiling.**
 `emu64_taskstart_r` is 0x480 B of `.text` and SH-4 instructions are 2 bytes, so
@@ -552,9 +698,12 @@ a *consumer* is the standing technique; fog is the largest one still unread.
   exclusions. `src/` carries only **four** `#if defined(TARGET_DC)` branches;
   every compat fix lives in `dc/include/dc_prelude.h` as a force-include.
 - **The harness works and is verified against real CDIs**, not asserted.
-- **The full image still does not fit. That is the only thing between here and
-  a playable build** — the renderer, the platform layer and the boot path are
-  all observed working.
+- ~~**The full image still does not fit. That is the only thing between here and
+  a playable build**~~ ⚠️ **VOID 2026-08-06.** Real headroom is ~2.05 MB and the
+  binding constraint is **residency**, not fit — see the top of this file. And
+  the opposite extreme is closed by experiment: a full non-stub image fails a
+  15,638,528 B contiguous malloc and loads **nothing** (`kb/closed.md`). The
+  renderer, the platform layer and the boot path are all observed working.
 
 The build that renders (2026-08-02, session 2 — supersedes the older line):
 
@@ -896,12 +1045,19 @@ Gotchas: `kb/traps.md`.
 
 `CLAUDE.md` §1 is authoritative and must not be restated differently here.
 The short version: stock 16 MB (the 32 MB mod must never become a requirement),
-`src/` at `-O0` with codegen flags banned, never edit `src/`, never commit ROM
-material or disc images, every optimization gets a kill switch, agents do not
-run git — the main thread commits.
+**`src/` at `-Os` with a reviewed `-O3` hot list — `DC_OPT_PROFILE`,
+`dc/opt-lists.mk`, and `DC_OPT_PROFILE=o0` is the byte-identical revert**, never
+edit `src/`, never commit ROM material or disc images, every optimization gets a
+kill switch, agents do not run git — the main thread commits.
 
-**Be honest in reporting.** "Still N MB short with `-O0` mandatory" is a valid
-and important result. If the levers do not close the gap, cutting content
-(`kb/levers.md` L5 — the user's call, not engineering's) or declaring a
-stock-16 MB build infeasible are the honest options; quietly reopening the
-optimization question is not.
+⚠️ **The two sentences that used to close this file said `-O0` was mandatory and
+that "quietly reopening the optimization question" was dishonest. Both are
+reversed** (2026-08-06); the post-mortem is in `kb/closed.md`, and its lesson is
+that a directive can settle a preference but not a fact about a compiler nobody
+had run.
+
+**Be honest in reporting.** A negative result is a result: the non-stub boot
+that proved "just put the assets in RAM" impossible is worth more than the
+estimate it replaced. If a lever does not deliver, cutting content
+(`kb/levers.md` L5 — the user's call, not engineering's) is an honest option;
+quoting an unmeasured number as if it were measured is not.

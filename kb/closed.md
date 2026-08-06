@@ -251,6 +251,43 @@ every paged page **uncached**; TLB reach is 253,952 B against 8.6 MB; KOS has
 **no eviction path at all**; and MMU-on makes store queues fault-prone on
 SH7750 silicon.
 
+## "JUST PUT ALL THE ASSETS IN RAM" — REFUTED BY A BOOT (2026-08-06)
+
+The RAM picture moved far enough this session that the question deserved an
+experiment instead of an estimate, so a full `DC_ASSET_STUB=0` image was linked
+and run (`smoke-oc-dc-nostub-20260806-165321-16857`).
+
+```
+text 3,050,152  data 2,224,820  bss 10,493,196   _end 0x8cf19b6c
+MEMLEDGER FIT image_span=15768428 additive_heap=1658752 usable=16646144
+              margin=-781036 OVER          <- the first OVER the ledger has printed
+Out of memory. Requested sbrk_base 8d016000, was 8cf36000, diff 917504    (main.dol)
+Out of memory. Requested sbrk_base ...                   diff 15638528    (foresta.rel)
+```
+
+Both allocations fail, so `rom_src=0` never resolves and **all 14,495 asset rows
+come back MISSING — the non-stub image has LESS content than the stubbed one.**
+
+**The structural reason, which no lever can move:** the non-stub path asks libc
+for **one contiguous 15,638,528 B buffer**. A 15.6 MB `malloc` cannot fit in
+16 MB next to a 15.8 MB image, at any margin.
+
+```
+span 15,768,428 + additive 1,658,752 + libc peak 3,056,276 = 20,483,456
+                                              usable         16,646,144
+                                                short by       3,837,312
+```
+
+Two corrections banked with it, both of which were live misconceptions:
+
+- **S6 is NOT a demand loader.** It deletes `s_assets[]`'s `path` field and
+  14,495 string literals (`make_src_shrink.py:467`) — 598,648 B of `.rodata` —
+  and nothing else. The rewritten loader still does
+  `memcpy(dest, rom + rom_off, size)` against the whole resident REL. **The real
+  demand loader is `dc_stub_keep_assets()` / `dc_stub_keep_load_one()`
+  (`dc_main.c:885-1135`), entirely inside `#ifdef DC_ASSET_STUB`.**
+- **`rom_src=0` means `SRC_REL`**, not "row 0".
+
 ## AICA's 2 MB cannot hold a C array
 
 DMA-only over a 16-bit 25 MHz G2 bus. Still viable as a *destination* for
@@ -411,6 +448,38 @@ SETTIMG 0.25/112 · ENDDL 0.18/131 · LOADTLUT 0.13/42
 is worth nothing to strip. **Do not build a strip rule** — not against the
 static count, and now not against the runtime mix either. The frame is in
 `G_TRIN_INDEPEND` (22.25 ms) and in `gap` (7.92 ms, still unexplained).
+
+## G2 — reimplementing emu64's dispatch LOOP. DEAD (2026-08-06)
+
+G2 was "reimplement `emu64_taskstart_r` in `dc/` at `-O2`, because `src/` is
+stuck at `-O0`". Two things killed it, and the second is a measurement:
+
+1. `emu64.c` is on the `-O3` hot list (`dc/opt-lists.mk`). **The compiler did
+   G2's job, in the right place, with no interposition and no sign-off.**
+2. **G2's target is exactly `gap`, and `gap` is now 5.96 ms of a 45.6 ms
+   frame** — down from 15.8, on the strength of that same flag (`kb/state-log.md`
+   2026-08-06; note the ×2 rule before comparing it to anything older).
+
+**Recommendation: delete `dc/src/dc_emu64_shadow.cpp` after one A/B.** ⚠️ It
+costs nothing when off — the whole body sits inside
+`#if DC_EMU64_SHADOW_LOOP > 0` and it is 20 KB only when on — so the reason to
+remove it is not bytes: **it blocks G1** through the `#error` at
+`dc_platform.h:417`, and G1 is the only instrument allowed to price an opcode.
+
+## `pvr_dropped` — a data-dependent counter with no speed mechanism (2026-08-06)
+
+`s_tris_dropped` (`dc_pvr.c:134`) increments **only** on near-plane geometry:
+all three vertices behind the plane (`:2149`, `w <= 0.001f`), a straddle under
+`-DDC_PVR_NO_NEARCLIP` (`:2162`), or Sutherland-Hodgman emitting fewer than
+three vertices (`:2181`). It is a function of **where the camera is standing**,
+nothing else.
+
+So the `1,300 → 0` that `run_report --vs` reported across the `dc/src` `-O3`
+change was the camera, not the flag — and the older 0 / 1,305 / 1,314 / 0 spread
+across four identical-code runs was the same thing. **Do not read this counter
+as a regression, a win, or evidence about the renderer.** It remains a
+correctness tripwire for the clipper and nothing more; `run_report.py --vs` will
+keep calling it a REGRESSION and keep being wrong about it.
 
 ## A census cannot produce a town keep list (2026-08-04)
 

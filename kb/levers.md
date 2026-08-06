@@ -1,5 +1,34 @@
 # RAM levers — the ranked ledger
 
+## ⭐⭐ 2026-08-06 (session 6) — RAM IS NO LONGER THE BINDING CONSTRAINT
+
+**Read this before costing anything else in this file.** The image after today's
+content spend (committed `296a1d2`), measured from three links:
+
+| | shipping | + interiors/winter | **+ gyroids (now)** |
+|---|---:|---:|---:|
+| `.text` | 2,753,700 | 2,793,284 | **2,854,108** |
+| `.bss` | 3,945,484 | 4,428,076 | **4,791,884** |
+| image span | 8,926,124 | 9,446,380 | **9,878,540** |
+| `margin` | 6,061,268 | 5,541,012 | **5,109,364** |
+
+Real headroom — `margin` **minus** the 3,056,276 B libc peak, which is the only
+honest form (rule 6) — went from **~146 KB on 2026-08-04 to ~2.05 MB**, and that
+is *after* spending 952,416 B on content. `MEMLEDGER OK`, `ASSET MISSING 0`,
+`aram LOST 0`, `deepest_scene 18`, `run_report --vs` clean, town `us/v`
+3.07 → 3.09, gyroids confirmed rendering by a human.
+
+**The consequence for this file: "does it fit" has stopped being the question.**
+What binds now is **residency** — 8,813,054 B of asset destination arrays can
+never all be resident, so the keep list still decides what exists. A lever is
+now worth ranking by *what content it delivers per byte*, not by how much of a
+deficit it closes. The deficit is gone; `kb/closed.md` records the boot that
+proved the other extreme (a full non-stub image) is unreachable in principle.
+
+⚠️ **Cost a keep-list addition from two links.** The gyroid set was estimated at
+155,360 B by summing its `Vtx` arrays and came in at 432,160 B of span — 2.8×
+low, because the files also carry textures and display lists. (`kb/traps.md`.)
+
 ## ⭐ L0 — OPTIMIZATION, APPLIED 2026-08-06. −2,826,288 B of `.text`
 
 **Bigger than every other lever in this file put together, and it was banned
@@ -65,12 +94,16 @@ Two results that reorder this list, both derived in `kb/STATE.md`:
   the pool it loads into is additive heap and may be at most ~498,250 B unless
   L3 also lands. L1 alone is not really sufficient.
 
-Only **layout** levers are legal. `-O0` is a user directive, so anything that
-changes instruction selection is banned:
+⚠️ **[VOID 2026-08-06 — kept only so the shape of the error stays visible.]**
+~~Only **layout** levers are legal. `-O0` is a user directive, so anything that
+changes instruction selection is banned:~~ **Codegen is a first-class lever on
+both axes now (L0 above): `-Os` was worth 2,826,288 B of `.text`, more than
+every layout lever in this file combined.** The table's first row is reversed;
+every other row is still accurate.
 
 | Lever | Changes instruction selection? | Allowed |
 |---|---|---|
-| `-O1/-O2/-Os`, LTO, `-mrelax` | yes | **no** |
+| ~~`-O1/-O2/-Os`, LTO, `-mrelax`~~ | yes | ~~**no**~~ → **`-Os`/`-O3` per `DC_OPT_PROFILE`; LTO and `-mrelax` untested** |
 | `.bss` right-sizing, arena sizing | no | yes |
 | Moving data/code to `/cd`, demand loading | no | yes |
 | Linker script placement, code overlays | no | yes |
@@ -512,7 +545,14 @@ the storage is live.** Do not re-propose these.
 
 ## L4. `.text` relocation — NOT NEEDED. Do not start this.
 
-`-O0` is mandatory, so `.text` (6,318,552 B) cannot shrink; it can only move.
+⚠️ **[CORRECTED 2026-08-06 — the premise is gone and the verdict is stronger.]**
+~~`-O0` is mandatory, so `.text` (6,318,552 B) cannot shrink; it can only move.~~
+**`.text` shrank to 2,854,108 B on a compiler flag (L0), so the item this lever
+existed to relocate is now less than half its old size against ~2.05 MB of real
+headroom. Do not start this — it was already unnecessary, and it is now
+unnecessary by a wider margin.** The rest of the entry stands as written.
+
+
 MMU paging is **DEAD** (`kb/closed.md`). The surviving mechanism would be
 **ScummVM-style code overlays** — a real, shipping SH-4 `R_SH_DIR32` ELF loader
 (`backends/platform/dc/dcloader.cpp` + `plugin.x`, in production since 0.7.0).
@@ -601,6 +641,79 @@ Related and already applied: `dc/src/dc_fmath.c` defines `sqrtf` itself, so
 in — **324 B**, on top of the speed win of not running a software square root
 339 times a frame. The mechanism is archive extraction, not symbol overriding:
 our objects precede `-lm` on the link line, so libm's copy is never reached.
+
+## ⭐ L10. T1 — textures never reach the SH-4. **−579,248 B, then +2.78 MB of content for 68 KB** (designed 2026-08-06)
+
+`kb/research-creative-ram.md` T1 has been the highest-value open *concept* since
+2026-08-01. Designed against the tree today it is **smaller, better-placed and
+cheaper than its own write-up**, and it is the first lever since R1 that frees
+bytes instead of converting MISSING into PRESENT.
+
+| | resident before | cost | **net** | delivers |
+|---|---:|---:|---:|---|
+| **phase 1** — the 669 case-1 textures (excludes NPC, segment-bound and file-static) | 618,048 | ~38,800 | **−579,248** | the same content, for 579 KB less |
+| **phase 2** — extend the map to all 6,354 eligible | — | **+68,000** | +68,000 | **5,685 textures / 2,782,080 B that render as nothing today** |
+
+**Phase 1 is a real saving, not a rule-8 content swap.** Phase 2 is the best
+bytes-per-content ratio anywhere in this file: 68 KB for 2.78 MB.
+
+### Why it is cheap — three findings, in order of how much they cut
+
+1. **The seam is already ours.** `GXLoadTexObj` (`dc_gx.c:2288`) →
+   `dc_gx_backend_texture_upload` (`dc_gx.c:2333` → `dc_pvr_texture.c:1060`).
+   **No `src/` rewrite, no `make_src_shrink.py` rule, no `--wrap`** — strictly
+   cheaper than R1's seam, which needed a rewriter to reach one `bcopy`.
+2. **No N-slot pool is needed.** The PVR already holds every texture twiddled in
+   VRAM behind a content-keyed LRU (`uploads=306 hits=894442 evictions=0`). The
+   main-RAM array is read on every bind **only to compute the cache key**
+   (`tex_content_hash`, `dc_pvr_texture.c:1092`, ~109 binds/frame). Replace that
+   key with a synthetic one built from the asset row and the array is needed
+   **only on a miss** ⇒ **one 24,576 B staging buffer**, ~38,800 B all in.
+   R2/R3's 16-slot machinery is not required here.
+3. **The population is tiny and uniform.** Max texture 4,096 B with a single
+   outlier (`FONT_nes_tex_font1`, 24,576 B — which is why the staging buffer is
+   that size); **99.4 % are ≤ 2,048 B**. Every texture is `rom_src=0`, `swap=0`,
+   i.e. a pure `pread` with no byte-swap.
+
+### The inventory it rests on
+
+Method: `make_stub_data.py`'s own `IFDEF_RE`/`DECL_RE`, cross-checked because it
+reproduces this file's independently-derived acre figure of **815,024 B
+exactly**.
+
+| population | total | resident |
+|---|---:|---:|
+| all asset destinations | 8,813,054 B / 16,341 syms | 1,885,176 B / 1,742 syms |
+| of which textures | 5,053,824 B | **752,640 B** |
+
+### The hazard, and it is smaller than it looks
+
+27 of 8,761 `gsDPSetTextureImage_Dolphin` sites use **pointer arithmetic**. All
+27 are in `src/data/model/hnw_model.c`, all of the form `anime_4_txt + 0x…` —
+and `anime_4_txt` is `SEGMENT_ADDR(0x0B,0)`, **not a `.bss` symbol**, so it
+resolves through `gSPSegment` and is safe. Mitigation as specified: exclude the
+14 `gSPSegment`-argument symbols (1 resident, 512 B) and all of
+`src/data/npc/**` (R2's domain).
+
+### The falsification experiment — one build, one run, ZERO behaviour change
+
+`DC_TEXPOOL_PROBE=1`, counters `interior` / `mutated` / `oversize`. **Any one of
+them non-zero kills the design as specified.** Run it before writing the loader.
+
+### ⚠️ The seek risk, and the fix that already exists in the tree
+
+T1 issues **one seek per distinct texture, ~306 per run** = **6-30 s of seeks on
+hardware**, concentrated as mid-scene hitches — the one thing that could make
+this a regression a human notices. Resident texture ROM offsets are **clustered**
+(median gap 512 B; 863 of 905 gaps ≤ 32 KB), so a **32 KB read-ahead window
+collapses ~306 seeks to ~40**.
+
+**`dc_keep_sweep()` (`dc_main.c:977-1108`) already implements exactly that
+window discipline — and R1 does not use it**, which is why R1 still pays 27
+unbatched seeks per acre load. Fixing R1 and building T1 want the same helper.
+
+⚠️ **Do NOT reach for a wholesale sorted prefetch instead.** Resident texture
+offsets span **10.9 MB**, i.e. ~22 s of linear read.
 
 ## L7. Bucket 6's high-water mark — deferred, deliberately.
 

@@ -2,8 +2,19 @@
 
 The 17 two-texture configs (10 of them droppable N64 mip-LOD), coefficients
 that leave [0,1] and the inverted-texture trick, the 3-config A3 alpha
-approximation, the single `GX_TEV_SUB`, and the two blend modes PVR cannot
-express (§6). Read when the table sends you here. Part of `kb/tev-map.md`, whose stub maps every § to its file.
+approximation, the single `GX_TEV_SUB`, the two blend modes PVR cannot
+express (§6), and — added 2026-08-06 — **the whole of class P3, which this
+document has always described as easy and which `dc_pvr.c` does not implement at
+all (§6.6)**. Read when the table sends you here. Part of `kb/tev-map.md`, whose stub maps every § to its file.
+
+> ## 🔴 [2026-08-06] THE HARDEST CASE IN PRACTICE IS NOT ON THIS PAGE — IT IS §6.6
+>
+> This file was written around the configs whose *maths* does not fit the PVR.
+> The one costing visible pixels today is a config whose maths fits perfectly
+> (`MODULATE` + `oargb`, exactly as `kb/tev-map-table.md` prescribes) and which
+> **the renderer simply never implemented**: `pv.oargb` is a hardcoded `0` at
+> `dc_pvr.c:1988`. That is **27 of the 101 configs**, and it is why the
+> name-entry keyboard renders black. See §6.6.
 
 **Marking convention used throughout:**
 `[F]` = decoded fact (from the seed file or read directly out of the source).
@@ -165,5 +176,68 @@ puddle overlays). Recommended handling, in order:
 `blend_mode/src/dst` + `color_update`/`alpha_update` to `ShaderKey` in the
 re-harvest and count. This is the largest remaining unknown in the renderer
 plan — bigger than any TEV combiner question.
+
+### 6.6 🔴 CLASS P3 IS NOT IMPLEMENTED — 27 configs, and it is VISIBLE `[F]` (2026-08-06)
+
+**Diagnosed from a human report that the name-entry keyboard renders BLACK.**
+This is the first entry on this page that is an *implementation* gap rather than
+a hardware one: `kb/tev-map-table.md` §3 says P3 is `base·T + offset` and maps to
+`MODULATE` + `oargb`, which is exact. **`dc_pvr.c` implements no part of it.**
+
+**Ruled out first, so nobody re-walks it.** Not a stub: the widget draws at
+`m_editor_ovl.c:2221-2258` (`mED_KeyDraw`), 26 display lists, and its assets
+`kai_sousa.c` / `kai_sousa2.c` / `lat_sp.c` are on **both** keep lists and in the
+generated loader. It is also ruled out *by argument* — alpha here is `TEXEL0`, so
+a zeroed texture would be **invisible, not black** (`kb/traps.md`, "a stubbed
+asset looks like a renderer bug").
+
+**The config.** 18 of the 26 DLs — every structural piece: `mojibanT`,
+`controllerT`, `controller2T`, `shitaT`, `controllpadT`, `cursorT`, `3DT` and
+the button caps — use
+
+```c
+gsDPSetCombineLERP(PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT,
+                   0, 0, 0, TEXEL0)
+```
+
+= **TEV config #037, class P3/A1**, `kb/tev-map-table.md` §4 row 37:
+`RGB = C2 + (C1 − C2)·T0`, `A = T0a`.
+
+**Why nothing in the renderer catches it** `[F]`:
+
+| path | where it gives up |
+|---|---|
+| `tev_const_color()` | fails its **first** test (`dc_pvr.c:1000`) — it needs `b`/`c` == ZERO; here they are ENVIRONMENT and TEXEL0 |
+| `tev_fold_color()` | `tev_carg_affine()` falls through at `dc_pvr.c:1162` for `GX_CC_TEXC` — so **`-DDC_PVR_TEVFOLD` does not fix it**, and that is a free falsification test |
+| `pv.oargb` | **hardcoded `0` at `dc_pvr.c:1988`. PVR offset colour has never been wired.** |
+
+**So what is drawn.** The DL clears `G_LIGHTING`, so the material source is VTX —
+the same mechanism as `mFont_SetVertex_dol` (`dc_pvr.c:1209-1216`) — and the
+result is `rgb = vtx.rgb · T0.rgb`: **both PRIM and ENV are lost.** 21 of the 26
+DLs are wrong. The 5 that survive use the flat `(0,0,0,PRIMITIVE)` shape that
+`tev_const_color()` *does* recognise.
+
+**The fix is native and needs no second pass** `[I]`:
+
+```
+vertex base colour = PRIM − ENV
+per-vertex oargb   = ENV
+env                = PVR_TXRENV_MODULATE + the offset-colour bit
+```
+
+`pv.oargb` is already stored in the vertex, so the **per-vertex cost is ~zero**.
+⚠️ It needs its own kill switch and a **screenshot pair** — widenings in this
+family have regressed before (`dc_pvr.c:1080-1098`), and §6.2's out-of-range
+coefficient analysis applies the moment `oargb` goes live (18 of the 56 P2/P3
+configs can drive `base` negative; #037 is on that list).
+
+**Falsifiable prediction, worth checking before writing any code:** the panel is
+black but the 40 key caps are **correctly coloured** (`m_editor_ovl.c:2092` uses
+the recognised shape). **If the caps are black too, this diagnosis is wrong.**
+
+⚠️ **Relationship to the open #007 bug (`kb/tev-map-alpha.md` §5.6): #007 loses
+both ALPHA factors, #037 loses both COLOUR constants. Same family, opposite
+halves** — and both are "the folded polynomial was decoded correctly years ago
+and the recogniser is narrower than the table".
 
 ---

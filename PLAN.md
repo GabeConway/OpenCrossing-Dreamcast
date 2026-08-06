@@ -468,7 +468,13 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
   exclusions, and `src/` was not modified:
   every compat fix lives in `dc/include/dc_prelude.h` as a force-include. It
   links and produces a 27 MB unpadded CDI.
-- **M2 — pixels. ← current milestone; RAM is the blocker.** Boots to title
+- **M2 — pixels. ← current milestone. ⚠️ RAM IS NO LONGER THE BLOCKER
+  (2026-08-06).** Real headroom is **~2.05 MB** and the image carries the
+  summer acres, the interiors, the winter set and the gyroids. What binds now
+  is **residency** — 8,813,054 B of asset destination arrays can never all be
+  resident, so the keep list decides what exists — and the opposite extreme is
+  closed by experiment: a full `DC_ASSET_STUB=0` image fails a **15,638,528 B
+  contiguous malloc** and loads **nothing** (`kb/closed.md`). Boots to title
   screen in Flycast on GLdc stage-A renderer; arena shrunk with boot-time
   memory ledger; assets load from `/cd`. `tev-map.md` written (all 101 configs
   classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
@@ -495,7 +501,7 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 | Risk | Sev | Mitigation |
 |---|---|---|
-| RAM doesn't fit even after §3.1 | **fatal, and now ACTIVE** | measured at 22.5 MB vs 16 MB; ~~levers are layout-class only (§3.2)~~ **[2026-08-06: not only — `-Os` on `src/` took `.text` from 5,506,964 to 2,753,700 B, the single largest cut the project has landed]**. Asset pack lands −15.68 MB of peak but exposes an 8.22 MB destination-array floor. If the remaining levers don't close it, the honest outcomes are: cut content, or the port doesn't fit. ~~not "turn on -O2"~~ — that one turned out to be real, and `DC_OPT_PROFILE=size` (flat `-Os`) is the reserve lever if the image stops fitting |
+| ~~RAM doesn't fit even after §3.1~~ | ~~**fatal, and now ACTIVE**~~ → **RETIRED 2026-08-06** | It fits, with **~2.05 MB of real headroom**, and the image now carries the interiors, winter and the gyroids on top of every summer acre. `-Os` on `src/` took `.text` from 5,506,964 to 2,753,700 B — the single largest cut the project has landed — and `DC_OPT_PROFILE=size` (flat `-Os`) is still the reserve lever. **The risk that replaces it is RESIDENCY:** 8,813,054 B of destination arrays cannot all be resident, so content is gated by the keep list, and the fix is per-class demand loading (`kb/levers.md` L10 = T1). ⚠️ Read `margin` minus the libc peak, never `margin` (rule 6) |
 | Game logic too slow on SH-4 | fatal | M3 gate. ~~The `-O2` term is **gone** (§3.2)~~ **[2026-08-06: the term is back, measured at ~1.8× on the town frame — 11.6 → 20.6 FPS — which is less than the 2–3× originally assumed and does not by itself close the gap]**. Remaining: 30 fps target, FTRV/XMTRX, store queues, source-level work on profiled hot functions. **Unmeasured on hardware.** |
 | Source-level hot-path rewrites diverge from upstream | med | keep them minimal and upstreamable. (The old rationale "they're reviewable in a way `-O2` is not" is void — the port ships optimized; the divergence risk is now just ordinary fork drift) |
 | Alignment faults (residual class, now with an optimizing compiler) | high | `-fno-store-merging` in `OPT_GUARDS`; exception-handler triage (installed in `dc_main.c`); per-TU quarantine via `DC_OPT_O0_EXTRA` / `tools/dcopt/bisect_o0.sh`; fix at source |
