@@ -1,5 +1,74 @@
 # Session state — resume here
 
+## ⭐⭐⭐ 2026-08-06 (session 7) — THE MUSIC NEVER PLAYS, AND IT IS THE AUDIO
+## COMMAND QUEUE, NOT THE SYNTHESISER
+
+**Human, on a running build: "the music isn't working though, only the talking
+sound."** Root cause identified with evidence already in the logs:
+
+- `Na_GameFrame` pushes ~55 commands/frame into a 256-entry ring; the ONLY
+  consumer is `CreateAudioTask` (`sub_sys.c:733-736`), which on DC runs **only
+  while the scene gate is armed** (`dc_audio.c:1104`). `DC_AUDIO_SCENES=3,9`
+  leaves scenes **4 and 18 DISARMED**, the 64-slot queue fills,
+  `Nap_SendStart` stops advancing `read_pos`, and `Nap_PortSet` overwrites one
+  slot forever. Observed: **`SendStart::Mesg Full Queue`, 6 events**.
+- ⭐ **Why only MUSIC dies:** BGM's `START_SEQ` is issued **once** per scene
+  (`game64.c_inc:1511`); SFX re-issues from 8 sites and VOICE from every
+  dialogue message. **A dropped command is invisible on SFX and permanent on
+  BGM.** `grp->flags.enabled` never goes TRUE (`system.c:822`).
+- Ruled out: sample data (`aram audio=8300384 LOST=0 zero=0 ext=3/32`), the
+  sequencer chain (speech proves it runs), the jaudio heaps (they fit).
+- **FIX:** drain the port queue every tick regardless of arm state — gate
+  **synthesis**, not command processing. **Free confirmation: one rebuild with
+  `DC_AUDIO_SCENES=all`.**
+
+### ⚠️ RETRACTED THE SAME SESSION — the voice census measured a broken state
+
+`[DC/VOICE]` ran while BGM was absent. **"The voice cap is dead because the town
+never exceeds 0-4 concurrent voices" and "FIR/comb never run" are both
+WITHDRAWN** — that was the music not playing. Both levers are **untested, not
+dead**, and L2's mix-rate numbers are SFX-only. **An instrument pointed at a
+subsystem that is not running measures the subsystem not running**; a human ear
+caught in one sentence what three runs did not.
+
+## ⭐⭐ 2026-08-06 (session 7) — G4 RAN. THE ~23.6 ms IS FOUR-FIFTHS emu64's
+
+Queue item 1 is CLOSED. `-DDC_PERF_GXSPLIT=1`, town, 187 matched windows,
+per PRESENTED frame (⚠️ **not** per tick — unlike `[EMU64H]`):
+
+| | ms |
+|---|---:|
+| `[PHASE] draw` | 69.3 |
+| `G_TRIN_INDEPEND` ×2 | **55.5** |
+| `cull` + `xform` (already attributed) | **14.0** |
+| **OURS — `dc_gx.c` setters, probe-subtracted** | **8.4** |
+| **emu64 — `gxgap` + uncharged intervals** | **~30.9** |
+
+- ⭐ **The work belongs in emu64 (G3), not in our renderer.**
+- ⭐ **G3's "net loss" case is REFUTED.** `gxpos` is one call per vertex by
+  construction: **0.536 µs/ref** against 1.29 ms over ~300 commands. At the
+  measured **75 %** cull rate G3 saves **5.4 ms floor / 19.2 ms ceiling**.
+- ✅ Instrument self-validated: `posn=13,197` vs `v+vcull=13,329`, counted by
+  different code in different files. `probe=2.11 ms`, subtracted.
+
+**TEV P3 is implemented and compile-verified, NOT run** (`-DDC_PVR_TEVP3`).
+Wires `pvr_vertex_t.oargb` + `gen.specular`, which this port had never used.
+**9 of 27 P3 configs exact**, not "P3 implemented". `[DC/PVR] tevp3 batches=0`
+on a run reaching the keyboard falsifies the diagnosis without a screenshot.
+
+### Ranked next actions (2026-08-06, session 7) — supersedes the list below
+
+1. 🔴 **Drain the audio command queue every tick.** The BGM bug above. One
+   rebuild with `DC_AUDIO_SCENES=all` confirms it first, for free.
+2. ⭐ **G3 — cull at TRIN entry.** Now costed from measurement, not estimate:
+   **5.4-19.2 ms** of a 45-69 ms frame. Design (trampoline, index walk, the
+   `dirty_check`-first ordering rule) is in `kb/research-fps-ideas.md`.
+3. **Re-run the audio census WITH music playing.** Every audio number in this
+   file is SFX-only until then — including L1, L2 and L4.
+4. **TEV P3 screenshot pair** — the code is in and off.
+5. **A hardware burn.** Flycast under-reproduces the stutter 10× (15/900 s here
+   vs 192/420 s on console) and models no instruction cache.
+
 Updated 2026-08-06 (session 6). This file is **short on purpose**: only what is
 true *right now*, plus what to do next. Everything else is one hop away.
 **A fresh context should read `kb/RESUME.md` first** — that is the handoff and

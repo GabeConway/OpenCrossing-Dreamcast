@@ -1,5 +1,111 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-06 (session 7, later) — THE MUSIC NEVER PLAYS, AND IT IS THE
+## AUDIO COMMAND QUEUE. THE VOICE CENSUS MEASURED A BROKEN STATE
+
+**Human, on a running build: "audio sounds right … the music isn't working
+though, only the talking sound."** That single sentence reframes everything
+below it and retracts two lever deaths from earlier in this session.
+
+**THE MECHANISM, and the evidence is in logs that already existed.**
+
+| fact | evidence |
+|---|---|
+| the audio command queue overruns | `SendStart::Mesg Full Queue` — **6** events in the `-Os` run, **2** in the `-O0` run |
+| the gate is disarmed for whole scenes | `DC_AUDIO_SCENES=3,9`, and the run visits scenes **3, 4, 9, 18**. `scene 4: DISARMED` |
+| sample data is NOT the problem | `[DC/ARAM] audio=8300384 LOST=0 zero=0(0 B) ext=3/32 drop=0` — no sequence, bank or wave fetch was ever zero-filled |
+| the sequencer chain runs | speech and SFX are audible, and they traverse the identical `dc_audio_pump → … → Nas_MySeqMain` path |
+
+`Na_GameFrame` pushes ~55 commands per game frame into a **256-entry** ring
+(`sub_sys.c:215-225`) and posts one message per frame into a **64-slot** queue.
+The **only** consumer is `CreateAudioTask` (`sub_sys.c:733-736`), which on DC
+runs **only while the scene gate is armed** (`dc_audio.c:1104`). Across a
+disarmed scene the queue fills, `Z_osSendMesg` returns −1 (`os.c:51-56`),
+`Nap_SendStart` stops advancing `AG.thread_cmd_read_pos` (`sub_sys.c:274`), and
+`Nap_PortSet` then hits `if (write_pos == read_pos) write_pos--` and
+**overwrites the same slot forever**.
+
+⭐ **Why that silences MUSIC and nothing else.** BGM's `START_SEQ` is issued
+**exactly once** per scene / per in-game hour (`game64.c_inc:1511`; once
+`mBGMPsComp_main_req_start` sets `mBGMPs_FLAG_EXECUTE` at `m_bgm.c:1543-1545`
+it never re-fires). SFX re-issues `START_SEQ(SE_GROUP,242,0)` from **eight**
+sites, and VOICE re-issues from `Na_SpecChange` on **every dialogue message**.
+**So a mechanism that silently drops one command is invisible on SFX and
+permanent on BGM.** `__Nas_StartSeq` never runs, `grp->flags.enabled` stays
+FALSE (`system.c:822`, gate at `track.c:2129`), and the sequencer ticks over a
+group that was never armed.
+
+**This port already measured the same overrun and did not connect it to audio:**
+`dc_os.c:606-609` records *"3,374 of 3,956 console lines — 85.3 % — are jaudio's
+`SendStart::Mesg Full Queue` … because the audio command queue is never
+drained."*
+
+**THE FIX SHAPE:** drain the port queue every tick regardless of arm state — the
+gate should skip **synthesis**, not command processing, which is what
+`dc_audio.c:1006-1044` already says it intends. **The free confirmation is one
+rebuild: `DC_AUDIO_SCENES=all`.** If BGM appears with `all` and not with `3,9`,
+it is proved.
+
+### ⚠️ TWO LEVER DEATHS FROM EARLIER TODAY ARE RETRACTED
+
+The `[DC/VOICE]` census was run **while BGM was absent**, and nobody noticed
+until a human listened. Its shape is still real, but two conclusions drawn from
+it are not:
+
+- ❌ **"The voice cap (L1) is dead because the town runs at 0-4 concurrent
+  voices and never approaches the 24 ceiling."** RETRACTED. 0-4 voices was
+  **the music not playing**, not a quiet town. A sequenced BGM track uses many
+  channels. **L1 is untested, not dead.**
+- ❌ **"Cutting FIR and comb (L4) is dead, `filt@=0 comb@=0`."** RETRACTED for
+  the same reason — those stages are set by sequence commands
+  (`sub_sys.c:571-595`), and no sequence was running.
+- ⚠️ **L2's mix-rate numbers are also SFX-only** and will not hold once music
+  plays. They are recorded below as what they are.
+
+**The lesson, and it belongs with measurement rule 1:** `ASSET MISSING` empty is
+not the only precondition for believing a measurement. **An instrument pointed
+at a subsystem that is not running measures the subsystem not running.** The
+census had no way to say "no sequence is playing", and every counter it fed was
+therefore describing silence. A human ear caught in one sentence what four
+hypotheses and three runs did not.
+
+### L2 — internal mix rate 48000 → 24000, measured (SFX only, see above)
+
+`DC_AUDIO_MIXRATE=24000` → `samples/update 200 → 96`. Sound still produced
+(`[NEOS_OUT] peak=6406`), `ASSET MISSING 0`, scene 18 → 9 reached.
+
+| voice-updates | mean before | mean after | |
+|---|---:|---:|---|
+| 0-7 | 1,863 µs | **1,591** | −15 % |
+| 8-15 | 3,702 | **2,786** | −25 % |
+| 16-23 | 5,345 | **3,853** | −28 % |
+| 24+ | 6,547 | **5,039** | −23 % |
+| max observed | 9,522 | **6,891** | −28 % |
+
+Real, and cheap, and **not a fix** — it is a tax cut, and it costs the high
+band. Hold it until the BGM bug is closed, or it pays for someone else's bug.
+
+### The `-Os` regression hypothesis — NOT settled, and probably not the story
+
+The timeline is real: `210660d` "sound comes out" (2026-08-04) was at **`-O0`**;
+`9688c42` moved all of `src/` including jaudio to **`-Os`** (2026-08-06); every
+stutter report is after it. Session 6 tested `-Os → -O3` (−1.4 %), never
+`-O0 → -Os`. A build with all 49 compiled jaudio TUs forced back to `-O0` via
+`DC_OPT_O0_EXTRA` ran clean and a human called it *"sounds right"* — **but the
+same build still has no music**, and the queue-full count merely fell 6 → 2,
+which is what a slower build does to a queue that fills on a timing race.
+**Treat the `-O0` result as unexplained, not as a fix.** The BGM bug above is
+the live thread.
+
+⚠️ **`DC_OPT_O0_EXTRA` is SPACE-separated, not colon-separated.** A colon-joined
+list is taken as ONE filename and the guard at `dc/Makefile:1214` reports
+"names 1 file(s) this build does not compile" with the whole list as the name.
+The guard is right and saved the build; the error text just reads oddly.
+
+⚠️ **Flycast UNDER-REPRODUCES the stutter by an order of magnitude** — 15-16
+events per 900 s here against 192 per 420 s on hardware. No audio verdict from
+this emulator is final without a burn.
+
 ## ⭐⭐⭐ 2026-08-06 (session 7) — G4 RAN. THE ~23.6 ms IS SPLIT, AND IT IS
 ## FOUR-FIFTHS emu64's. G3 IS THE WORK, AND ITS "NET LOSS" CASE IS REFUTED
 

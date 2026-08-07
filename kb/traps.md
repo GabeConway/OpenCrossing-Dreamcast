@@ -1,5 +1,38 @@
 # Traps already paid for — do not re-discover these
 
+## ⚠️ An instrument pointed at a subsystem that is not running measures the subsystem not running (2026-08-06)
+
+The `[DC/VOICE]` census reported the town at 0-4 concurrent voices and
+`filt=0 comb=0`, and two audio levers were declared dead on that basis. Both
+retracted the same session: **the music was never playing**, so the census was
+faithfully describing silence. Nothing in the counters could say so — a voice
+count of zero and a voice count of "no sequence was ever started" are the same
+number.
+
+Generalise it next to measurement rule 1: `ASSET MISSING` empty is not the only
+precondition for believing a run. **Establish that the thing being measured is
+RUNNING before reading any counter about its cost**, and give every new
+instrument a way to report "the subsystem was idle" distinctly from "the
+subsystem was cheap". A human ear caught this in one sentence after three runs
+and four hypotheses had not.
+
+## ⚠️ `DC_OPT_O0_EXTRA` and `OPT_HOT_SRC` are SPACE-separated (2026-08-06)
+
+`DC_STUB_KEEP` is colon-separated, and the habit carries over. A colon-joined
+list here is taken as **one filename**, and `dc/Makefile:1214` correctly refuses
+the build — but the message reads *"names 1 file(s) this build does not
+compile:"* followed by the entire list, which looks like the list is wrong
+rather than the separator. The guard is doing its job; read the "1".
+
+## ⚠️ Flycast under-reproduces the audio stutter by ~10x (2026-08-06)
+
+15-16 `[STUTTER]` events per 900 s in the emulator against **192 per 420 s on
+real hardware**. Audio timing is the one area where the harness is NOT a fair
+proxy — unlike disc loading, which reached parity 2026-08-04. No audio verdict
+is final without a burn, in either direction: the emulator can hide a
+regression and can also fail to show a fix.
+
+
 ## ⭐ AUDIO IS SILENT UNLESS YOU PASS `-DDC_ARAM_AUDIO_DROP=0` (2026-08-06)
 
 - **`DC_AUDIO=1` alone produces a live pipe carrying zeros, and nothing warns

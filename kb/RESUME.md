@@ -1,5 +1,37 @@
 # RESUME — pick the session back up here
 
+## ⭐⭐⭐ SESSION 7 (2026-08-06) — READ THIS FIRST
+
+1. 🔴 **THE MUSIC NEVER PLAYS, AND IT IS NOT THE SYNTHESISER.** The audio
+   command queue overruns while the scene gate is disarmed
+   (`SendStart::Mesg Full Queue`, 6 events; scenes 4 and 18 are DISARMED under
+   `DC_AUDIO_SCENES=3,9`). `Nap_PortSet` then overwrites one ring slot forever.
+   **BGM's `START_SEQ` is issued ONCE per scene and gets eaten; SFX and VOICE
+   are re-issued and survive** — which is exactly the reported symptom, talking
+   but no music. Fix: drain the queue every tick, gate synthesis only.
+   Confirm free with `DC_AUDIO_SCENES=all`. `kb/state-log.md` top entry.
+2. ⚠️ **TWO LEVER DEATHS FROM THE SAME SESSION ARE RETRACTED.** The
+   `[DC/VOICE]` census ran with no music, so "the voice cap can never bind"
+   and "FIR/comb never run" are **withdrawn**; both are untested. Generalised:
+   **an instrument pointed at a subsystem that is not running measures the
+   subsystem not running.**
+3. ⭐ **G4 RAN — queue item 1 is CLOSED.** The ~23.6 ms is **~1/5 ours, ~4/5
+   emu64's** (`ours=8.4 ms`, `emu=~30.9`, of `TRIN×2 = 55.5` in a 69.3 ms
+   draw). **The work is G3.** Its net-loss case is refuted: the cost is
+   per-VERTEX (0.536 µs/ref), not per-command, and at the measured 75 % cull
+   rate G3 is worth **5.4-19.2 ms**.
+4. ⚠️ **`[GXSPLIT]` is per PRESENTED frame — do NOT double it.** Its
+   accumulators publish in `dc_gx_frame_timing_snapshot()`, below the frameskip
+   early return. Only `[EMU64H]` needs the ×2. Rule 9 generalised: **state the
+   denominator for every new counter, from the code, not by assumption.**
+5. **TEV P3 is in the tree, compile-verified, OFF, and never run**
+   (`-DDC_PVR_TEVP3`). It handles **9 of 27** P3 configs exactly.
+6. ⚠️ **`DC_OPT_O0_EXTRA` is SPACE-separated.** A colon-joined list reads as one
+   filename.
+7. ⚠️ **Flycast under-reproduces the audio stutter ~10×.** No audio verdict is
+   final without a burn.
+
+
 Top rewritten 2026-08-06 (session 6). **This file is the handoff — start here,
 then `kb/STATE.md` for the current numbers.** The narrative and the evidence
 behind every figure below are in `kb/state-log.md`, top entry. Everything under
