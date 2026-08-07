@@ -170,6 +170,119 @@ static u64 s_api_vtx_us;
 #define DC_GXAPI(counter) do { } while (0)
 #endif
 
+/* ---- G4: the TRIN split (-DDC_PERF_GXSPLIT) -------------------------------
+ * THE LARGEST UNATTRIBUTED BLOCK IN THE PROJECT, and this is the one build that
+ * splits it. G1 measured `G_TRIN_INDEPEND` at 34.4 ms of a 45.6 ms town frame
+ * (per PRESENTED frame — measurement rule 9, kb/RESUME.md §0b). Of that,
+ * `cull 2.0 + xform 8.8 = 10.8 ms` is already attributed to dc/ by the [PHASE]
+ * counters. The remaining ~23.6 ms — 52 % of the frame — is emu64's dl_G_TRIN
+ * index expansion PLUS the GX* attribute setters in THIS FILE, and the two have
+ * never been separated. Which side owns it decides whether the next piece of
+ * work is G3 (cull at TRIN entry, in emu64, needs a trampoline and a sign-off)
+ * or an ordinary edit to code we already own.
+ *
+ * THE TRICK, and it is why this costs two clock reads per vertex rather than
+ * eight: GXPosition3f32 is always the FIRST call of a vertex and there is
+ * exactly one per vertex (emu64.c:2777/2779/2782 strictly precede the
+ * GXNormal3f32/GXColor4u8/GXTexCoord2f32 at :2787/:2794/:2802). So the interval
+ * entry(pos_i) -> exit(pos_i) is dc_gx.c time, and exit(pos_{i-1}) ->
+ * entry(pos_i) is EVERYTHING ELSE in emu64's vertex loop: the index decode, the
+ * set_position matrix work, and the three cheap setters. Both halves fall out
+ * of the same two reads and the gap accumulator is free.
+ *
+ * WHY NOT dc_time_us(): it is timer_us_gettime64() and calibrates at ~0.43 us a
+ * read (kb/perf-dc.md:617). At 9,485 vertex references a frame, two reads each
+ * would cost 8.2 ms — a third of the quantity being measured. TMU2 raw is the
+ * same instrument G1 uses (dc_emu64_hist.c:110) at ~80 ns, so the probe is
+ * ~1.5 ms/frame, 6 % of 23.6 — and it is EXACTLY COUNTABLE from dc_gx_api_pos,
+ * so it is subtractable rather than arguable. It is printed as probe=.
+ *
+ * ⚠️ THE RE-ENTRANCY HAZARD, and getting it wrong would have charged a whole
+ * batch flush to one vertex. GXPosition3f32 (via dc_gx_reserve_verts) and
+ * GXBegin (via dc_gx_commit_pending_and_flush) can BOTH re-enter
+ * dc_gx_flush_vertices, which is where cull and xform live — the 10.8 ms that
+ * is already attributed. Every bracket therefore subtracts the flush time that
+ * elapsed inside it. The subtraction is in microseconds against an 80 ns
+ * measurement, so it quantises: ~325 flushes a frame, up to 1 us each, is at
+ * most 0.33 ms of 23.6 (1.4 %), one-directional (it UNDER-subtracts, inflating
+ * the dc_gx.c bucket). Disclosed rather than hidden, because the alternative —
+ * a second TMU2 bracket inside a function with three exit paths — is more code
+ * for less than the error it removes.
+ *
+ * ⚠️ Audio runs on its own thread, so a preemption inside a bracket inflates
+ * whichever bucket it lands in. Same exposure G1 has. The wrap guard drops the
+ * pathological samples; do NOT add a clamp, which would bias the result.
+ *
+ * Reached through DC_XDEFS, deliberately: DC_PERF_PHASE and DC_PERF_GXAPI have
+ * no dc/Makefile handling either, and a `?=` default plus a missing `-e` line is
+ * exactly the shape that made DC_EMU64_HIST unreachable for three sessions
+ * (kb/traps.md). DC_XDEFS is forwarded unconditionally at dc/build-dc.sh:174
+ * and is part of flags.stamp, so it also forces the rebuild. */
+u64 dc_gx_gxs_pos_ns = 0;    /* inside dc_gx.c's GXPosition3f32          */
+u64 dc_gx_gxs_gap_ns = 0;    /* emu64's vertex loop between two of them  */
+u64 dc_gx_gxs_begin_ns = 0;  /* GXBegin, minus any flush it triggered    */
+u64 dc_gx_gxs_end_ns = 0;    /* GXEnd, minus the flush it triggered      */
+u64 dc_gx_gxs_state_ns = 0;  /* the per-batch vtx-desc/attr-fmt setters  */
+unsigned int dc_gx_gxs_drops = 0; /* samples discarded by the wrap guard */
+unsigned int dc_gx_gxs_posn = 0;  /* GXPosition3f32 calls = probe population */
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+#define GXS_TCNT2      (*(volatile unsigned int *)0xffd80024)
+#define GXS_TICK_NS    80u
+#define GXS_WRAP_GUARD 0x00400000u
+
+static u64 s_gxs_pos = 0, s_gxs_gap = 0, s_gxs_begin = 0,
+           s_gxs_end = 0, s_gxs_state = 0;
+static unsigned int s_gxs_drops = 0;
+static unsigned int s_gxs_posn = 0;
+/* TCNT2 at the last bracket EXIT. Seeded 0 = "no previous vertex", which the
+ * guard below rejects, so the first vertex of a run contributes no gap rather
+ * than a garbage one. */
+static unsigned int s_gxs_last_exit = 0;
+
+typedef struct { unsigned int t; u64 fl; } DcGxsMark;
+
+/* The emu64 half: from the previous bracket's exit to this bracket's entry.
+ * Declared before gxs_open so every bracket can charge it. */
+static inline void gxs_gap_charge(unsigned int t_entry);
+
+static inline void gxs_open(DcGxsMark *m) {
+    m->fl = s_flush_time_acc;
+    m->t  = GXS_TCNT2;
+    /* ⚠️ EVERY bracket charges the gap, not just GXPosition3f32 — and the first
+     * run of this instrument proved why. Charging it only at the vertex setter
+     * left the intervals GXEnd->GXBegin and GXBegin->first-vertex uncharged
+     * entirely: emu64's dirty_check, setup_1tri_2tri_1quad and every non-TRIN
+     * opcode fell into a hole. On run smoke-oc-dc-gxsplit the ledger came back
+     * `gxsplit 27.42 + cull/xform 14.6 = 42.0` against `TRIN x2 = 54.8` — a
+     * 12.8 ms shortfall, all of it emu64 time that was measured by nothing.
+     * The gap is the residual bucket; a residual bucket with holes in it is
+     * worse than no bucket, because it reads as "attributed". */
+    gxs_gap_charge(m->t);
+}
+
+/* Charges (now - mark) minus whatever dc_gx_flush_vertices spent inside it.
+ * TMU2 is a DOWN counter, so the delta is prev - now. */
+static inline void gxs_close(DcGxsMark *m, u64 *acc) {
+    unsigned int now = GXS_TCNT2;
+    unsigned int d   = m->t - now;
+    u64 sub;
+    s_gxs_last_exit = now;
+    if (d >= GXS_WRAP_GUARD) { s_gxs_drops++; return; }
+    /* us -> 80 ns ticks. 1 us = 12.5 ticks, spelled *25/2 to stay integral. */
+    sub = ((s_flush_time_acc - m->fl) * 25u) / 2u;
+    if (sub >= (u64)d) return;   /* the span WAS a flush; nothing is ours */
+    *acc += (u64)d - sub;
+}
+
+static inline void gxs_gap_charge(unsigned int t_entry) {
+    unsigned int d;
+    if (s_gxs_last_exit == 0u) return;   /* first bracket of the frame */
+    d = s_gxs_last_exit - t_entry;       /* down counter */
+    if (d >= GXS_WRAP_GUARD) { s_gxs_drops++; return; }
+    s_gxs_gap += (u64)d;
+}
+#endif
+
 /* Vertices the GAME handed us for the batch currently staged, against the
  * `count` the backend is then asked to transform. They differ only because
  * GXBegin() rewrites GX_TRIANGLESTRIP/GX_TRIANGLEFAN into independent
@@ -640,6 +753,33 @@ void dc_gx_frame_timing_snapshot(void) {
     s_phase_verts_lit = 0;
     s_phase_batches_lit = 0;
 #endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    /* Ticks -> ns here rather than at the print, so dc_vi.c never has to know
+     * what clock this used.
+     *
+     * ⚠️ s_gxs_last_exit MUST be cleared, and the first draft of this comment
+     * argued the opposite. The gap accumulator charges
+     * exit(previous bracket) -> entry(this one), so leaving it set across the
+     * frame boundary charges the ENTIRE inter-frame tick — the swap, the audio
+     * pump, the game logic, tens of ms — to gxgap, i.e. to emu64. That would
+     * have made emu64 look like it owned the frame by construction, which is
+     * exactly the conclusion this build exists to test. Clearing it discards
+     * one gap per frame (60 of ~9,485) and is the correct trade.
+     *
+     * What is STILL charged to gxgap and must be read as such: any non-GX work
+     * between two GX calls INSIDE a frame — a mid-frame texture upload, most
+     * obviously. That is bounded (dc_gx_texload_time_us measures it separately)
+     * and it shows up as gxgap exceeding what [EMU64H] TRIN can hold, so the
+     * ledger residual catches it rather than hiding it. */
+    s_gxs_last_exit = 0;
+    dc_gx_gxs_pos_ns   = s_gxs_pos   * GXS_TICK_NS;  s_gxs_pos   = 0;
+    dc_gx_gxs_gap_ns   = s_gxs_gap   * GXS_TICK_NS;  s_gxs_gap   = 0;
+    dc_gx_gxs_begin_ns = s_gxs_begin * GXS_TICK_NS;  s_gxs_begin = 0;
+    dc_gx_gxs_end_ns   = s_gxs_end   * GXS_TICK_NS;  s_gxs_end   = 0;
+    dc_gx_gxs_state_ns = s_gxs_state * GXS_TICK_NS;  s_gxs_state = 0;
+    dc_gx_gxs_drops    = s_gxs_drops;                s_gxs_drops = 0;
+    dc_gx_gxs_posn     = s_gxs_posn;                 s_gxs_posn  = 0;
+#endif
 }
 
 /* ==========================================================================
@@ -779,6 +919,10 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
 #ifdef DC_PERF_GXAPI
     DC_GXAPI(s_api_begin);
 #endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
+#endif
     int conv = 0, conv_fan = 0;
     int emit_count;
 
@@ -824,6 +968,9 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
             g_gx.current_vertex.color0[1] = 255;
             g_gx.current_vertex.color0[2] = 255;
             g_gx.current_vertex.color0[3] = 255;
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+            gxs_close(&gxs_m, &s_gxs_begin);
+#endif
             return;
         }
     }
@@ -850,15 +997,40 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     g_gx.current_vertex.color0[1] = 255;
     g_gx.current_vertex.color0[2] = 255;
     g_gx.current_vertex.color0[3] = 255;
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    gxs_close(&gxs_m, &s_gxs_begin);
+#endif
 }
 
-/* emu64 omits this. Kept because a handful of non-emu64 call sites use it. */
-void GXEnd(void) { dc_gx_commit_pending_and_flush(); }
+/* emu64 omits this. Kept because a handful of non-emu64 call sites use it.
+ *
+ * ⚠️ "emu64 omits this" is TRUE OF THE HEADER AND FALSE OF THE BUILD: emu64.c
+ * :4935 calls GXEnd() under #ifdef TARGET_PC, which is mandatory here, so this
+ * IS the per-TRIN flush site and the cull + xform bill through it. That is why
+ * gxs_end is bracketed separately and why its flush time is subtracted — left
+ * in, it would re-report the 10.8 ms [PHASE] already owns. */
+void GXEnd(void) {
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
+    dc_gx_commit_pending_and_flush();
+    gxs_close(&gxs_m, &s_gxs_end);
+#else
+    dc_gx_commit_pending_and_flush();
+#endif
+}
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
 #ifdef DC_PERF_GXAPI
     u64 t_api = dc_time_us();
     DC_GXAPI(s_api_pos);
+#endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    /* Opened BEFORE any work, and the gap is charged from the same read — one
+     * TCNT2 access serves as both this vertex's start and the previous vertex's
+     * end-of-emu64 boundary. */
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
 #endif
 
     if (g_gx.vertex_pending)
@@ -912,6 +1084,13 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.vertex_pending = 1;
 #ifdef DC_PERF_GXAPI
     s_api_vtx_us += dc_time_us() - t_api;
+#endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    /* Last statement in the function, deliberately: everything after the read
+     * (the return sequence) leaks into the emu64 bucket, which is a few cycles
+     * in one direction and stated rather than corrected for. */
+    gxs_close(&gxs_m, &s_gxs_pos);
+    s_gxs_posn++;
 #endif
 }
 
@@ -1035,8 +1214,20 @@ void GXTexCoord1x8(u8 index) { GXTexCoord1x16(index); }
 /* ==========================================================================
  * Vertex descriptor / indexed arrays
  * ========================================================================== */
+/* The three per-batch state setters below share ONE accumulator. emu64 calls
+ * them from setup_1tri_2tri_1quad (emu64.c:2880-2896), 2-4 of each per TRIN, so
+ * ~3,250 calls a frame — 0.52 ms of probe if each were bracketed on its own for
+ * a number nobody would act on separately. One bucket, one question: "is the
+ * per-batch state setup material against the 23.6 ms?" */
 void GXSetVtxDesc(u32 attr, u32 type) {
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
     if (attr < DC_GX_MAX_ATTR) g_gx.vtx_desc[attr] = type;
+    gxs_close(&gxs_m, &s_gxs_state);
+#else
+    if (attr < DC_GX_MAX_ATTR) g_gx.vtx_desc[attr] = type;
+#endif
 }
 void GXSetVtxDescv(const void* list) {
     const u32* p = (const u32*)list;
@@ -1045,9 +1236,22 @@ void GXSetVtxDescv(const void* list) {
         p += 2;
     }
 }
-void GXClearVtxDesc(void) { memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc)); }
+void GXClearVtxDesc(void) {
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
+    memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc));
+    gxs_close(&gxs_m, &s_gxs_state);
+#else
+    memset(g_gx.vtx_desc, 0, sizeof(g_gx.vtx_desc));
+#endif
+}
 
 void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
+#endif
     (void)cnt; (void)type;
     if (vtxfmt < GX_MAX_VTXFMT) {
         if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
@@ -1056,6 +1260,9 @@ void GXSetVtxAttrFmt(u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
             g_gx.vtx_fmt[vtxfmt].texcoord_frac[tc] = frac;
         }
     }
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    gxs_close(&gxs_m, &s_gxs_state);
+#endif
 }
 
 void GXSetArray(u32 attr, const void* data, u32 size, u8 stride) {
@@ -1189,11 +1396,24 @@ void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {
 
 void GXSetCurrentMtx(u32 id) {
     u32 slot = id / 3;
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    DcGxsMark gxs_m;
+    gxs_open(&gxs_m);
+    if (slot < 10) {
+        if (!(dc_gx_state_dedup && g_gx.current_mtx == (int)slot)) {
+            dc_gx_flush_if_begin_complete();
+            DIRTY(DC_GX_DIRTY_MODELVIEW);
+            g_gx.current_mtx = (int)slot;
+        }
+    }
+    gxs_close(&gxs_m, &s_gxs_state);
+#else
     if (slot >= 10) return;
     if (dc_gx_state_dedup && g_gx.current_mtx == (int)slot) return;
     dc_gx_flush_if_begin_complete();
     DIRTY(DC_GX_DIRTY_MODELVIEW);
     g_gx.current_mtx = (int)slot;
+#endif
 }
 
 /* Shadowed exactly as on PC: re-setting an identical viewport skips both the

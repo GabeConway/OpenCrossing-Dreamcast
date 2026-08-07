@@ -134,6 +134,15 @@ static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
 #ifndef DC_AUDIO_MAX_FRAMES
 #define DC_AUDIO_MAX_FRAMES 2
 #endif
+/* L1/L2 — the two jaudio spec overrides. 0 means "leave the shipped value
+ * alone", so an unset build is byte-identical in behaviour. The whole argument
+ * for both, and why NEITHER is JAC_DAC_RATE, is at the write site in AIInit. */
+#ifndef DC_AUDIO_VOICES
+#define DC_AUDIO_VOICES 0       /* 0 = shipped 24 (NA_SPEC_CONFIG[0]._05)   */
+#endif
+#ifndef DC_AUDIO_MIXRATE
+#define DC_AUDIO_MIXRATE 0      /* 0 = shipped 48000 (NA_SPEC_CONFIG[0]._00) */
+#endif
 /* Below this many samples in the ring, the budget is ignored and a frame is
  * synthesised anyway: a late sample beats a gap. One jaudio DAC frame is
  * 2*DAC_SIZE = 2240 samples (rate.c:7), so this is one frame of slack. */
@@ -235,6 +244,29 @@ static u32 s_synth_avg_us = 0;   /* EWMA of one pc_audio_process_frame() */
 u32 dc_audio_tick_usec = 0;      /* us inside dc_audio_pump() since the reset */
 u32 dc_audio_tick_frames = 0;    /* DAC frames synthesised since the reset    */
 u32 dc_audio_tick_synth_max_us = 0; /* worst SINGLE pc_audio_process_frame()  */
+
+/* The voice census (-DDC_AUDIO_VOICELOG). Same unconditional-definition rule as
+ * the three above, so dc_vi.c reads them with no #if and a build without the
+ * flag prints zeros — which is the honest answer, not a silent omission.
+ *
+ * `_at_max` is the field the hypothesis actually turns on: it is the voice count
+ * of the SAME synthesis call that set dc_audio_tick_synth_max_us, so the
+ * [STUTTER] line carries the cost and its cause on one row. `_voice_max` alone
+ * would be a second average-shaped number and would repeat measurement rule 7.
+ */
+u32 dc_audio_tick_voice_max   = 0; /* max voice-updates in any ONE DAC frame  */
+u32 dc_audio_tick_voice_at_max = 0; /* voice-updates of the WORST-COST frame  */
+u32 dc_audio_tick_filt_at_max = 0; /* of those, how many ran the 8-tap FIR    */
+u32 dc_audio_tick_comb_at_max = 0; /* of those, how many ran the comb filter  */
+
+#ifdef DC_AUDIO_VOICELOG
+/* cost bucketed by voice count — the part that can refute the hypothesis on its
+ * own, printed in the 600-pump block and never reset, so it is a whole-run
+ * distribution rather than a window average. */
+static u32 s_vhist_n[8]   = {0};
+static u32 s_vhist_us[8]  = {0};
+static u32 s_vhist_max[8] = {0};
+#endif
 
 /* THE OUTPUT GAIN IS OWNED BY THE CALLBACK, THE TARGET BY THE PUMP, and that
  * split is the whole thread-safety argument. The pump writes s_gain_tgt and
@@ -557,6 +589,62 @@ extern void  Na_PC_ApplyVolumes(void);
 extern void pc_audio_process_frame(void);
 
 /* ==========================================================================
+ * -DDC_AUDIO_VOICELOG — the voice census (L0)
+ * ==========================================================================
+ * WHAT THIS IS FOR, and it is one hypothesis and one run.
+ *
+ * jaudio's per-DAC-frame cost is BIMODAL — ~2.5 ms cheap, ~10 ms expensive,
+ * measured 2026-08-06 by `4 * smax == snd` on every [STUTTER] line — and four
+ * explanations are already dead (disc-cache misses, a multi-frame burst,
+ * snd_stream_poll/G2/the scheduler quantum, and jaudio's MEAN cost, which -O3
+ * moved 1.4 %). The surviving suspect is VOICE COUNT, and the arithmetic is
+ * structural rather than fitted: the engine synthesises
+ * `updates_per_frame(4) * num_samples_per_update(200) = 800` internal samples
+ * PER ENABLED VOICE (memory.c:971,:974; driver.c:187-199), so at the
+ * NA_SPEC_CONFIG[0]._05 = 24 channel maximum (audioconst.c:10) one DAC frame is
+ * 19,200 voice-samples. Against the measured ~10 ms peak that is ~104 cycles
+ * per voice-sample at 200 MHz — the middle of kb/audio-cpu-cost.md's 80-180
+ * band, arrived at from the other direction. The 2.5 ms mode is then ~6 voices.
+ * Nothing else in the frame has a 4x dynamic range.
+ *
+ * ⚠️ THIS COUNTER IS ALLOWED TO KILL THE HYPOTHESIS. If `voices=` is FLAT
+ * across stuttering and non-stuttering frames, voice count is refuted in one
+ * run and the search moves to per-voice conditional work — which is why
+ * `filt=`/`comb=` ride along: they are the two conditional stages (driver.c:
+ * 1183-1188 FIR, +27 % on an affected voice; :1190-1209 comb, +10 %) whose
+ * INCIDENCE has never been measured, and counting them is free here.
+ *
+ * WHERE IT SAMPLES, and why after rather than before: AG.common_channel[] is
+ * written by __Nas_PushDrvReg (driver.c:150-169) at the top of the frame and
+ * read by Nas_DriveRsp (driver.c:552-575) in the same frame; nothing clears it
+ * afterwards. One pc_audio_process_frame() is exactly one Neos_Update() is
+ * exactly one Nas_smzAudioFrame (audiothread.c:92 -> aictrl.c:285 -> :237 ->
+ * cpubuf.c:103 -> neosthread.c:30), so reading immediately after the call
+ * returns the literal `noteCount` that call paid for, summed over all four
+ * updates. Sampling BEFORE would report the PREVIOUS frame's voices next to
+ * THIS frame's cost, which is the pairing the whole measurement exists to make.
+ *
+ * ⚠️ This is the second place in dc/ that includes a decomp header, and the
+ * justification is dc_vi.c:49-68's verbatim: AG is a 34 KB struct read by field
+ * name, a hand-copied offset map would silently read the wrong words the moment
+ * audiostruct.h moves, and the whole block is behind a flag no shipping build
+ * sets — so a header collision can only break the build of someone who asked
+ * for the measurement. Reachable through DC_XDEFS, which needs no Makefile
+ * change and therefore cannot repeat the DC_EMU64_HIST forwarding trap
+ * (kb/traps.md). */
+#ifdef DC_AUDIO_VOICELOG
+#include "jaudio_NES/audiowork.h"
+#endif
+
+/* NA_SPEC_CONFIG[] for the L1/L2 overrides in AIInit. Unlike audiowork.h above
+ * this one is NOT behind a probe flag, because the overrides are a shipping
+ * feature rather than an instrument — but it is still inside the DC_AUDIO guard,
+ * so a DC_AUDIO=0 build pulls in no decomp audio header at all. */
+#if DC_AUDIO && !defined(DC_HOST_STUB)
+#include "jaudio_NES/audioconst.h"
+#endif
+
+/* ==========================================================================
  * snd_stream callback — the seam to KOS/AICA
  * ==========================================================================
  * KOS calls this asking for `req` bytes and expects a pointer to that many
@@ -707,6 +795,73 @@ void AIInit(u8* stack) {
      * list has to cost nothing. DC_AUDIO_SCENES=none must be indistinguishable
      * from DC_AUDIO=0 at runtime — no SPU driver, no 2x8192 B of SPU RAM, no
      * per-frame poll — or "turn it off" would not be a real kill switch. */
+    /* ---- THE TWO PEAK-COST LEVERS (L1, L2) --------------------------------
+     * THE STUTTER IS A BUDGET, NOT A BUG, and these are the only two knobs that
+     * change the budget rather than reshuffle it. Measured 2026-08-06: jaudio
+     * is bimodal at ~2.5 ms / ~10 ms per DAC frame; at ~10 ms x 2.57 DAC frames
+     * per 45 ms game frame that is 57 % of the machine, the frame collapses, the
+     * ring falls behind, and the pump spends its 4-frame ceiling catching up.
+     * Four other explanations are dead (kb/STATE.md).
+     *
+     * WHY HERE: AIInit() is reached from Jac_Init() (aictrl.c:69), inside
+     * StartAudioThread (audiothread.c:65) — which is BEFORE
+     * pc_neos_init_sync() at :82 -> Nas_InitAudio (system.c:1499) ->
+     * Nas_SpecChange, the function at memory.c:965-1001 that reads these two
+     * fields. So this is the last moment at which a write is still read, and it
+     * needs ZERO src/ edits: NA_SPEC_CONFIG is a plain writable .data global
+     * (audioconst.c:6, not const).
+     *
+     * L1 — DC_AUDIO_VOICES, `_05` -> AG.num_channels (memory.c:1001).
+     *   Per-voice work is exact and linear: the engine synthesises
+     *   updates_per_frame(4) x num_samples_per_update(200) = 800 internal
+     *   samples PER ENABLED VOICE, so halving the ceiling halves the WORST
+     *   frame while barely moving the mean (typical load is already under it).
+     *   ⚠️ It needs no new drop logic. Allocation already runs through
+     *   Nas_AllocationOnRequest (channel.c:935) -> __Nas_GetLowerPrio
+     *   (channel.c:788-811), which steals lowest-priority-first and REFUSES to
+     *   steal from an equal-or-higher priority note. A short pool degrades to
+     *   priority-ordered note-stealing, which is the behaviour we want.
+     *   Bonus: AG.max_audio_cmds = num_channels*20*updates + 430 = 2,350 at 24
+     *   (memory.c:1029), but the DC path writes into pc_task_buf[2][1600]
+     *   (neosthread.c:26) and Nas_smzAudioFrame never consults the bound — so
+     *   24 voices can overrun .bss by ~6 KB. At 12 the bound is 1,390 < 1600.
+     *
+     * L2 — DC_AUDIO_MIXRATE, `_00` -> AG.audio_params.sampling_frequency.
+     *   This is the INTERNAL mix rate, not the output rate, and halving it
+     *   halves num_samples_per_update (memory.c:974) and therefore per-voice
+     *   work everywhere — the mean AND the peak.
+     *   ⚠️ PITCH IS PRESERVED, and that is not obvious. The effective resample
+     *   ratio is basePitch * resample_rate = (sr / JAC_DAC_RATE) *
+     *   (33476.156f / sampling_frequency) (oneshot.c:900 x memory.c:993); the
+     *   required ratio is sr / sampling_frequency, so the error term is
+     *   33476.156 / JAC_DAC_RATE — INDEPENDENT of this field. (That term is the
+     *   known ~4.5 % sharpness, and it is not made worse or better here.)
+     *   Output rate, DAC_SIZE, JAC_FRAMESAMPLES and the snd_stream open are all
+     *   untouched; Jac_Resample16 (rspsim.c:682) computes its step at runtime
+     *   from the actual counts, so it upsamples instead of downsampling.
+     *   ⚠️ This is the RISKIER of the two — it trades the high band for CPU —
+     *   and 24000/60/4 = 100, &~7 = 96, still a multiple of 8 as the engine
+     *   requires. Do not pick a rate whose quotient is not.
+     *   ⚠️ DO NOT reach for JAC_DAC_RATE (rate.c:4) instead: it cuts no
+     *   synthesis work at all and a 22 kHz value shifts every note a perfect
+     *   fifth sharp, because the error term above IS a function of it.
+     *
+     * BOTH DEFAULT TO THE SHIPPED VALUES, so an unset build is byte-identical
+     * in behaviour and this block is a no-op that logs one line. */
+    {
+        na_spec_config *spec = &NA_SPEC_CONFIG[0];
+        unsigned old_v = (unsigned)spec->_05, old_r = (unsigned)spec->_00;
+        if ((DC_AUDIO_VOICES) > 0 && (DC_AUDIO_VOICES) != (int)spec->_05)
+            spec->_05 = (u8)(DC_AUDIO_VOICES);
+        if ((DC_AUDIO_MIXRATE) > 0 && (u32)(DC_AUDIO_MIXRATE) != spec->_00)
+            spec->_00 = (u32)(DC_AUDIO_MIXRATE);
+        DC_LOGE("[DC/AUDIO] spec voices=%u->%u mixrate=%u->%u "
+                "(samples/update %u->%u)\n",
+                old_v, (unsigned)spec->_05, old_r, (unsigned)spec->_00,
+                (unsigned)((old_r / 60u / 4u) & ~7u),
+                (unsigned)((spec->_00 / 60u / 4u) & ~7u));
+    }
+
     s_scene_mask = dc_audio_parse_scenes(s_scene_list);
     if (s_scene_mask == 0u) {
         DC_LOGE("[DC/AUDIO] DC_AUDIO_SCENES=\"%s\" selects no scene — "
@@ -997,6 +1152,70 @@ void dc_audio_pump(void) {
          * the spike is one expensive frame or many ordinary ones. Cleared by
          * dc_vi.c alongside dc_audio_tick_usec, so the window matches. */
         if (cost > dc_audio_tick_synth_max_us) dc_audio_tick_synth_max_us = cost;
+
+        /* THE VOICE CENSUS — see the DC_AUDIO_VOICELOG block above. Walks the
+         * same AG.common_channel[] rows and tests the same `enabled` predicate
+         * (audiostruct.h:485) that Nas_DriveRsp tests at driver.c:555, so `n` is
+         * the literal noteCount, summed over the four updates.
+         *
+         * Cost of the probe itself: 4 * 24 = 96 loads per DAC frame, ~2 per
+         * pump. Against a 2,500-10,000 us frame that is unmeasurable, so unlike
+         * the [GXSPLIT] instrument this one needs no sampling period and no
+         * probe= subtraction. It is still behind a flag because it includes a
+         * decomp header.
+         *
+         * `filt`/`comb` are counted, not costed: they answer "what fraction of
+         * live voices runs the conditional stages", which is the one unknown
+         * standing between L4 (cut FIR/comb) and a number. A small fraction
+         * kills that lever for free. */
+#ifdef DC_AUDIO_VOICELOG
+        {
+            int u, i, n = 0, nf = 0, nc = 0;
+            int nch = (int)AG.num_channels;
+            for (u = 0; u < (int)AG.audio_params.updates_per_frame; u++) {
+                for (i = 0; i < nch; i++) {
+                    commonch *cc = &AG.common_channel[u * nch + i];
+                    if (!cc->enabled) continue;
+                    n++;
+                    if (cc->filter != NULL) nf++;
+                    if (cc->comb_filter_size != 0 && cc->comb_filter_gain != 0)
+                        nc++;
+                }
+            }
+            if ((u32)n > dc_audio_tick_voice_max)
+                dc_audio_tick_voice_max = (u32)n;
+            /* Paired with the cost above, deliberately inside the same `if`
+             * condition rather than beside it: these three describe the frame
+             * that set smax=, and rewriting them on a cheaper later frame would
+             * hand the reader a mismatched row. */
+            if (cost >= dc_audio_tick_synth_max_us) {
+                dc_audio_tick_voice_at_max = (u32)n;
+                dc_audio_tick_filt_at_max  = (u32)nf;
+                dc_audio_tick_comb_at_max  = (u32)nc;
+            }
+
+            /* THE DECISIVE PART, and it does not depend on a stutter ever
+             * firing. Bucketing cost BY voice count turns the hypothesis into a
+             * shape the log can refute on its own: if cost rises monotonically
+             * with the bucket, voice count is the bimodality and L1 (cap
+             * NA_SPEC_CONFIG[0]._05) is priced. If every bucket reports the same
+             * mean and the same max, voice count is DEAD and the ~10 ms mode is
+             * per-voice conditional work or something outside this loop.
+             *
+             * Bucket = voice-updates >> 3, so at the 24-channel * 4-update
+             * maximum of 96 the top bucket is 12; clamped to 7 (>= 56 voice-
+             * updates, i.e. >= 14 concurrent voices), which is above the ~6-voice
+             * cheap mode and below the 24-voice ceiling — the split the
+             * hypothesis predicts falls inside the range, not at an end of it. */
+            {
+                int b = n >> 3;
+                if (b > 7) b = 7;
+                s_vhist_n[b]++;
+                s_vhist_us[b] += cost;
+                if (cost > s_vhist_max[b]) s_vhist_max[b] = cost;
+            }
+        }
+#endif
         frames++;
     }
     s_pump_frames += (u32)frames;
@@ -1021,6 +1240,24 @@ void dc_audio_pump(void) {
     if (++s_pump_calls >= 600u) {
         DC_LOGE("[DC/AUDIO] synth_us=%u (one jaudio DAC frame; the FPS cost of "
                 "sound)\n", (unsigned)s_synth_avg_us);
+#ifdef DC_AUDIO_VOICELOG
+        /* The whole-run distribution, one row per voice bucket. Read it as a
+         * SHAPE, not as eight numbers: mean rising with the bucket confirms the
+         * voice-count hypothesis, a flat mean with a large max in every bucket
+         * refutes it. `n=` is the population — a bucket with n=0 says nothing
+         * and must not be read as "cheap". max/mean within one bucket is the
+         * residual bimodality that voice count does NOT explain. */
+        {
+            int b;
+            for (b = 0; b < 8; b++) {
+                if (s_vhist_n[b] == 0u) continue;
+                DC_LOGE("[DC/VOICE] v>=%2d n=%u mean=%uus max=%uus\n",
+                        b * 8, (unsigned)s_vhist_n[b],
+                        (unsigned)(s_vhist_us[b] / s_vhist_n[b]),
+                        (unsigned)s_vhist_max[b]);
+            }
+        }
+#endif
         /* The gate's own line, kept separate so a log reader can answer "was
          * this window paying for audio at all?" before reading any of the
          * counters below, which mean different things on each side of it. */

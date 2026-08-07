@@ -125,6 +125,7 @@ Two build-time knobs, both off by default, both in files this work owns.
 | `-DDC_PERF_PHASE` | `[PHASE]` next to `[PERF]`, every 30 presented frames | 4 `dc_time_us()` per logic tick + 2 per batch |
 | (always on) | `vmemo=hit/total` inside `[PHASE]` — the vertex memo cache's hit rate, §3.5 | two increments per vertex |
 | `-DDC_PERF_GXAPI` | `[GXAPI]`, same cadence | 1 increment per GX vertex call + 2 `dc_time_us()` in `GXPosition3f32` |
+| `-DDC_PERF_GXSPLIT=1` | **G4 — `[GXSPLIT]`**, same cadence: `gxpos= gxgap= gxbegin= gxend= gxstate= \| ours= emu= \| posn= probe= drops=`. **The build that splits the ~23.6 ms nobody has attributed.** Brackets `GXPosition3f32` / `GXBegin` / `GXEnd` / the three per-batch state setters with **raw TMU2** (the same counter G1 uses, `dc_emu64_hist.c:110`), and charges the interval between one vertex's exit and the next one's entry to `gxgap` — emu64's index decode + `set_position` + the three cheap setters. Every bracket subtracts the `dc_gx_flush_vertices` time that elapsed inside it, so `cull`/`xform` are never double-counted. ⚠️ `gxgap` also absorbs any non-GX work between two GX calls inside a frame (a mid-frame texture upload); the ledger residual against `[EMU64H] TRIN × 2` is what exposes it | 2 TMU2 reads per vertex ≈ **1.5 ms/frame**, exactly countable from `posn=` and printed as `probe=` |
 
 ```
 [PERF]  10.0 FPS | 33% speed | draws=96 ... culled=232 cmds=3765 gx=26.1ms tex=0.0ms

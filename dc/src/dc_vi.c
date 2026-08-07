@@ -99,6 +99,17 @@ extern u32 dc_audio_tick_usec;
 extern u32 dc_audio_tick_frames;
 extern u32 dc_audio_tick_synth_max_us;
 
+/* The voice census (dc_audio.c, -DDC_AUDIO_VOICELOG). Defined unconditionally
+ * over there, so these need no #if and read 0 on a build without the flag —
+ * which is why they can be APPENDED to the [STUTTER] format string once rather
+ * than duplicating it behind an #ifdef. `vmax=` is the worst frame in the
+ * window; `v@=`/`filt@=`/`comb@=` describe the SAME synthesis call that set
+ * smax=, so the row carries a cost and its candidate cause together. */
+extern u32 dc_audio_tick_voice_max;
+extern u32 dc_audio_tick_voice_at_max;
+extern u32 dc_audio_tick_filt_at_max;
+extern u32 dc_audio_tick_comb_at_max;
+
 /* ==========================================================================
  * Frame-phase attribution (-DDC_PERF_PHASE) — see kb/perf-dc.md
  * ==========================================================================
@@ -176,6 +187,27 @@ extern unsigned int dc_gx_api_nrm, dc_gx_api_begin, dc_gx_api_dirty;
 extern u64 dc_gx_api_vtx_us;
 static u64 s_api_pos, s_api_clr, s_api_tc, s_api_nrm, s_api_begin, s_api_dirty;
 static u64 s_api_vtx_us;
+#endif
+
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+/* G4 — the TRIN split. The block in dc_gx.c carries the whole argument; this is
+ * only the window accumulator and the print.
+ *
+ * ⚠️ In its OWN #if, not inside the DC_PERF_PHASE block, for the reason
+ * recorded ~30 lines below about [EMU64H]: an instrument whose arm sites and
+ * whose report site are gated differently arms, pays for itself, and prints
+ * nothing. The cross-check against cull=/xform= does need -DDC_PERF_PHASE, and
+ * the print says so by reporting zeros. */
+extern u64 dc_gx_gxs_pos_ns, dc_gx_gxs_gap_ns, dc_gx_gxs_begin_ns;
+extern u64 dc_gx_gxs_end_ns, dc_gx_gxs_state_ns;
+extern unsigned int dc_gx_gxs_drops;
+/* Its OWN vertex count, not dc_gx_api_pos: that one is written only under
+ * -DDC_PERF_GXAPI, and a probe= line that silently reads 0 because a second,
+ * unrelated flag was absent is the same failure this instrument is documented
+ * to avoid. */
+extern unsigned int dc_gx_gxs_posn;
+static u64 s_gxs_pos, s_gxs_gap, s_gxs_begin, s_gxs_end, s_gxs_state;
+static u64 s_gxs_drops, s_gxs_posn;
 #endif
 
 /* Dynamic-FPS controller (g_pc_fps_target == 6 selects it via settings). */
@@ -464,6 +496,13 @@ void VIWaitForRetrace(void) {
     s_api_begin += dc_gx_api_begin;  s_api_dirty += dc_gx_api_dirty;
     s_api_vtx_us += dc_gx_api_vtx_us;
 #endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+    /* After the snapshot, same rule as [PHASE] above. */
+    s_gxs_pos   += dc_gx_gxs_pos_ns;    s_gxs_gap   += dc_gx_gxs_gap_ns;
+    s_gxs_begin += dc_gx_gxs_begin_ns;  s_gxs_end   += dc_gx_gxs_end_ns;
+    s_gxs_state += dc_gx_gxs_state_ns;  s_gxs_drops += dc_gx_gxs_drops;
+    s_gxs_posn  += dc_gx_gxs_posn;
+#endif
 
     /* Adaptive stutter detection: only log frames well above the average. */
     {
@@ -479,7 +518,7 @@ void VIWaitForRetrace(void) {
              * draws= stays last. */
             DC_LOG("[STUTTER] frame %u: total=%.1fms (avg=%.1fms) "
                    "swap=%.1fms gx=%.1fms tex=%.1fms snd=%.1fms sndf=%d "
-                   "smax=%.1fms draws=%d\n",
+                   "smax=%.1fms vmax=%u v@=%u filt@=%u comb@=%u draws=%d\n",
                    (unsigned)pc_frame_counter, frame_ms, avg_frame_ms,
                    (double)(t_after_swap - t_before_swap) / 1000.0,
                    (double)dc_gx_flush_time_us / 1000.0,
@@ -487,6 +526,10 @@ void VIWaitForRetrace(void) {
                    (double)dc_audio_tick_usec / 1000.0,
                    (int)dc_audio_tick_frames,
                    (double)dc_audio_tick_synth_max_us / 1000.0,
+                   (unsigned)dc_audio_tick_voice_max,
+                   (unsigned)dc_audio_tick_voice_at_max,
+                   (unsigned)dc_audio_tick_filt_at_max,
+                   (unsigned)dc_audio_tick_comb_at_max,
                    pc_gx_draw_call_count);
         }
     }
@@ -503,6 +546,15 @@ void VIWaitForRetrace(void) {
     dc_audio_tick_usec = 0;
     dc_audio_tick_frames = 0;
     dc_audio_tick_synth_max_us = 0;
+    /* Cleared with the rest of the window, and it MUST be: smax= and v@= are
+     * paired by "cost >= the running max", so a stale smax carried into the next
+     * window would stop v@= from ever being rewritten and freeze the pairing on
+     * one old frame. The [DC/VOICE] histogram in dc_audio.c is deliberately NOT
+     * reset — it is the whole-run distribution. */
+    dc_audio_tick_voice_max = 0;
+    dc_audio_tick_voice_at_max = 0;
+    dc_audio_tick_filt_at_max = 0;
+    dc_audio_tick_comb_at_max = 0;
 
     /* Periodic PERF line. The harness greps this; keep the shape stable. */
     {
@@ -614,6 +666,53 @@ void VIWaitForRetrace(void) {
                     (double)s_api_vtx_us / 1000.0 / 30.0);
             s_api_pos = s_api_clr = s_api_tc = s_api_nrm = 0;
             s_api_begin = s_api_dirty = 0; s_api_vtx_us = 0;
+#endif
+#if defined(DC_PERF_GXSPLIT) && (DC_PERF_GXSPLIT) > 0
+            /* THE LINE THIS BUILD EXISTS FOR. All figures are ms per PRESENTED
+             * frame (the /30 window), so they share a denominator with [PHASE]
+             * and can be compared directly — unlike [EMU64H], which is per
+             * LOGIC TICK and must be doubled (measurement rule 9).
+             *
+             * HOW TO READ IT:
+             *   gxpos + gxbegin + gxend + gxstate  = OURS, dc_gx.c, editable
+             *                                        without a trampoline
+             *   gxgap                              = emu64's vertex loop:
+             *                                        index decode, set_position,
+             *                                        and the three cheap setters
+             *   cull + xform                       = already attributed [PHASE],
+             *                                        SUBTRACTED out of all five
+             *                                        buckets above
+             *
+             * THE LEDGER, and it must close before any of this is acted on:
+             *   [EMU64H] TRIN_INDEPEND x2  ~=  gxpos + gxgap + gxbegin + gxend
+             *                                  + gxstate + cull + xform
+             * A residual means a path is unbracketed, not that a bucket is
+             * interesting. resid= prints it against [PHASE] draw= so the reader
+             * does not have to do the arithmetic to find that out.
+             *
+             * probe= is the instrument's own cost — 2 TMU2 reads x posn, at
+             * ~80 ns each — and it lands INSIDE gxpos. Subtract it before
+             * quoting gxpos; do not subtract it from the total, because the
+             * per-batch brackets add their own smaller share. */
+            {
+                double w = 30.0 * 1e6;   /* ns -> ms, over 30 presented frames */
+                double p_pos = (double)s_gxs_pos / w;
+                double p_gap = (double)s_gxs_gap / w;
+                double p_beg = (double)s_gxs_begin / w;
+                double p_end = (double)s_gxs_end / w;
+                double p_st  = (double)s_gxs_state / w;
+                double probe = (double)s_gxs_posn * 2.0 * 80.0 / w;
+                DC_LOGE("[GXSPLIT] gxpos=%.2f gxgap=%.2f gxbegin=%.2f "
+                        "gxend=%.2f gxstate=%.2f | ours=%.2f emu=%.2f | "
+                        "posn=%u probe=%.2f drops=%u\n",
+                        p_pos, p_gap, p_beg, p_end, p_st,
+                        p_pos + p_beg + p_end + p_st - probe, p_gap,
+                        (unsigned)(s_gxs_posn / 30u), probe,
+                        (unsigned)s_gxs_drops);
+                s_gxs_pos = s_gxs_gap = s_gxs_begin = 0;
+                s_gxs_end = s_gxs_state = 0;
+                s_gxs_posn = s_gxs_drops = 0;
+            }
 #endif
             dc_pvr_report();
             fps_start = now;

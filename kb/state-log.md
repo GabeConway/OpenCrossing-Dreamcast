@@ -1,5 +1,85 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-06 (session 7) — G4 RAN. THE ~23.6 ms IS SPLIT, AND IT IS
+## FOUR-FIFTHS emu64's. G3 IS THE WORK, AND ITS "NET LOSS" CASE IS REFUTED
+
+**Queue item 1 is closed.** `dc/src/dc_gx.c` + `dc/src/dc_vi.c` now carry
+**G4**, a raw-TMU2 bracket around the `GX*` attribute setters, reached with
+`DC_XDEFS=-DDC_PERF_GXSPLIT=1`. Run
+`smoke-oc-gxsplit-20260806-201255-35591`, town keep list, `DC_AUTOWALK`,
+900 s, **187 town windows** (`[PHASE] draw > 55 ms`) out of 563, medians:
+
+| per PRESENTED frame | ms |
+|---|---:|
+| `[PHASE] draw` | 69.3 |
+| `G_TRIN_INDEPEND` ×2 (rule 9) | **55.5** |
+| `cull` + `xform` — already-attributed `dc/` | 3.3 + 10.7 = **14.0** |
+| **`gxpos` + `gxbegin` + `gxend` + `gxstate` − `probe` = OURS** | **8.37** |
+| **`gxgap` = emu64's vertex loop + the three cheap setters** | **18.34** |
+| ledger residual against TRIN×2 | **−12.6** |
+
+```
+[GXSPLIT] gxpos=9.19 gxgap=18.34 gxbegin=0.14 gxend=0.84 gxstate=0.31
+          | ours=8.37 emu=18.34 | posn=13197 probe=2.11 drops=2
+```
+
+- ⭐ **THE ANSWER: the remainder is ~1/5 ours and ~4/5 emu64's.** Of TRIN's
+  55.5 ms, 14.0 is `cull`+`xform`, **8.4 ms is `dc_gx.c`**, and the other
+  ~30.9 ms (`gxgap` 18.3 + the 12.6 ms residual, which is emu64 interval time
+  by construction — see below) is emu64. **So the next piece of work belongs in
+  emu64 (G3), not in our own renderer**, which is the decision this build
+  existed to make.
+- ⭐ **G3's degenerate case is REFUTED, and that mattered.** The design pass
+  flagged that if the remainder were entirely per-COMMAND rather than
+  per-VERTEX, G3 would be a **net loss**. `gxpos` is unambiguously per-vertex
+  (one call per vertex, by construction) and is **9.19 ms/frame over 13,197
+  references = 0.536 µs each**, against `gxbegin+gxend+gxstate = 1.29 ms` over
+  ~300 commands. The cost is per-vertex. G3 is worth building.
+- ⭐ **G3's measured payoff.** The cull rate in these windows is **75.0 %**
+  (`vcull` 9,993 of `v+vcull` 13,329). Skipping those references saves
+  **5.4 ms at the floor** (our setters alone, 0.536 µs/ref) and **19.2 ms at
+  the ceiling** (if `gxgap` is per-vertex too, 1.926 µs/ref). The floor alone
+  is 7.8 % of the draw phase; the ceiling is 28 %.
+- ✅ **The instrument validated itself.** `posn=13,197` against
+  `v + vcull = 13,329` — 1.0 % apart, and they are counted by different code in
+  different files. `probe=2.11 ms` is 3.0 % of the frame and is subtracted, not
+  argued about. `drops=2` per window from the wrap guard.
+
+⚠️ **`[GXSPLIT]` IS PER PRESENTED FRAME — do NOT double it.** Unlike
+`[EMU64H]`, its accumulators are published and cleared in
+`dc_gx_frame_timing_snapshot()`, whose only call site (`dc_vi.c:480`) is
+**below** the frameskip early return at `:423`. So one publish covers every tick
+in the batch. It shares a denominator with `[PHASE]`, and only `[EMU64H]` needs
+the ×2. Rule 9 generalised: **state the denominator for every new counter** —
+this one was checked against the code, not assumed.
+
+⚠️ **THE −12.6 ms RESIDUAL WAS A HOLE IN MY OWN INSTRUMENT, AND IT IS FIXED.**
+The first draft charged the gap only at `GXPosition3f32` entry, so the intervals
+`GXEnd → GXBegin` and `GXBegin → first vertex` — emu64's `dirty_check`,
+`setup_1tri_2tri_1quad` and every non-TRIN opcode — were charged to **nothing**
+and vanished. `gxs_open()` now charges the gap from every bracket
+(`dc_gx.c`, `gxs_gap_charge`). The numbers above are from the run BEFORE that
+fix, so **`gxgap` 18.34 is a floor and the emu64 share is if anything larger** —
+the residual is emu64 interval time by construction, which is why the
+four-fifths conclusion is safe even with the ledger open. A re-run should close
+it; nothing above depends on that.
+
+⚠️ **This frame is 69.3 ms, not the 45.6 ms of the 2026-08-06 baseline**, for
+two reasons that must not be conflated: **both** probes were on (G1's thunks
+plus G4's 2.11 ms), **and** the geometry is heavier (`v` 3,336 vs 2,899,
+`vcull` 9,993 vs 5,250, cull rate 75 % vs 64 %) because `DC_AUTOWALK` was
+standing somewhere else. **Read the ratios, not the absolutes** — that is why
+every figure above is quoted as a share of TRIN or per vertex reference.
+
+**Build line:**
+```bash
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1200000 DC_AUTOSTART=300 DC_SCIF_FAST=1 \
+DC_EMU64_HIST=1 \
+DC_XDEFS='-DDC_PERF_PHASE -DDC_PERF_GXSPLIT=1 -DDC_AUTOWALK=1' bash dc/build-dc.sh
+```
+
 ## ⭐⭐⭐ 2026-08-06 (session 6, later) — AUDIO WORKS ON REAL HARDWARE, AND THE
 ## STUTTER IT LEFT KILLED FOUR HYPOTHESES
 
