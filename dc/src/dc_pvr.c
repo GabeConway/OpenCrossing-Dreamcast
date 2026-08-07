@@ -504,6 +504,19 @@ static int          s_alpha_env_texel;
 static unsigned int s_env_texel_batches;  /* how often it fired (cumulative)  */
 #endif
 
+#ifdef DC_PVR_TEVP3
+/* Whether THIS batch needs the PVR's offset colour, i.e. whether tev_p3_affine()
+ * produced a non-zero offset. Same contract as s_pt_route and
+ * s_alpha_env_texel: decided once per batch in dc_gx_backend_submit() BEFORE
+ * ensure_header(), so header_key() and compile_header() cannot disagree.
+ * s_p3_clamped counts batches where PRIM < ENV in some channel and the base
+ * had to be clamped at 0 — the one place this fix is not exact (see
+ * tev_p3_affine). */
+static int          s_p3_specular;
+static unsigned int s_p3_batches;
+static unsigned int s_p3_clamped;
+#endif
+
 #if !defined(DC_PVR_NO_TEVCONST) && !defined(DC_PVR_NO_TEVCONST_ALPHA) && \
     !defined(DC_PVR_NO_TEVALPHA_LAST)
 /* Batches whose LAST TEV stage was `APREV * <constant>` and so contributed a
@@ -1023,6 +1036,123 @@ static int tev_const_color(float* out) {
     }
     return 0;
 }
+
+#ifdef DC_PVR_TEVP3
+/* --- TEV class P3: the PVR's OFFSET COLOUR, which has never been wired ------
+ *
+ * WHAT IS BROKEN. The name-entry keyboard renders BLACK. 18 of its 26 display
+ * lists (`mED_KeyDraw`, m_editor_ovl.c:2221-2258) are
+ * `gsDPSetCombineLERP(PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, 0,0,0,TEXEL0)`
+ * = config #037, class P3 — and dc_pvr.c implements NO PART of P3, so both
+ * constants are lost and the batch draws at `vtx.rgb * T0.rgb`. The DL clears
+ * G_LIGHTING, so vtx.rgb is not a colour. P3 is 27 of the 101 configs.
+ * This is not a stubbed asset: the textures are on both keep lists, and alpha
+ * here is TEXEL0, so a zeroed texture would be INVISIBLE, not black.
+ *
+ * WHAT THE STAGE ACTUALLY IS, in GX terms — and note the slot rotation in
+ * emu64::combine_auto (emu64.c:1219-1244) against tblc (emu64.c:325-346):
+ * `color_b = tblc[N64_a][0]`, `color_a = tblc[N64_b][1]`, and so on. emu64
+ * parks PRIM in GX_TEVREG1 and ENV in GX_TEVREG2, so #037 arrives here as the
+ * single stage `(a,b,c,d) = (C2, C1, TEXC, ZERO)`. GX evaluates
+ * `d + (1-c)a + c*b` = `(1-T0)*ENV + T0*PRIM` = **`ENV + (PRIM-ENV)*T0`**.
+ * ⚠️ kb/tev-map-hard-cases.md §6.6 describes the same stage in N64 names
+ * ("b/c are ENVIRONMENT and TEXEL0"); this is the GX spelling of it.
+ *
+ * WHY EVERY EXISTING PATH REFUSES IT:
+ *   - tev_const_color() dies at its FIRST test (:994) — it requires
+ *     `color_b == color_c == ZERO` and here they are C1 and TEXC.
+ *   - tev_fold_color() dies inside tev_carg_affine(GX_CC_TEXC) (:1162, the
+ *     default return). ⇒ **-DDC_PVR_TEVFOLD provably cannot fix this**, which
+ *     is a free falsification test. Even if TEXC were accepted, a texture in
+ *     `c` needs a third coefficient that function does not carry.
+ *
+ * THE FIX, and it is native — one pass, no extra geometry, no second batch.
+ * The PVR has an OFFSET COLOUR that is ADDED to the texture-env result
+ * (KOS 2.3, dc/pvr/pvr_header.h:121-122: "the offset color (aka. oargb) ... is
+ * added to the result. Its alpha channel is ignored"), enabled by
+ * `pvr_poly_cxt_t.gen.specular` (pvr.h:181) which compiles to PVR_TA_CMD_SPECULAR
+ * = BIT(2) of the PCW (pvr.h:605, pvr_prim.c:45), and carried per vertex in
+ * `pvr_vertex_t.oargb` (pvr.h:437). So:
+ *
+ *     vertex base colour = PRIM - ENV      (modulated by the texel)
+ *     vertex oargb       = ENV             (added afterwards)
+ *     => PVR computes  (PRIM-ENV)*T0 + ENV  == the GX result, exactly.
+ *
+ * Per-vertex cost is ZERO: pvr_vertex_t already has the field and
+ * submit_prim() already sends all 32 bytes.
+ *
+ * ⚠️ THE ONE PLACE IT IS NOT EXACT, and it is live on the target widget.
+ * argb/oargb are packed UNSIGNED bytes, so `PRIM - ENV` must be clamped at 0
+ * here. Where PRIM < ENV in a channel the surface flattens to ENV and stops
+ * responding to the texture in that channel — kb/tev-map-hard-cases.md §6.2
+ * predicted exactly this. kai_sousa.c:520-521 is PRIM(65,95,165) /
+ * ENV(125,45,225), i.e. base (-60,+50,-60): R and B clamp, and that element
+ * will render flatter than GX **in the fixed build**. That is the clamp showing
+ * itself, not a regression — and its presence is evidence the path fired.
+ * s_p3_clamped counts it so the frequency is a measurement, not an argument.
+ * The exact remedy (invert the texture, swap the roles) needs an offline asset
+ * pass and is out of scope.
+ * Top-end overflow cannot bite this predicate: with base = PRIM-ENV >= 0 and
+ * offset = ENV, base + offset = PRIM <= 1 for any texel. The undocumented
+ * gen.color_clamp bit (pvr.h:178, which pvr_header.h:285 calls fog_clamp) is
+ * therefore MOOT here; -DDC_PVR_P3_CLRCLAMP exists to probe it later.
+ *
+ * SCOPE, honestly. Of the 27 P3 configs this predicate handles NINE exactly
+ * (10, 35, 37, 43, 51, 52, 55, 63, 74 — all `C2 + (C1-C2)*T0`) plus the
+ * `a == ZERO` arm below. The remaining 12 have base and/or offset scaled by
+ * RASC, i.e. per-vertex — the terrain/day-night tint family — and need
+ * tev_carg_affine() widened to `k0 + k1*RASC + k2*T0`. #077's texture term is
+ * T1, not T0, and is never reachable this way. Do not read "P3 implemented".
+ *
+ * Returns 1 and fills base[3]/off[3] in 0..1 float. */
+static int tev_p3_affine(float* base, float* off) {
+    const DCGXTevStage* ts;
+    int creg_b, creg_a, i;
+
+    if (g_gx.num_tev_stages != 1)
+        return 0;
+    ts = &g_gx.tev_stages[0];
+
+    if (ts->color_op != GX_TEV_ADD)
+        return 0;
+    /* The texture must be the LERP WEIGHT and nothing may bypass it. */
+    if (ts->color_c != GX_CC_TEXC || ts->color_d != GX_CC_ZERO)
+        return 0;
+
+    creg_b = tev_creg_of(ts->color_b);
+    if (creg_b < 0)
+        return 0;
+
+    /* The `a == ZERO` arm is the P2 shape `C1 * T0`, which needs no offset
+     * colour at all and no specular bit. It is here rather than in a separate
+     * function because it is THE SAME WIDGET: kai_sousa.c:387,396,406 draw
+     * three more of the keyboard's pieces as
+     * `gsDPSetCombineLERP(PRIMITIVE, 0, TEXEL0, 0, ...)`, which is equally
+     * unimplemented today and equally black. -DDC_PVR_TEVP3_NOP2 refuses it, so
+     * "P3 restored" stays separable from "P2's constant restored" in the A/B. */
+    if (ts->color_a == GX_CC_ZERO) {
+#ifdef DC_PVR_TEVP3_NOP2
+        return 0;
+#else
+        for (i = 0; i < 3; i++) {
+            base[i] = g_gx.tev_colors[creg_b][i];
+            off[i]  = 0.0f;
+        }
+        return 1;
+#endif
+    }
+
+    creg_a = tev_creg_of(ts->color_a);
+    if (creg_a < 0)
+        return 0;
+
+    for (i = 0; i < 3; i++) {
+        base[i] = g_gx.tev_colors[creg_b][i] - g_gx.tev_colors[creg_a][i];
+        off[i]  = g_gx.tev_colors[creg_a][i];
+    }
+    return 1;
+}
+#endif /* DC_PVR_TEVP3 */
 
 #ifdef DC_PVR_TEVFOLD
 /* --- TEV stage 0, GENERALISED: fold the whole affine stage into the vertex --
@@ -1594,6 +1724,15 @@ static unsigned int header_key(const dc_pvr_tex_t* tex) {
          * fields, so the cache does not churn. */
         k = (k * 33u) + (unsigned int)s_alpha_env_texel;
 #endif
+#ifdef DC_PVR_TEVP3
+        /* The specular/offset-colour bit lives in the PCW, which is baked into
+         * the compiled header — so it MUST be part of the key. Leave it out and
+         * ensure_header() hits the cache, every later batch inherits whichever
+         * value compiled first, and the whole fix silently does nothing. That
+         * trap is already documented three times in this function (alpha test,
+         * fog, alpha env); this is the fourth instance of it. */
+        k = (k * 33u) + (unsigned int)s_p3_specular;
+#endif
     }
     return k ? k : 1u;
 }
@@ -1944,6 +2083,37 @@ static void compile_header(const dc_pvr_tex_t* tex) {
         if (s_alpha_env_texel)
             cxt.txr.env = PVR_TXRENV_MODULATE;
 #endif
+#ifdef DC_PVR_TEVP3
+        /* PVR_TA_CMD_SPECULAR, BIT(2) of the PCW (pvr.h:605, pvr_prim.c:45).
+         * With it set the hardware ADDS pvr_vertex_t.oargb to the texture-env
+         * result (pvr_header.h:121-122) — that add is what carries P3's ENV
+         * term. It is independent of txr.env: MODULATEALPHA and MODULATE both
+         * get the add, they differ only in what they do to alpha.
+         *
+         * Gated on tex && tex->base by the enclosing block, deliberately: KOS
+         * documents offset colour for TEXTURED polygons and says nothing about
+         * an untextured one. P3 always has a texture, so this costs nothing. */
+        cxt.gen.specular = s_p3_specular ? true : false;
+#ifdef DC_PVR_P3_MODULATE
+        /* #037's alpha is TEXEL0 alone, and MODULATEALPHA multiplies it by the
+         * vertex alpha — the same defect DC_PVR_ALPHAENV fixes globally and
+         * which measured a REGRESSION when applied globally (BUILDING-DC.md).
+         * This narrows the identical change to P3 batches: 27 configs instead
+         * of every draw in the game. Requires the alpha predicate to agree, so
+         * a P3 batch whose alpha is genuinely a product is left alone. */
+        if (s_p3_specular && alpha_env_texel_only())
+            cxt.txr.env = PVR_TXRENV_MODULATE;
+#endif
+#ifdef DC_PVR_P3_CLRCLAMP
+        /* One-line probe of an UNDOCUMENTED bit: pvr.h:178 calls it
+         * gen.color_clamp and pvr_header.h:285 calls the same bit fog_clamp,
+         * and KOS documents the semantics of neither. Not needed by the
+         * predicate in tev_p3_affine() — with base = PRIM-ENV >= 0 and
+         * offset = ENV the sum is PRIM <= 1 for any texel, so it cannot
+         * overflow. Here to be measured, not to be depended on. */
+        cxt.gen.color_clamp = true;
+#endif
+#endif
         wrap_gx_to_pvr(g_gx.tex_obj_wrap_s[0], g_gx.tex_obj_wrap_t[0],
                        &uv_clamp, &uv_flip);
         cxt.txr.uv_clamp = (pvr_uv_clamp_t)uv_clamp;
@@ -1972,6 +2142,13 @@ typedef struct {
     float x, y, z, w;   /* clip space */
     float u, v;
     unsigned int argb;
+#ifdef DC_PVR_TEVP3
+    /* The PVR offset colour, carried through the clipper and the vertex memo
+     * exactly like argb. +4 B here is +512 B of .bss (s_vmemo_val[128]) and
+     * +32 B of stack; TA bandwidth is unchanged, because pvr_vertex_t already
+     * has the field and submit_prim() already sends all 32 bytes. */
+    unsigned int oargb;
+#endif
 } ClipVtx;
 
 static void emit_projected(const ClipVtx* c, unsigned int flags) {
@@ -1985,7 +2162,11 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
     pv.u = c->u;
     pv.v = c->v;
     pv.argb = c->argb;
+#ifdef DC_PVR_TEVP3
+    pv.oargb = c->oargb;
+#else
     pv.oargb = 0;
+#endif
     submit_prim(&pv, sizeof(pv));
 #ifndef DC_PVR_NO_PUNCHTHRU
     if (s_pt_route) s_pt_verts++;
@@ -2128,6 +2309,29 @@ static void lerp_vtx(ClipVtx* out, const ClipVtx* a, const ClipVtx* b, float t) 
         }
         out->argb = r;
     }
+#ifdef DC_PVR_TEVP3
+    /* NOT optional. A near-clipped triangle emits lerped vertices, and leaving
+     * oargb uninitialised here would push whatever was on the stack into the
+     * TA as an additive colour — a bug that appears only on geometry crossing
+     * the near plane, i.e. exactly the geometry the pvr_dropped counter is
+     * already known to track by camera position. Interpolated rather than
+     * copied because base and offset must stay a matched pair across the seam.
+     * Three channels: the hardware ignores oargb's alpha (pvr_header.h:122). */
+    {
+        unsigned int ca = a->oargb, cb = b->oargb;
+        unsigned int r = 0;
+        int s;
+        for (s = 0; s < 24; s += 8) {
+            float x0 = (float)((ca >> s) & 0xFF);
+            float x1 = (float)((cb >> s) & 0xFF);
+            int   xi = (int)(x0 + (x1 - x0) * t + 0.5f);
+            if (xi < 0) xi = 0;
+            if (xi > 255) xi = 255;
+            r |= ((unsigned int)xi) << s;
+        }
+        out->oargb = r;
+    }
+#endif
 }
 
 /* Emit one triangle, clipping it against w > DC_PVR_W_EPS first. The PVR has
@@ -2592,6 +2796,12 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     float foldk0[3], foldk1[3];
     int   have_tevfold = 0;
 #endif
+#endif
+#ifdef DC_PVR_TEVP3
+    float p3base[3], p3off[3];
+    int   have_p3 = 0;
+#endif
+#ifndef DC_PVR_NO_TEVCONST
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
     float tevalpha = 1.0f;
     int   have_tevalpha = 0;
@@ -2708,6 +2918,29 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
      * once, so the two cannot disagree about which env this batch wants. */
     s_alpha_env_texel = (tex && tex->base) ? alpha_env_texel_only() : 0;
     if (s_alpha_env_texel) s_env_texel_batches++;
+#endif
+
+#ifdef DC_PVR_TEVP3
+    /* Third member of the same family, and it MUST be before ensure_header()
+     * for the same reason as the two above. Note the ordering against
+     * have_tevconst below: P3 is strictly narrower (it requires TEXC in the
+     * lerp weight, which tev_const_color() rejects outright), so the two
+     * predicates cannot both fire and the arm below is an `else if` only for
+     * readability. */
+    have_p3 = (tex && tex->base) ? tev_p3_affine(p3base, p3off) : 0;
+    if (have_p3) {
+        int ch, clamped = 0;
+        s_p3_batches++;
+        for (ch = 0; ch < 3; ch++) if (p3base[ch] < 0.0f) clamped = 1;
+        if (clamped) s_p3_clamped++;
+        /* An all-zero offset is the P2 arm: it needs the vertex base colour but
+         * NOT the specular bit, and asking for the bit anyway would compile a
+         * second header for no reason and churn the header cache. */
+        s_p3_specular = (p3off[0] != 0.0f || p3off[1] != 0.0f ||
+                         p3off[2] != 0.0f);
+    } else {
+        s_p3_specular = 0;
+    }
 #endif
 
 #ifndef DC_PVR_NO_FOG
@@ -2994,6 +3227,56 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                              ((unsigned int)cg << 8) | (unsigned int)cb;
             }
 #endif
+#endif
+#ifdef DC_PVR_TEVP3
+            /* CLASS P3: split the stage across the two hardware colours.
+             * Base carries PRIM-ENV, which the texture env modulates; oargb
+             * carries ENV, which the specular bit adds afterwards. Together
+             * they reproduce GX's `ENV + (PRIM-ENV)*T0` exactly.
+             *
+             * ⚠️ oargb is written on EVERY path, not only when have_p3 — the
+             * vertex memo caches the whole ClipVtx and emit_projected reads the
+             * field unconditionally, so a path that skipped it would push stack
+             * garbage into the TA. The zero default is also the correct value:
+             * with the specular bit clear the hardware ignores it anyway.
+             *
+             * Alpha is untouched, deliberately. #037's alpha IS TEXEL0 alone,
+             * which MODULATEALPHA gets wrong by the vertex-alpha factor — the
+             * same defect DC_PVR_ALPHAENV addresses globally and which measured
+             * a regression when applied globally. -DDC_PVR_P3_MODULATE narrows
+             * that fix to P3 batches only, so its blast radius is 27 configs
+             * rather than every draw in the game. Off by default: the RGB half
+             * is the black-panel fix and does not need it. */
+            cv[k].oargb = 0;
+            if (have_p3) {
+                int br = (int)(p3base[0] * 255.0f + 0.5f);
+                int bg = (int)(p3base[1] * 255.0f + 0.5f);
+                int bb = (int)(p3base[2] * 255.0f + 0.5f);
+                int orr = (int)(p3off[0] * 255.0f + 0.5f);
+                int og = (int)(p3off[1] * 255.0f + 0.5f);
+                int ob = (int)(p3off[2] * 255.0f + 0.5f);
+                /* The clamp that makes this inexact where PRIM < ENV. Counted
+                 * per batch in s_p3_clamped, not silently swallowed. */
+                if (br < 0) br = 0;
+                if (br > 255) br = 255;
+                if (bg < 0) bg = 0;
+                if (bg > 255) bg = 255;
+                if (bb < 0) bb = 0;
+                if (bb > 255) bb = 255;
+                if (orr < 0) orr = 0;
+                if (orr > 255) orr = 255;
+                if (og < 0) og = 0;
+                if (og > 255) og = 255;
+                if (ob < 0) ob = 0;
+                if (ob > 255) ob = 255;
+                cv[k].argb = (cv[k].argb & 0xFF000000u) |
+                             ((unsigned int)br << 16) |
+                             ((unsigned int)bg << 8) | (unsigned int)bb;
+                cv[k].oargb = ((unsigned int)orr << 16) |
+                              ((unsigned int)og << 8) | (unsigned int)ob;
+            }
+#endif
+#ifndef DC_PVR_NO_TEVCONST
 #ifndef DC_PVR_NO_TEVCONST_ALPHA
             /* MODULATEALPHA computes a = vtx.a * tex.a, so writing the
              * combiner's constant into the vertex alpha makes the hardware
@@ -3211,6 +3494,15 @@ void dc_pvr_report(void) {
      * expected to move otherwise. */
     DC_LOGE("[DC/PVR] alphaenv texel_only=%u of %u batches\n",
             s_env_texel_batches, s_batches);
+#endif
+#ifdef DC_PVR_TEVP3
+    /* batches= is the falsification counter: if it is 0 on a run that reached
+     * the name-entry keyboard, the predicate never matched and the diagnosis in
+     * kb/tev-map-hard-cases.md §6.6 is wrong — no screenshot needed to know it.
+     * clamped= is how often PRIM < ENV forced the base to 0 (tev_p3_affine),
+     * i.e. how often this fix is approximate rather than exact. */
+    DC_LOGE("[DC/PVR] tevp3 batches=%u clamped=%u of %u\n",
+            s_p3_batches, s_p3_clamped, s_batches);
 #endif
     dc_pvr_texture_report();
 }
