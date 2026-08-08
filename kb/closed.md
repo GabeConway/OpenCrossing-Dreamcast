@@ -7,6 +7,25 @@ real toolchain, not reasoned about.
 Companion files: `kb/levers.md` (what is still live), `kb/traps.md` (toolchain
 gotchas).
 
+## 🛑 REOPENED 2026-08-08 — "DISC-CACHE MISSES ARE NOT THE STUTTER" WAS AN ARTEFACT OF FLYCAST
+
+It was killed on 2026-08-06 by taking the ARAM cache 4 → 16 blocks: hit rate
+83 → 97.9 %, disc reads 3.54 → 0.77/s, **stutter unchanged**. That A/B ran in
+Flycast, whose harness sets `FastGDRomLoad=yes` and which models **neither seek
+time nor transfer rate**. It measured a machine where a disc read is free.
+
+On silicon a CD-R seek is 100-200 ms and then transfers at ~500 KB/s, against
+~224 ms of total audio cushion (96 ms ring + 128 ms SPU) that **nothing refills
+during a blocking `fs_read`**. A human on a burn: *"the stutter almost
+perfectly lines up with laser load sounds."*
+
+✅ Fixed by chunking the read and synthesising between chunks
+(`dc_audio_disc_yield()`, `DC_DVD_READ_CHUNK`), **not** by a deeper buffer — a
+deeper buffer buys the fix with permanent latency. ⚠️ **Awaiting hardware
+confirmation.** What generalises, and it is the reusable half: **a hypothesis
+about I/O TIMING cannot be refuted in an emulator that does not model I/O
+timing.** Check what the instrument models before recording a refutation.
+
 ---
 
 ## ✅ G3 IS BUILT, GATED AND SHIPPED — STOP TREATING IT AS A PROPOSAL (2026-08-08)
@@ -23,6 +42,8 @@ the three. The remaining unattributed work inside TRIN is emu64's index
 expansion on the ~39 % of batches that survive the cull.
 
 ## ✅ THE "BIMODAL 2.5 / 10 ms" AUDIO MYSTERY IS CLOSED — IT WAS VOICE COUNT (2026-08-08)
+
+⚠️ **ONE OF THE FOUR IS REOPENED — see the entry below on disc-cache misses.**
 
 Four hypotheses died for this between 2026-08-06 and 2026-08-08 (disc-cache
 misses, multi-frame bursts, `snd_stream_poll`/G2/the scheduler quantum, and

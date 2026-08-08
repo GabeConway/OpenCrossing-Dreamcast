@@ -137,8 +137,44 @@ measurement rule 2 is not formally satisfied. And on the visible path
 `dirty_check` + `setup_1tri_2tri_1quad` run **twice**; that comes off the
 headline and is not separately measured.
 
+## 0f. ⏸ PARKED PENDING HARDWARE CONFIRMATION (2026-08-08)
+
+**`~/Downloads/AC-DC-20260808b.cdi` is built, padded and UNBURNED.**
+`AC-DC-20260808.cdi` sits beside it as the without-the-fix control.
+
+A burn of the first image produced the finding that ends this session:
+*"the loading is much improved, though it still stutters but it's better. I can
+hear it's stuttering on disk load. the stutter almost perfectly lines up with
+laser load sounds."*
+
+**Diagnosis:** `dc_dvd_pager_read()` blocks in one `fs_read` on the game
+thread, and the audio pump runs once per logic tick — so for the whole read
+NOTHING refills the 96 ms ring or the SPU's 128 ms buffer. A CD-R seek is
+100-200 ms and then transfers at ~500 KB/s, so a 256 KB archive read is ~500 ms
+of starvation and the AICA repeats its last fragment.
+
+**Fix (in `462e935`, ON by default):** the read is chunked at 16 KB and
+`dc_audio_disc_yield()` synthesises up to 4 DAC frames between chunks. **Not** a
+deeper buffer — that would buy the fix with permanent latency on every footstep.
+Kill switch `DC_DVD_READ_CHUNK=0`; counter `[DC/AUDIO] yield calls= frames=`.
+
+⚠️ **FLYCAST CANNOT ADJUDICATE THIS AND MUST NOT BE ASKED TO.** It runs
+`FastGDRomLoad=yes` and models no seek or transfer rate — which is exactly how
+this hypothesis got recorded as refuted on 2026-08-06 (`kb/closed.md`,
+`kb/traps.md`). It showed the absence of harm and nothing more: the yield fires
+(`yield calls=41 frames=15`), bytes per logical pager read 34,003 vs a 32,916
+baseline, `ASSET MISSING 0`, no assert.
+
+**FIRST ACTION NEXT SESSION: read the human's verdict on the burn.** If the
+disc stutter is gone, close it. If it is unchanged, the next suspects are the
+chunk size (16 KB may still be too coarse against a 100-200 ms *seek*, which no
+chunking can subdivide) and `DC_AUDIO_DISC_FRAMES`. If it is WORSE, suspect
+chunking having disturbed the read pattern and try `DC_DVD_READ_CHUNK=0`.
+
 ## 0e. THE RANKED LIST FROM HERE (2026-08-08)
 
+0. ⏸ **The hardware verdict on `AC-DC-20260808b.cdi`** — §0f. Everything below
+   is behind it.
 1. **The G3 screenshot pair.** The one measurement rule this session did not
    satisfy.
 2. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified,

@@ -1,5 +1,25 @@
 # Traps already paid for — do not re-discover these
 
+## ⚠️ FLYCAST MODELS NO DISC TIMING. Never refute an I/O-timing hypothesis in it (2026-08-08)
+
+`harness/dc/run-flycast.sh` passes `config:FastGDRomLoad=yes`, and Flycast
+models **neither seek time nor transfer rate**. In it, `fs_read` is effectively
+free.
+
+On 2026-08-06 "disc-cache misses cause the audio stutter" was recorded as
+REFUTED on the strength of a Flycast A/B (ARAM cache 4 → 16 blocks: hit rate
+83 → 97.9 %, disc reads 3.54 → 0.77/s, stutter unchanged). On a real CD-R a
+seek is 100-200 ms *and then* the drive transfers at ~500 KB/s, against ~224 ms
+of total audio cushion that nothing refills during a blocking read — so the
+hypothesis was alive the whole time and a human heard it in one sentence:
+*"the stutter almost perfectly lines up with laser load sounds."*
+
+**Generalise: before recording a refutation, ask what the instrument MODELS.**
+This is the third instance of the same family in three days — a census pointed
+at silent audio, a gate whose oracle could not answer, and now an emulator with
+no drive. Flycast is a fair proxy for *loading amounts* (parity confirmed on
+hardware 2026-08-04) and **not** for loading *timing*.
+
 ## ⚠️ A gate that cannot tell "the reference disagreed" from "the reference could not answer" is not a gate (2026-08-08)
 
 G3's correctness gate (`-DDC_EMU64_CULL_VERIFY`) never culls: it runs the entry

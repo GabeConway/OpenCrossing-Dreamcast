@@ -64,6 +64,12 @@ is 14-15 concurrent voices and a cap of 12 bounds the worst frame linearly.
 
 **`kb/RESUME.md` §0e carries the same list and the two must agree.**
 
+0. ⏸ **THE HARDWARE VERDICT ON `AC-DC-20260808b.cdi`** — built, padded,
+   unburned. It carries the disc-yield fix for the stutter a human traced to
+   the laser on a burn of the previous image. ⚠️ **Flycast cannot adjudicate
+   it** (`FastGDRomLoad=yes`, no seek model — which is how the same hypothesis
+   was wrongly refuted on 2026-08-06). `kb/RESUME.md` §0f has the diagnosis, the
+   kill switch and what to try if the verdict is "unchanged" or "worse".
 1. **The G3 screenshot pair** (`DC_EMU64_CULL=0` vs `=1`). The VERIFY gate is a
    stronger instrument and it passed, but measurement rule 2 is not formally
    satisfied and this session did not take it.
@@ -197,7 +203,9 @@ costs ~10 ms during a stutter against a 3.78 ms mean. jaudio is **bimodal**
 At 57 % the frame collapses, the ring falls behind, and the pump hits its
 4-frame ceiling (2 ticks × `DC_AUDIO_MAX_FRAMES=2`) catching up.
 
-**FOUR HYPOTHESES REFUTED BY MEASUREMENT** — disc-cache misses (ARAM 4→16
+**FOUR HYPOTHESES REFUTED BY MEASUREMENT** ⚠️ **[ONE REOPENED 2026-08-08 — the
+disc-cache refutation was measured in Flycast, which models no seek time. See
+the top of this file and `kb/closed.md`.]** — disc-cache misses (ARAM 4→16
 blocks took the hit rate 83→97.9 % and disc reads 3.54→0.77/s; **hardware
 stutter unchanged**); a multi-frame burst (`sndf=4` is 2 ticks × 2, not a burst);
 `snd_stream_poll`/G2/the 10 ms scheduler quantum (`DC_AUDIO_MAX_FRAMES=0` keeps

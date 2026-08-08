@@ -1,5 +1,62 @@
 # Session log — what was observed running, in order
 
+## ⏸ 2026-08-08 (session 9, later) — A BURN SAYS THE REMAINING STUTTER IS THE
+## LASER, AND FLYCAST HAD REFUTED THAT ON A MACHINE WITH NO DRIVE
+
+**Human, on `AC-DC-20260808.cdi` running on the retail console:** *"the loading
+is much improved, though it still stutters but it's better. I can hear it's
+stuttering on disk load. The stutter almost perfectly lines up with laser load
+sounds."*
+
+**The arithmetic agrees, and it is not close.** `dc_dvd_pager_read()` blocks in
+a single `fs_read` on the game thread; `dc_audio_pump()` runs once per logic
+tick. So for the entire read, nothing refills either buffer:
+
+```
+our ring   RING_BUF_SAMPLES - DC_AUDIO_HEADROOM = 6,144 s16 = 3,072 pairs =  96 ms
+SPU buffer DC_AUDIO_STREAM_BYTES 8,192 B/channel                          = 128 ms
+                                                                   total  ~224 ms
+```
+
+against a CD-R seek of 100-200 ms **followed by** ~500 KB/s of transfer — a
+256 KB archive read is ~500 ms. The AICA runs dry and repeats its last
+fragment. It lines up with the laser because it **is** the laser.
+
+⚠️ **AND THE PROJECT HAD ALREADY "REFUTED" THIS.** On 2026-08-06 the ARAM cache
+went 4 → 16 blocks (hit rate 83 → 97.9 %, disc reads 3.54 → 0.77/s) and the
+stutter did not move, so disc I/O was struck off. **That A/B ran in Flycast,
+which the harness starts with `FastGDRomLoad=yes` and which models neither seek
+time nor transfer rate.** It measured a machine where the read is free. Third
+instance in three days of the same error shape — a census pointed at silent
+audio, a gate whose oracle could not answer, an emulator with no drive — and
+`kb/traps.md` now carries all three together.
+
+**THE FIX IS DELIBERATELY NOT A BIGGER BUFFER.** 500 ms of cushion is 500 ms of
+latency on every footstep and UI blip, permanently, to hide an event that
+happens a few times a minute. Instead `dc_dvd_pager_read()` chunks its read at
+16 KB (~32 ms of drive time) and calls `dc_audio_disc_yield()` between chunks,
+which synthesises up to 4 DAC frames (~70 ms of audio) and polls the stream —
+so the ring comes **out** of a long read fuller than it went in, and
+steady-state latency is untouched. Chunking a sequential read on an already-open
+fd adds no seeks. Kill switch `DC_DVD_READ_CHUNK=0`.
+
+⚠️ **Reentrancy is real:** synthesis fetches samples, so
+`pc_audio_process_frame → Nas_WaveDmaCallBack → Nas_StartDma → ARStartDMA →
+dc_aram.c → dc_dvd_pager_read` lands straight back in the yield.
+`s_audio_busy` guards both directions.
+
+**What the Flycast smoke could and could not say.** It cannot show the win — by
+construction the read it models is free. It showed the absence of harm: the
+yield fires and produces audio (`[DC/AUDIO] yield calls=41 frames=15` in one
+window), bytes per **logical** pager read 34,003 against a 32,916 baseline (the
+counter counts logical reads, so chunking did not inflate it), `ASSET MISSING
+0`, `aram LOST 0`, no assert, scenes 0 → 3 → 4 before the human ended the run.
+
+⏸ **PARKED HERE FOR A HARDWARE VERDICT.** `AC-DC-20260808b.cdi` is built,
+padded and unburned; `AC-DC-20260808.cdi` is kept beside it as the
+without-the-fix control. `kb/RESUME.md` §0f carries what to do for each of the
+three possible answers.
+
 ## ⭐⭐⭐ 2026-08-08 (session 9) — THE MUSIC PLAYS, THE STUTTER IS VOICE COUNT,
 ## AND G3 TOOK 19.9 ms OUT OF THE TOWN FRAME
 
