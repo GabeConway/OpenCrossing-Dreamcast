@@ -219,60 +219,9 @@ int dc_dvd_pager_read(int entry, unsigned int off, void* dst, unsigned int len) 
     }
     dvd_pager_use[i] = ++dvd_pager_clock;
 
-    if (fs_seek(fd, (s32)off, SEEK_SET) < 0) return -1;
-
-    /* ⚠️ THIS READ IS WHERE THE MUSIC STUTTERS ON REAL HARDWARE.
-     *
-     * It blocks on the game thread, and the audio pump runs once per logic
-     * tick — so for the whole duration of the read NOTHING refills our ring
-     * (96 ms) or the SPU's own buffer (128 ms). A CD-R seek is 100-200 ms and
-     * then transfers at ~500 KB/s, so a 256 KB archive read is ~500 ms of
-     * silence-by-starvation and the AICA repeats its last fragment. Human, on
-     * a burn: "the stutter almost perfectly lines up with laser load sounds."
-     *
-     * ⚠️ FLYCAST CANNOT SEE THIS. The harness runs FastGDRomLoad=yes and the
-     * emulator models neither seek nor transfer rate, which is why the
-     * 2026-08-06 A/B that took the ARAM hit rate 83 -> 97.9 % saw no change
-     * and the disc hypothesis was recorded as refuted. It was refuted on a
-     * machine where this line is free.
-     *
-     * So the read is chunked and audio is produced BETWEEN chunks. Chunking a
-     * sequential read on an already-open fd adds no seeks — the head keeps
-     * moving forward — and the yield is reentrancy-guarded, because synthesis
-     * can itself fetch a sample and land back in this function.
-     *
-     * Sizing: at ~500 KB/s a 16 KB chunk is ~32 ms of drive time, and one
-     * yield may synthesise 4 DAC frames (~70 ms of audio). Production
-     * therefore outruns consumption inside the stall, which is the point —
-     * the ring should come OUT of a long read fuller than it went in.
-     *
-     * Kill switch: DC_DVD_READ_CHUNK=0 restores the single fs_read verbatim. */
-#ifndef DC_DVD_READ_CHUNK
-#define DC_DVD_READ_CHUNK 16384
-#endif
-#if (DC_DVD_READ_CHUNK) > 0
-    {
-        u32 done = 0;
-        got = 0;
-        while (done < len) {
-            u32 want = len - done;
-            s32 n;
-            if (want > (u32)(DC_DVD_READ_CHUNK)) want = (u32)(DC_DVD_READ_CHUNK);
-            n = (s32)fs_read(fd, (u8*)dst + done, (size_t)want);
-            if (n <= 0) break;
-            done += (u32)n;
-            got = (s32)done;
-            /* AFTER the chunk, not before: the first chunk should start as
-             * soon as possible, since the seek has already been paid and the
-             * caller is blocked either way. Skipped on the last chunk — the
-             * ordinary pump is a few instructions away by then. */
-            if (done < len) dc_audio_disc_yield();
-            if ((u32)n < want) break;      /* short read: EOF */
-        }
-    }
-#else
-    got = (s32)fs_read(fd, dst, (size_t)len);
-#endif
+    /* The ARAM pager's read. Same helper as every other blocking read in the
+     * program — it yields before the seek and between chunks. */
+    got = dc_dvd_read_yielding((unsigned int)fd, dst, len, 1, off);
 
     dvd_pager_reads++;
     if (got > 0) dvd_pager_bytes += (unsigned int)got;
@@ -390,6 +339,78 @@ BOOL DVDClose(void* fileInfo) {
 
 BOOL DVDFastClose(void* fileInfo) { return DVDClose(fileInfo); }
 
+/* ==========================================================================
+ * THE ONE PLACE A DISC READ MAY BLOCK — dc_dvd_read_yielding()
+ * ==========================================================================
+ * SECOND HARDWARE ITERATION, 2026-08-08. The first chunked read went into
+ * dc_dvd_pager_read() only, and the burn came back "same problem but less
+ * laser thrash" and then "actually I think it's still there". The chunking
+ * worked; it was in the WRONG FUNCTION for most of the bytes.
+ *
+ * dc_dvd_pager_read() is the ARAM pager. **The game's own asset loading does
+ * not go through it** — DVDRead/DVDReadPrio land in dc_dvd_read_impl() below,
+ * and the DC_ASSET_STUB keep-list loader has two more `fs_seek` + `fs_read`
+ * pairs of its own in dc_main.c. Those are the reads that run during a scene
+ * load, they are the largest in the program, and every one of them was still a
+ * single blocking call with no audio produced anywhere inside it.
+ *
+ * So the chunking lives HERE now, once, and every site calls it. Two rules it
+ * encodes, both learned from the first iteration:
+ *
+ *   1. **Yield BEFORE the seek, not only between chunks.** A seek is 100-200 ms
+ *      of head movement that no chunk size can subdivide, so the only defence
+ *      is to enter it with a full ring. The ring is otherwise only as full as
+ *      the last logic tick left it — and during a burst of back-to-back reads
+ *      that is not full at all.
+ *   2. **A short first chunk.** The seek is paid on the first read regardless;
+ *      making that read small gets us back to a yield as soon as the head
+ *      arrives, instead of adding a further 32 ms of transfer to it.
+ *
+ * Kill switch DC_DVD_READ_CHUNK=0 restores a single fs_read at every site.
+ */
+s32 dc_dvd_read_yielding(unsigned int fd, void* dst, unsigned int len,
+                         int seek_valid, unsigned int off) {
+#ifdef DC_HOST_STUB
+    (void)fd; (void)dst; (void)len; (void)seek_valid; (void)off;
+    return -1;
+#else
+#ifndef DC_DVD_READ_CHUNK
+#define DC_DVD_READ_CHUNK 16384
+#endif
+#ifndef DC_DVD_FIRST_CHUNK
+/* ~4 ms of CD-R transfer. Small enough that the yield after it lands almost
+ * immediately after the head arrives; large enough not to turn one read into
+ * hundreds of calls. */
+#define DC_DVD_FIRST_CHUNK 2048
+#endif
+
+#if (DC_DVD_READ_CHUNK) > 0
+    u32 done = 0;
+    u32 want = (u32)(DC_DVD_FIRST_CHUNK);
+
+    /* Rule 1: top up before we block, so the seek is covered by a full ring. */
+    dc_audio_disc_yield();
+
+    if (seek_valid && fs_seek((file_t)fd, (off_t)off, SEEK_SET) < 0) return -1;
+
+    while (done < len) {
+        s32 n;
+        if (want > len - done) want = len - done;
+        n = (s32)fs_read((file_t)fd, (u8*)dst + done, (size_t)want);
+        if (n <= 0) break;
+        done += (u32)n;
+        if ((u32)n < want) break;               /* short read: EOF */
+        if (done < len) dc_audio_disc_yield();
+        want = (u32)(DC_DVD_READ_CHUNK);        /* rule 2: only the FIRST is short */
+    }
+    return (s32)done;
+#else
+    if (seek_valid && fs_seek((file_t)fd, (off_t)off, SEEK_SET) < 0) return -1;
+    return (s32)fs_read((file_t)fd, dst, (size_t)len);
+#endif
+#endif
+}
+
 static s32 dc_dvd_read_impl(void* fileInfo, void* buf, s32 length, s32 offset) {
     u32 h = *dvd_fi_handle(fileInfo);
     if (!h) return -1;
@@ -398,8 +419,11 @@ static s32 dc_dvd_read_impl(void* fileInfo, void* buf, s32 length, s32 offset) {
     return -1;
 #else
     if (h == (u32)FILEHND_INVALID) return -1;
-    if (fs_seek((file_t)h, offset, SEEK_SET) < 0) return -1;
-    return (s32)fs_read((file_t)h, buf, (size_t)length);
+    /* ⭐ THE GAME'S OWN ASSET READS COME THROUGH HERE, and until 2026-08-08
+     * they were one blocking fs_read with no audio produced inside them. This
+     * is the path a scene load takes; the ARAM pager is not. */
+    return dc_dvd_read_yielding(h, buf, (unsigned int)length, 1,
+                                (unsigned int)offset);
 #endif
 }
 

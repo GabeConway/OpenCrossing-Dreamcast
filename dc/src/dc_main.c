@@ -988,12 +988,11 @@ void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
                 (int)fs_total(fd));
     }
 
-    if (fs_seek(fd, (off_t)rom_off, SEEK_SET) < 0) {
-        DC_LOGE("[DC/KEEP] %s: seek to %u failed\n", who, rom_off);
-        dc_stub_keep_bad++;
-        return;
-    }
-    if (fs_read(fd, dest, size) != (ssize_t)size) {
+    /* Chunked + audio-yielding, like every other blocking read in the program
+     * (dc_dvd_read_yielding, dc/src/dc_dvd.c). The keep-list loader runs at
+     * boot AND on demand, and its reads are among the largest here. */
+    if ((unsigned int)dc_dvd_read_yielding((unsigned int)fd, dest, size, 1,
+                                           rom_off) != size) {
         DC_LOGE("[DC/KEEP] %s: short read of %u B at %u\n", who, size, rom_off);
         dc_stub_keep_bad++;
         return;
@@ -1102,12 +1101,8 @@ static void dc_keep_sweep(void) {
             if (base + want < r->rom_off + r->size)
                 want = (r->rom_off + r->size) - base;   /* cannot exceed cap */
 
-            if (fs_seek(fd, (off_t)base, SEEK_SET) < 0) {
-                DC_LOGE("[DC/KEEP] %s: seek to %u failed\n", r->who, base);
-                dc_stub_keep_bad++;
-                continue;
-            }
-            got = fs_read(fd, win, want);
+            got = (ssize_t)dc_dvd_read_yielding((unsigned int)fd, win, want,
+                                                1, base);
             if (got < (ssize_t)(r->rom_off - base + r->size)) {
                 DC_LOGE("[DC/KEEP] %s: short window read at %u (%d of %u)\n",
                         r->who, base, (int)got, want);
@@ -1123,13 +1118,9 @@ static void dc_keep_sweep(void) {
             memcpy(r->dest, win + (r->rom_off - win_off), r->size);
         } else {
             /* Bigger than the window: straight into the destination. */
-            if (fs_seek(fd, (off_t)r->rom_off, SEEK_SET) < 0) {
-                DC_LOGE("[DC/KEEP] %s: seek to %u failed\n",
-                        r->who, r->rom_off);
-                dc_stub_keep_bad++;
-                continue;
-            }
-            if (fs_read(fd, r->dest, r->size) != (ssize_t)r->size) {
+            if ((unsigned int)dc_dvd_read_yielding((unsigned int)fd, r->dest,
+                                                   r->size, 1, r->rom_off)
+                != r->size) {
                 DC_LOGE("[DC/KEEP] %s: short read of %u B at %u\n",
                         r->who, r->size, r->rom_off);
                 dc_stub_keep_bad++;

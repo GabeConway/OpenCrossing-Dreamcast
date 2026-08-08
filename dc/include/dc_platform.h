@@ -386,6 +386,20 @@ void dc_audio_pump(void);
  * of buffer the audio path carries. Compiles to an empty body when DC_AUDIO=0.
  * Rationale, and why Flycast could never show the bug: dc/src/dc_audio.c. */
 void dc_audio_disc_yield(void);
+
+/* ⭐ THE ONLY WAY A DISC READ MAY BLOCK IN THIS PORT (dc/src/dc_dvd.c).
+ * Seeks (when `seek_valid`), then reads `len` bytes in chunks, calling
+ * dc_audio_disc_yield() BEFORE the seek and between chunks — so a 100-200 ms
+ * CD-R seek is entered with a full audio ring and a long transfer produces
+ * audio while it runs. Returns bytes read, or -1.
+ *
+ * ⚠️ ADD NEW `fs_read` CALLS HERE, NOT AT A CALL SITE. The first iteration of
+ * this fix chunked only the ARAM pager and the burn came back "still there" —
+ * the game's own asset reads go through DVDRead -> dc_dvd_read_impl, and the
+ * keep-list loader has three more sites of its own. Every one of them is
+ * routed through this function now. */
+s32 dc_dvd_read_yielding(unsigned int fd, void* dst, unsigned int len,
+                         int seek_valid, unsigned int off);
 void pc_audio_mq_init(void);
 void pc_audio_mq_shutdown(void);
 void pc_audio_update_volumes(void);
