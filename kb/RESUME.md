@@ -1,6 +1,165 @@
 # RESUME — pick the session back up here
 
-## SESSION 8 (2026-08-08) — COSMETIC ONLY. THE RANKED LIST BELOW IS UNCHANGED
+## ⭐⭐⭐ SESSION 9 (2026-08-08) — THE MUSIC PLAYS, G3 LANDED, AND BOTH ARE
+## DEFAULTS NOW. START HERE; SESSIONS 7-8's QUEUE IS LARGELY SPENT.
+
+**`dev` @ `c177552` + the G3 commit. Human verdict: "performance is insanely
+good on g3 with audio. wow, major gains."** Burn image of this exact tree:
+`~/Downloads/AC-DC-20260808.cdi` (740,087,817 B, padded).
+
+### The four things that changed, and all four are ON by default
+
+1. 🔴→✅ **THE MUSIC PLAYS.** The port-queue drain landed
+   (`dc_audio_drain_port()`, `dc/src/dc_audio.c`, kill switch
+   `-DDC_AUDIO_NO_DRAIN`). Session 7's diagnosis was right about the mechanism
+   and **incomplete about the trigger**: the queue's only consumer was inside
+   synthesis, so it starved on a disarmed scene *and* on any armed tick that hit
+   the `have >= RING - HEADROOM` break with a full ring. Drains every pump now,
+   before the gate.
+2. ⭐ **`DC_ARAM_AUDIO_DROP=0` IS DERIVED FROM `DC_AUDIO=1`.** It was documented
+   in two places and wired in none; without it every sound build streams all
+   8,300,384 B of `audiorom.img` into ARAM and throws it away. This was a
+   standing trap that had already cost one session.
+3. ⭐⭐ **THE PEAK AUDIO COST IS VOICE COUNT — MEASURED, and it retires the
+   "bimodal" mystery.** See §0c below.
+4. ⭐⭐⭐ **G3 SHIPPED AND IT IS THE BIGGEST WIN THE PROJECT HAS BOOKED.**
+   `dc/src/dc_emu64_cull.cpp`, `DC_EMU64_CULL` **defaults to 1**.
+
+### The numbers, all audio-on, town, matched build lines
+
+| | session start | + audio levers | **+ G3 (now)** |
+|---|---:|---:|---:|
+| `fps_p50` (whole run) | 17.4 | 19.5 | **23.2** |
+| town `draw` | 65.4 | 69.8 | **49.9 ms** |
+| `[STUTTER]` events / 900 s | 192 | 70 | **65** |
+| `synth_us` (one DAC frame) | 2,732 | 1,202 | 1,202 |
+| `vcull` (the LATE cull) | 9,963 | 9,915 | **1,002** |
+
+⚠️ **The old silent build's town frame was 45.6 ms.** Sound now costs roughly
+what the whole renderer used to. `ASSET MISSING 0`, `aram LOST 0`,
+`deepest_scene 18`, `run_report --vs` clean on every step.
+
+### ⚠️ THE DEFAULTS MOVED. A PLAIN BUILD IS NO LONGER THE OLD BUILD.
+
+`dc/Makefile`: `DC_EMU64_CULL ?= 1`, and inside the `DC_AUDIO=1` block
+`DC_ARAM_AUDIO_DROP ?= 0`, `DC_AUDIO_MIXRATE ?= 24000`,
+`DC_AUDIO_SUBDELAY ?= 0`. Every one is `?=`, so naming it explicitly still
+wins, and each has a documented revert. **This was deliberate: a result that
+lives only in a command line is one unset environment variable away from being
+lost.** The burn line is now just:
+
+```bash
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1200000 \
+DC_AUDIO_SCENES=all DC_CDI_PAD=1 bash dc/build-dc.sh
+```
+
+## 0c. WHAT THE VOICE CENSUS SAID ONCE THE MUSIC WAS PLAYING
+
+Session 7 retracted two lever deaths because the census had measured silence.
+This is the same census with music, and it is decisive:
+
+```
+v>= 0 n=8741  mean=2332us      v>=32 n=1794 mean= 9355us
+v>= 8 n=16085 mean=3907us      v>=40 n=480  mean=11415us
+v>=16 n=7985  mean=5701us      v>=48 n=460  mean=13533us
+v>=24 n=6061  mean=7583us      v>=56 n=303  mean=17285us
+```
+
+⭐ **Monotonic: `cost ≈ 2,332 us + ~265 us per voice-update`** (bucket N = N/4
+concurrent voices). **The "bimodal ~2.5 ms / ~10 ms" this project chased from
+2026-08-06 is simply SFX-only versus music-playing**, and `filt@=0 comb@=0` on
+every `[STUTTER]` row rules the conditional FIR/comb stages out at the same
+time. Two levers applied, both now defaults:
+
+- **L2 `DC_AUDIO_MIXRATE=24000`** — internal mix rate, `samples/update` 200 →
+  96. Pitch is preserved (the error term is independent of this field).
+  ⚠️ Does **not** cut ADPCM decode, and it pushes more notes over the
+  `pitch >= 2.0` two-part threshold, which claws some back.
+- **L5 `DC_AUDIO_SUBDELAY=0`** — the hall reverb's *second* tap, ~16 KB of
+  memcpy and ~1,664 MACs per DAC frame, echo tail only. NEW knob.
+- **L1 `DC_AUDIO_VOICES` is priced and UNUSED** — the next audio lever if one
+  is wanted. Peak is 14-15 concurrent voices; a cap of 12 bounds the worst
+  frame linearly. ⚠️ **It is no longer a SAFETY requirement** — see S8e below.
+
+⚠️ **A LATENT `.bss` OVERRUN WAS FOUND AND FIXED BEFORE IT COULD FIRE.**
+jaudio's own bound is `max_audio_cmds = 24*20*4 + 30 + 400 = 2,350`
+(`memory.c:1029`), but the DC path writes into a fixed
+`pc_task_buf[2][1600]` (`neosthread.c:35`) and `Nas_smzAudioFrame` checks
+nothing — **6,000 B past the end at a full voice load.** Never seen because the
+music never started; turning the music on is exactly the change that walks a
+buffer into its bound. `make_src_shrink.py` **S8e** grows it to 2,432 when
+sound is on (+13,312 B of `.bss`).
+
+## 0d. G3 — WHAT IT IS, AND THE TWO THINGS THAT ALMOST MADE ITS GATE MEANINGLESS
+
+`dc/src/dc_emu64_cull.cpp` installs trampolines into emu64's dispatch table for
+slots **59 (`G_TRIN`) and 60 (`G_TRIN_INDEPEND`)**, walks the packed index
+stream, builds an AABB over the referenced vertices in emu64's own
+`vertices[]`, and consumes the command itself when the box is fully outside the
+frustum — so the 75 % of vertex references that `dc_gx.c` used to reject at
+flush time never reach `set_position` or our `GX*` setters at all.
+
+- **The frustum test is not a second test.** `dc_gx_batch_is_offscreen`'s clip
+  half is split out as **`dc_gx_aabb_is_offscreen()`** and both callers use it.
+  ⚠️ One implementation, **two different inputs** — they coincide only because
+  `emu64.c:4935`'s `GXEnd()` makes flush granularity exactly one TRIN.
+- **Gate: `-DDC_EMU64_CULL_VERIFY`** (now a real knob) never culls; it runs both
+  paths and counts any batch we would have dropped that the reference path
+  drew. **Ran: `falsecull=0 gfxp_bad=0 reinst=0` over 473 windows to the town.**
+- **Measured cull rate in the town: 61 % of TRIN batches, ~9,120 vertex
+  references skipped per frame** against `[PHASE] vcull ≈ 9,963` — it catches
+  what the late cull was catching, one command earlier. 19 % punt.
+- **Punts, and each one is load-bearing:** decal-Z batches (`set_position`
+  submits a projection round-trip, not `position`), `G_TEXTURE_GEN` batches (it
+  transforms `normal` in place with no idempotence flag, so skipping changes how
+  many times a shared normal is multiplied), and any batch whose referenced
+  vertices disagree on `MTX_NONSHARED`.
+
+⚠️ **TWO REVIEW FINDINGS THAT WOULD HAVE MADE THE GATE A LIE:**
+
+1. **G3's tripwire must run BEFORE `dc_emu64_hist_frame_open()`**, at both
+   `dc_vi.c` sites. G1/G2 rewrite **all 64 slots** per sampled frame; G3
+   re-installs its two. Wrong order and G3 evicts G1's thunks for **exactly the
+   two opcodes G3 exists to fix**, and `hist_enter()` bills their time to
+   whichever opcode ran before them. Fixed; `reinst=` is the tripwire.
+2. **`falsecull=0` was not a gate.** `dc_gx_flush_vertices` returns at
+   `dc_gx.c:684` on a frameskipped tick **before** the cull test, so
+   `pc_gx_culled_draws` cannot move and every correct cull there scored as a
+   false positive. Those are `nocmp=` now, and `-DDC_NO_BATCH_CULL` + VERIFY is
+   a hard `#error`. **`-DDC_NO_BATCH_CULL` also disables G3** — it means "no
+   frustum cull", not "no *late* frustum cull".
+
+**Still open on G3:** a screenshot pair (`DC_EMU64_CULL=0` vs `=1`) was NOT
+taken — the VERIFY gate is the stronger instrument and it passed, but
+measurement rule 2 is not formally satisfied. And on the visible path
+`dirty_check` + `setup_1tri_2tri_1quad` run **twice**; that comes off the
+headline and is not separately measured.
+
+## 0e. THE RANKED LIST FROM HERE (2026-08-08)
+
+1. **The G3 screenshot pair.** The one measurement rule this session did not
+   satisfy.
+2. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified,
+   **never run**. `-DDC_PVR_TEVP3`. Free falsification:
+   `[DC/PVR] tevp3 batches=0` on a run reaching the keyboard.
+3. **A hardware burn.** `~/Downloads/AC-DC-20260808.cdi` is built and unburned.
+   Flycast models no instruction cache and previously under-reproduced the audio
+   stutter ~10× — ⚠️ **that under-reproduction is now suspect**, because it was
+   measured when the music was silent and Flycast reported 192 events/900 s once
+   it played.
+4. **AICA offload (stage B), re-costed and now much better motivated.** The
+   per-voice term (~265 us/voice-update) is exactly what the 64 hardware ADPCM
+   channels do. ⚠️ It needs an offline VADPCM → AICA-ADPCM converter and a
+   residency manager for 8.3 MB of samples in ~1.8 MB of sound RAM. A cheaper
+   BGM-only variant was scoped this session and is in `kb/state-log.md`.
+5. **`DC_AUDIO_VOICES=12`** if more audio headroom is wanted — priced, unused.
+6. **N2b, the VMU save path.** Still the only way to get a villager into the
+   town, and therefore still the gate on testing R2/R3.
+
+## SESSION 8 (2026-08-08) — COSMETIC ONLY. THE RANKED LIST BELOW IS SUPERSEDED
+## BY §0e ABOVE.
 
 `762ebbd` added a "SPECIAL THANKS TO" block to the boot splash (ACreTeam,
 Cuyler36, Dia2809, flyngmt, Falco Girgis) and renamed the README's `Credits`

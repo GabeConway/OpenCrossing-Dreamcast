@@ -9,6 +9,33 @@ gotchas).
 
 ---
 
+## ✅ G3 IS BUILT, GATED AND SHIPPED — STOP TREATING IT AS A PROPOSAL (2026-08-08)
+
+`dc/src/dc_emu64_cull.cpp`, `DC_EMU64_CULL ?= 1`. Correctness gate
+`-DDC_EMU64_CULL_VERIFY` ran clean (`falsecull=0 gfxp_bad=0 reinst=0`, 473
+windows, to the town). Measured **−19.9 ms of a 69.8 ms town frame**, `fps_p50`
+19.5 → 23.2, and the late cull's `vcull` collapsed **9,915 → 1,002**. The
+5.4-19.2 ms G4 predicted came in at the top of its own range.
+
+**What this closes with it:** the "interpose on emu64's dispatch table" decision
+gate is spent. G1 measured, G2 is dead, G3 shipped. Do not re-litigate any of
+the three. The remaining unattributed work inside TRIN is emu64's index
+expansion on the ~39 % of batches that survive the cull.
+
+## ✅ THE "BIMODAL 2.5 / 10 ms" AUDIO MYSTERY IS CLOSED — IT WAS VOICE COUNT (2026-08-08)
+
+Four hypotheses died for this between 2026-08-06 and 2026-08-08 (disc-cache
+misses, multi-frame bursts, `snd_stream_poll`/G2/the scheduler quantum, and
+`-O3` on the jaudio tree). The answer, once the music actually played, is
+linear and boring: **`cost ≈ 2,332 us + ~265 us per voice-update`**, monotonic
+across all eight census buckets. The two modes are SFX-only and music-playing.
+
+**Also genuinely dead now, for the right reason this time:** the conditional FIR
+and comb stages. `filt@=0 comb@=0` on **every** `[STUTTER]` row of a run with
+BGM playing — which is the measurement session 7 correctly said it did not have.
+L4 is closed. ⚠️ **L1 (`DC_AUDIO_VOICES`) is NOT closed** — it is priced,
+correct, and simply unused.
+
 ## ⚠️ THE `-O0` DIRECTIVE IS REOPENED AND REVERSED (2026-08-06)
 
 **This entry is kept, struck through, because it is the largest thing this file

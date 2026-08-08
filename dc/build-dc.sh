@@ -244,6 +244,8 @@ ENVARGS=(
 # `ifneq ($(DC_EMU64_CULL),0)` and empty is not 0, so an unconditional -e would
 # arm the cull on every build that never asked for it.
 [ -n "${DC_EMU64_CULL+x}" ] && ENVARGS+=(-e DC_EMU64_CULL="$DC_EMU64_CULL")
+[ -n "${DC_EMU64_CULL_VERIFY+x}" ] && \
+    ENVARGS+=(-e DC_EMU64_CULL_VERIFY="$DC_EMU64_CULL_VERIFY")
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default
 # (e.g. DECOMP_OPT would become empty and KOS_CFLAGS' own -O2 would win).

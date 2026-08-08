@@ -22,11 +22,16 @@
  * times that. The estimate for doing the same rejection one command earlier is
  * **5.4 ms floor / 19.2 ms ceiling** of a 45-69 ms frame.
  *
- * The test is not a new test. It is the SAME frustum test dc_gx.c already
- * runs — dc_gx_aabb_is_offscreen(), split out of dc_gx_batch_is_offscreen()
- * for this file — handed a box built from emu64's own vertex array instead of
- * from our staged vertex buffer. Two frustum tests that must agree is how a
- * cull starts deleting visible geometry; there is one, and G3 feeds it.
+ * The test is not a new test. It is ONE IMPLEMENTATION, TWO INPUTS:
+ * dc_gx_aabb_is_offscreen(), split out of dc_gx_batch_is_offscreen() for this
+ * file, handed a box built from emu64's own vertex array instead of from our
+ * staged vertex buffer. Two frustum tests that must agree is how a cull starts
+ * deleting visible geometry; there is one implementation, and G3 feeds it.
+ *
+ * ⚠️ The two inputs coincide only because emu64.c:4935's GXEnd() — inside
+ * `#ifdef TARGET_PC` — makes flush granularity exactly one TRIN. If that ever
+ * stops being true, dc_gx.c's box spans batches ours does not, and BOTH the
+ * claim above and the VERIFY signal below break with no tripwire to say so.
  *
  * =============================================================================
  * THE SHAPE: A TRAMPOLINE, NOT AN EDIT
@@ -79,6 +84,28 @@
 
 #if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
 
+/* ⚠️ THE GATE CANNOT GATE WITHOUT THE THING IT COMPARES AGAINST. VERIFY's
+ * whole verdict is "dc_gx.c's late cull agreed with us", read off
+ * pc_gx_culled_draws — and -DDC_NO_BATCH_CULL makes that counter a constant 0,
+ * at which point every correct cull scores as a falsecull and the gate reads
+ * as a catastrophe. Refuse to build the combination rather than hand anyone
+ * that log. */
+#if defined(DC_EMU64_CULL_VERIFY) && defined(DC_NO_BATCH_CULL)
+#error "DC_EMU64_CULL_VERIFY compares against dc_gx.c's late cull, which DC_NO_BATCH_CULL disables; the gate would report falsecull on every correct cull. Drop one of the two."
+#endif
+
+/* ⚠️ THIS TU DOES NOT SEE emu64.c's CONFIGURATION. `polygons++` is
+ * unconditional on the 5-bit path but `#ifdef EMU64_FIXES` on the 7-bit one
+ * (emu64.c:4886, :4899, :4917), and the walk below mirrors that with its own
+ * #ifdef. The two agree today only because EMU64_FIXES is defined NOWHERE in
+ * the tree. The day it arrives as anything other than a global -D reaching
+ * both TUs, poly_add drifts by one per 7-bit face on every culled batch. Fail
+ * the build instead: if it is ever defined here, someone has to come and check
+ * that emu64.c sees it too. */
+#ifdef EMU64_FIXES
+#error "EMU64_FIXES is now visible to dc_emu64_cull.cpp. Confirm emu64.c sees the same definition, then delete this guard -- the 7-bit polygons++ replication depends on the two TUs agreeing."
+#endif
+
 /* emu64's members are all private (emu64.hpp:722). Access control has no
  * effect on layout, and this file is in dc/, not src/ — we are not editing the
  * class, we are reading the layout it already has. Same three defines, and the
@@ -110,6 +137,17 @@ int dc_gx_aabb_is_offscreen(const float *mn, const float *mx);
  * rejection site (dc_gx.c:705) and reset per frame at :923, which is what a
  * per-batch delta needs. */
 extern int pc_gx_culled_draws;
+
+/* dc_gx.c:72-76. The late cull's kill switch, as a link-time constant. G3 is a
+ * SECOND frustum cull, and -DDC_NO_BATCH_CULL used to mean "no culling at all";
+ * without this it would mean "no LATE culling", which is not the switch anyone
+ * reaching for it wants. */
+extern const int dc_gx_batch_cull;
+
+/* dc_gx.c returns early from dc_gx_flush_vertices on a frameskipped tick
+ * (dc_gx.c:684) — BEFORE the cull test — so pc_gx_culled_draws cannot move
+ * there and the VERIFY comparison below has to know. */
+extern int g_pc_frameskip_active;
 
 void dc_emu64_cull_init(void);
 void dc_emu64_cull_frame_open(unsigned int tick);
@@ -150,12 +188,21 @@ extern "C" void _ZN5emu6418dl_G_TRIN_INDEPENDEv(void *self);
 
 static CuPmf s_orig[64];
 static int   s_ready  = 0;
-static int   s_active = 1;
+/* ⚠️ STARTS DISARMED. With DC_EMU64_CULL=N>1 the sampling period is decided in
+ * dc_emu64_cull_frame_open(); initialising this to 1 would cull every batch
+ * dispatched before the first frame open regardless of the period, which is a
+ * silently wrong A/B. frame_open runs on every tick, so the cost of starting
+ * disarmed is at most one tick. */
+static int   s_active = 0;
 
-/* Counters. Printed as one [EMU64C] line, cleared per report window. */
-static unsigned int s_trin, s_cull, s_vis, s_punt, s_refs, s_reinst;
+/* Counters. `s_trin..s_refs` are PER REPORT WINDOW and cleared by
+ * dc_emu64_cull_report(); the three below the line are CUMULATIVE for the run,
+ * deliberately — each of them is a "must be zero" and a per-window view of a
+ * fault that fired once would hide it. The report labels them. */
+static unsigned int s_trin, s_cull, s_vis, s_punt, s_refs;
+static unsigned int s_reinst;
 #ifdef DC_EMU64_CULL_VERIFY
-static unsigned int s_falsecull, s_gfxp_bad;
+static unsigned int s_falsecull, s_gfxp_bad, s_skipped;
 #endif
 
 /* ==========================================================================
@@ -387,6 +434,16 @@ static void cu_verify(emu64 *self, void (*orig)(void *))
     unsigned int poly_before = self->polygons;
     int would_cull;
     Gfx *our_gfxp;
+    /* ⚠️ SAMPLED BEFORE the trial. dl_G_TRIN runs on frameskipped ticks like
+     * any other, but dc_gx_flush_vertices returns at dc_gx.c:684 BEFORE the
+     * cull test on those ticks — so pc_gx_culled_draws CANNOT move and every
+     * correct cull would be recorded as a falsecull. Counting those separately
+     * is the difference between a gate and a number that is always nonzero. */
+    int comparable = !g_pc_frameskip_active;
+
+    /* Honour the sampling period even here: DC_EMU64_CULL=N>1 in a VERIFY
+     * build must exercise the same batches an armed build would. */
+    if (!s_active) { orig(self); return; }
 
     would_cull = cull_batch(self);
     our_gfxp = self->gfx_p;
@@ -399,24 +456,34 @@ static void cu_verify(emu64 *self, void (*orig)(void *))
 
     if (would_cull) {
         if (self->gfx_p != our_gfxp) s_gfxp_bad++;
-        /* The reference cull is a whole-batch decision taken at flush time,
-         * which dl_G_TRIN reaches through its own GXEnd (emu64.c:4935) before
-         * returning. No delta therefore means it DREW what we would have
-         * dropped, which is the only failure that matters. */
-        if (pc_gx_culled_draws == culled_before) s_falsecull++;
+        if (!comparable) {
+            s_skipped++;
+        } else if (pc_gx_culled_draws == culled_before) {
+            /* The reference cull is a whole-batch decision taken at flush
+             * time, which dl_G_TRIN reaches through its own GXEnd
+             * (emu64.c:4935) before returning. No delta therefore means it
+             * DREW what we would have dropped, which is the only failure that
+             * matters. */
+            s_falsecull++;
+        }
     }
 }
 static void cu_trin(void *p)       { cu_verify((emu64 *)p, s_orig[CU_TRIN].fn); }
 static void cu_trin_indep(void *p) { cu_verify((emu64 *)p, s_orig[CU_TRIN_INDEP].fn); }
 #else
+/* ⚠️ `dc_gx_batch_cull` IS IN THE CONDITION ON PURPOSE. -DDC_NO_BATCH_CULL has
+ * always meant "turn the frustum cull off"; G3 is a second frustum cull, and
+ * without this test that switch would quietly become "turn off only the LATE
+ * half" — leaving the entry half culling with nothing to cross-check it. It is
+ * a link-time const, so this folds away in every normal build. */
 static void cu_trin(void *p) {
     emu64 *self = (emu64 *)p;
-    if (s_active && cull_batch(self)) return;
+    if (s_active && dc_gx_batch_cull && cull_batch(self)) return;
     s_orig[CU_TRIN].fn(p);
 }
 static void cu_trin_indep(void *p) {
     emu64 *self = (emu64 *)p;
-    if (s_active && cull_batch(self)) return;
+    if (s_active && dc_gx_batch_cull && cull_batch(self)) return;
     s_orig[CU_TRIN_INDEP].fn(p);
 }
 #endif
@@ -483,14 +550,17 @@ void dc_emu64_cull_frame_open(unsigned int tick)
 void dc_emu64_cull_report(void)
 {
     if (!s_ready) return;
-    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u reinst=%u"
+    /* The first five are this window; everything after `|` is CUMULATIVE for
+     * the run and must read zero. `nocmp=` is not a fault — it is the number
+     * of culls taken on a frameskipped tick, where dc_gx.c cannot answer. */
+    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u | cum reinst=%u"
 #ifdef DC_EMU64_CULL_VERIFY
-            " falsecull=%u gfxp_bad=%u"
+            " falsecull=%u gfxp_bad=%u nocmp=%u"
 #endif
             "\n",
             s_trin, s_cull, s_vis, s_punt, s_refs, s_reinst
 #ifdef DC_EMU64_CULL_VERIFY
-            , s_falsecull, s_gfxp_bad
+            , s_falsecull, s_gfxp_bad, s_skipped
 #endif
            );
     s_trin = s_cull = s_vis = s_punt = s_refs = 0;

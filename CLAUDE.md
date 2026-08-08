@@ -63,10 +63,14 @@ work on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | 4 | `PLAN.md` | the port plan: milestones, the four hard problems, risks |
 | — | `kb/state-log.md` | only when you need the evidence behind a number in `STATE.md` |
 
-**The port walks the town.** It boots on retail hardware with **loading at
-parity with the emulator**, and in Flycast it reaches the town, walks around it,
-meets Tom Nook and is taken to the houses. Every summer acre is in the image —
-plus, since 2026-08-06, the interiors, the winter set and the gyroids.
+**The port walks the town, with music.** It boots on retail hardware with
+**loading at parity with the emulator**, and in Flycast it reaches the town,
+walks around it, meets Tom Nook and is taken to the houses. Every summer acre is
+in the image — plus, since 2026-08-06, the interiors, the winter set and the
+gyroids. ⭐ **Since 2026-08-08 the BGM plays** (the audio command queue is
+drained every tick, not only when synthesis runs) **and G3 culls at
+`G_TRIN_INDEPEND` entry**: town frame **49.9 ms with sound on**, against 45.6 ms
+for the old silent build. Both are ON by default — `kb/RESUME.md` §0c-§0e.
 Read `kb/RESUME.md` first — in particular the **nine** measurement rules.
 Four were paid for recently: `MEMLEDGER FIT … OK` does not mean the image
 boots; an average cost per command is not the cost of any command; **in a
@@ -124,6 +128,7 @@ already produced two wrong numbers.
 | `kb/boot-blockers.md` | **what the running game hits next**, ranked by reach rather than by bytes. The counterweight to `kb/levers.md` |
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
 | `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved) and roof clip-through — **now reproducible for the first time**, since `DC_AUTOWALK` can walk a character under it |
+| `dc/src/dc_emu64_cull.cpp` | **G3, SHIPPED 2026-08-08 and ON by default** (`DC_EMU64_CULL ?= 1`) — the AABB cull at `G_TRIN_INDEPEND` entry. **−19.9 ms of a 69.8 ms town frame**, `fps_p50` 19.5 → 23.2, late-cull `vcull` 9,915 → 1,002. Gate `-DDC_EMU64_CULL_VERIFY` passed `falsecull=0 gfxp_bad=0 reinst=0`. ⚠️ It installs into the same dispatch table as G1/G2 — read the ordering trap in `kb/traps.md` before touching any of the three |
 | `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram (`DC_EMU64_HIST=<N>`). Thunks swapped into emu64's dispatch table at runtime; `src/` untouched. **Run 2026-08-05 and again 2026-08-06**, and it is the only thing allowed to price an opcode. ⚠️ **Its output is per LOGIC TICK — double it** (measurement rule 9) |
 | `harness/dc/bench/` | `bench_mem.c` plus the build path it never had. It passes — and Flycast cannot answer it (`kb/closed.md`) |
 | `PLAN.md` | milestones, the four hard problems, risk register, open questions |

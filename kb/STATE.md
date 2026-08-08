@@ -1,7 +1,93 @@
 # Session state — resume here
 
+## ⭐⭐⭐ 2026-08-08 (session 9) — THE MUSIC PLAYS, G3 SHIPPED, AND THE GOOD
+## CONFIG IS THE DEFAULT CONFIG
+
+**Read `kb/RESUME.md` §0c-§0e first — this file is the numbers and the queue.**
+Human verdict: *"performance is insanely good on g3 with audio. wow, major
+gains."* Burn image: `~/Downloads/AC-DC-20260808.cdi` (740,087,817 B, padded).
+
+### Current numbers — ⚠️ ALL WITH AUDIO ON, which no previous line in this file was
+
+| | |
+|---|---|
+| the town (scene 9) | `draw` **49.9 ms**, `fps_p50` **23.2** whole-run |
+| `[STUTTER]` / 900 s | **65** (was 192) |
+| one jaudio DAC frame | **1,202 us** (was 2,732) |
+| `vcull` (the LATE cull) | **1,002** (was 9,963) — G3 got there first |
+| `cull` / `xform` | 1.3 / 11.2 ms |
+| `ASSET MISSING` / `aram LOST` / `deepest_scene` | 0 / 0 / 18 |
+
+The progression, all audio-on, matched build lines:
+
+| | start of session | + audio levers | **+ G3** |
+|---|---:|---:|---:|
+| `fps_p50` | 17.4 | 19.5 | **23.2** |
+| town `draw` | 65.4 | 69.8 | **49.9** |
+| `[STUTTER]` | 192 | 70 | **65** |
+
+⚠️ **The old SILENT build's town frame was 45.6 ms.** Sound now costs about
+what the entire renderer used to.
+
+### What changed, and all of it is ON by default
+
+1. **The port-queue drain** (`dc_audio_drain_port()`) — the music plays.
+   Session 7's mechanism was right; its trigger was incomplete. The queue's only
+   consumer lived inside synthesis, so it starved on a disarmed scene **and** on
+   any armed tick that broke out with a full ring. Kill `-DDC_AUDIO_NO_DRAIN`.
+2. **`DC_ARAM_AUDIO_DROP=0` derived from `DC_AUDIO=1`** — documented twice,
+   wired nowhere, and without it 8,300,384 B of `audiorom.img` streams in and is
+   discarded.
+3. **L2 `DC_AUDIO_MIXRATE=24000` + L5 `DC_AUDIO_SUBDELAY=0`** — defaults now.
+4. **G3** (`dc/src/dc_emu64_cull.cpp`), `DC_EMU64_CULL ?= 1`. Gate passed:
+   `falsecull=0 gfxp_bad=0 reinst=0` over 473 windows. 61 % of TRIN batches
+   culled in the town, ~9,120 vertex references skipped per frame.
+5. **S8e** — `NEOSTHREAD_ACMD_BUF_NUM` 1600 → 2432 with sound on, closing a
+   6,000 B `.bss` overrun that only a music-playing build could ever reach.
+
+### ⭐ THE FINDING WORTH KEEPING: peak audio cost is VOICE COUNT
+
+```
+v>= 0 mean=2332us   v>=24 mean= 7583us   v>=48 mean=13533us
+v>= 8 mean=3907us   v>=32 mean= 9355us   v>=56 mean=17285us
+v>=16 mean=5701us   v>=40 mean=11415us
+```
+
+`cost ≈ 2,332 us + ~265 us per voice-update`, monotonic. **The "bimodal
+2.5/10 ms" chased since 2026-08-06 is SFX-only versus music-playing**, and
+`filt@=0 comb@=0` on every stutter row retires the FIR/comb suspicion in the
+same run. Session 7 was right to retract the census that "refuted" voice count —
+it had measured silence. **L1 (`DC_AUDIO_VOICES`) is priced and unused**; peak
+is 14-15 concurrent voices and a cap of 12 bounds the worst frame linearly.
+
+### Ranked next actions (2026-08-08) — supersedes every list below
+
+**`kb/RESUME.md` §0e carries the same list and the two must agree.**
+
+1. **The G3 screenshot pair** (`DC_EMU64_CULL=0` vs `=1`). The VERIFY gate is a
+   stronger instrument and it passed, but measurement rule 2 is not formally
+   satisfied and this session did not take it.
+2. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified, still
+   never run. `-DDC_PVR_TEVP3`; `tevp3 batches=0` falsifies it for free.
+3. **A hardware burn** of `AC-DC-20260808.cdi`. ⚠️ **Flycast's documented ~10×
+   under-reproduction of the audio stutter is now SUSPECT** — it was measured
+   with the music silent, and Flycast reported 192 events/900 s once it played.
+4. **AICA offload (stage B)** — better motivated than ever: the ~265 us/voice
+   term is exactly what the 64 hardware channels do. Still needs the offline
+   VADPCM → AICA-ADPCM converter and a residency manager for 8.3 MB in ~1.8 MB.
+   A cheaper BGM-only variant is scoped in `kb/state-log.md`.
+5. **`DC_AUDIO_VOICES=12`** if more audio headroom is wanted.
+6. **N2b — the VMU save path.** Unchanged, and still the gate on R2/R3.
+
+---
+
+# Everything below is sessions 6-7 and earlier, kept for the reasoning behind
+# items now closed. The ranked list above supersedes every list in it.
+
 ## ⭐⭐⭐ 2026-08-06 (session 7) — THE MUSIC NEVER PLAYS, AND IT IS THE AUDIO
 ## COMMAND QUEUE, NOT THE SYNTHESISER
+## ⚠️ [RESOLVED 2026-08-08 — the fix landed. The trigger was broader than this
+## entry says: a full ring starves the queue on an ARMED tick too.]
 
 **Human, on a running build: "the music isn't working though, only the talking
 sound."** Root cause identified with evidence already in the logs:

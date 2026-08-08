@@ -867,6 +867,15 @@ DEFINES += -DDC_AUDIO=1
 # still wins, and so a silent build is completely unaffected: with DC_AUDIO=0
 # nothing here fires and dc_aram.c keeps its own `#define … 1` default.
 DC_ARAM_AUDIO_DROP ?= 0
+# ⭐ AND THE TWO PEAK-COST LEVERS, DEFAULTED ON WITH SOUND, 2026-08-08. Same
+# argument as DC_EMU64_CULL: measured, and therefore the default. Together they
+# took [STUTTER] 192 -> 70 and synth_us 2,732 -> 1,202 on matched 900 s town
+# runs, and the human verdict on the build was "sounds pretty ok … not
+# stuttering as bad" against "stutters like hell" before. Both are `?=`, so
+# naming either explicitly still wins, and DC_AUDIO=0 never reaches this block.
+# The full justification for each value is at the write site in dc/src/dc_audio.c.
+DC_AUDIO_MIXRATE  ?= 24000
+DC_AUDIO_SUBDELAY ?= 0
 endif
 
 # -----------------------------------------------------------------------------
@@ -1501,10 +1510,29 @@ endif
 # by construction.
 #
 # Same objcopy as G1/G2, same EMU64_TBL_GLOBAL, applied at most once below.
-DC_EMU64_CULL ?= 0
+#
+# ⭐ DEFAULT 1 SINCE 2026-08-08, AND THAT IS THE POINT. Measured, matched build
+# line, audio on, town: draw 69.8 -> 49.9 ms (-19.9, the top of the predicted
+# range), fps_p50 19.5 -> 23.2, and the late cull's vcull collapsed 9,915 -> 1,002
+# because there is nothing left for it to reject. Gate run first:
+# falsecull=0 gfxp_bad=0 reinst=0 over 473 windows through to the town.
+# A breakthrough that only exists in someone's command line is one unset
+# environment variable away from being lost, so the good build is the DEFAULT
+# build and DC_EMU64_CULL=0 is the bisection revert.
+DC_EMU64_CULL ?= 1
 ifneq ($(DC_EMU64_CULL),0)
 DEFINES += -DDC_EMU64_CULL=$(DC_EMU64_CULL)
 EMU64_TBL_GLOBAL := 1
+endif
+
+# The correctness gate, as a knob rather than a DC_XDEFS incantation — it is
+# the thing that has to be RUN before the cull is believed, so it should be as
+# easy to spell as the cull itself. Meaningless without DC_EMU64_CULL, and
+# dc_emu64_cull.cpp compiles to nothing in that case, so no guard is needed
+# here beyond the #error it carries against -DDC_NO_BATCH_CULL.
+DC_EMU64_CULL_VERIFY ?= 0
+ifneq ($(DC_EMU64_CULL_VERIFY),0)
+DEFINES += -DDC_EMU64_CULL_VERIFY=$(DC_EMU64_CULL_VERIFY)
 endif
 
 # Promote dl_func_tbl from local to global so dc/ can name it. Shared by G1 and

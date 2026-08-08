@@ -1,5 +1,53 @@
 # Traps already paid for — do not re-discover these
 
+## ⚠️ A gate that cannot tell "the reference disagreed" from "the reference could not answer" is not a gate (2026-08-08)
+
+G3's correctness gate (`-DDC_EMU64_CULL_VERIFY`) never culls: it runs the entry
+test AND the original handler, then asks whether `dc_gx.c`'s own late cull
+agreed, by watching `pc_gx_culled_draws` move. Two reachable conditions make
+that counter unable to move at all — `-DDC_NO_BATCH_CULL` compiles it to a
+constant 0, and on a **frameskipped tick** `dc_gx_flush_vertices` returns at
+`dc_gx.c:684` *before* the cull test. In either case every **correct** cull
+scores as a `falsecull`, and the gate reads as a catastrophe that is not
+happening.
+
+Fixed by counting the unanswerable cases separately (`nocmp=`) and making the
+`-DDC_NO_BATCH_CULL` combination a hard `#error`. **Generalise: when you build
+a pass/fail instrument, enumerate the states in which the ORACLE is silent, and
+make silence a third outcome rather than a failure.** This is the same family
+as the trap below — there, the subsystem was idle; here, the referee was.
+
+## ⚠️ Two dispatch-table installers, and the one that re-installs must go FIRST (2026-08-08)
+
+G1 (`dc_emu64_hist.c:262`) and G2 (`dc_emu64_shadow.cpp:492`) `memcpy` **all 64**
+emu64 dispatch slots on frame open and restore all 64 on close. G3
+(`dc_emu64_cull.cpp`) installs **two** slots once at init and re-checks them per
+frame. Run G3's frame-open *after* G1's and it overwrites G1's thunks for
+exactly slots 59/60 — `G_TRIN` and `G_TRIN_INDEPEND`, the two opcodes G3 exists
+to fix — so G1 reports `calls=0` for them AND silently bills their time to
+whichever opcode ran before them, because `hist_enter()` charges elapsed time to
+`s_prev` (`:125-131`). Order is: **G3's frame-open first at both `dc_vi.c`
+sites, and `dc_emu64_cull_init()` before both inits in `dc_main.c`**, so their
+snapshot contains G3's trampolines. `reinst=` on the `[EMU64C]` line is the
+tripwire; it must read 0.
+
+## ⚠️ `DC_AUDIO=1` needs three other flags, and none of them used to be wired (2026-08-08)
+
+`DC_ARAM_AUDIO_DROP=0` was documented in `dc/Makefile` and `BUILDING-DC.md` as
+a manual `DC_XDEFS` recipe and derived nowhere — so a sound build streamed all
+8,300,384 B of `audiorom.img` into ARAM, dropped every byte at
+`dc_aram.c:313-320`, and mixed silence. It is derived from `DC_AUDIO=1` now,
+along with the two peak-cost levers. **Rule: if a flag is mandatory for another
+flag to work, DERIVE it in the Makefile with `?=`; a warning comment in two
+files is not wiring.**
+
+## ⚠️ `pgrep -f Flycast` matches your own wait loop (2026-08-08)
+
+`until ! pgrep -f Flycast; do sleep 10; done` never exits — the shell running it
+has "Flycast" in its own command line, so it finds itself and waits forever.
+Match the binary path instead: `pgrep -f "MacOS/Flycast"`. Cost one stalled
+background job.
+
 ## ⚠️ An instrument pointed at a subsystem that is not running measures the subsystem not running (2026-08-06)
 
 The `[DC/VOICE]` census reported the town at 0-4 concurrent voices and

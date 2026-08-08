@@ -448,6 +448,23 @@ void VIWaitForRetrace(void) {
          * so the drawing ticks are sampled like any other. Arming during a
          * logic-only tick is harmless: no commands dispatch, so the thunks
          * simply do not fire and the window lands in `gap`. */
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+        /* ⚠️ G3 GOES FIRST, AND THE ORDER IS LOAD-BEARING. Its tripwire
+         * re-installs slots 59/60 if it does not find its own trampolines
+         * there — and G1/G2 below install THEIR thunks into all 64 slots. Run
+         * G3 last and it would evict G1's TRIN and TRIN_INDEPEND thunks on
+         * every sampled frame, so G1 would report calls=0 for exactly the two
+         * opcodes G3 exists to fix AND silently charge their time to whichever
+         * opcode ran before them (hist_enter() bills elapsed time to s_prev,
+         * dc_emu64_hist.c:125-131). G1's snapshot already contains G3's
+         * trampolines — taken at init, dc_main.c orders that too — so going
+         * first here means the tripwire finds what it expects and `reinst=`
+         * keeps its documented meaning. */
+        {
+            static unsigned int cull_tick_skip = 0;
+            dc_emu64_cull_frame_open(cull_tick_skip++);
+        }
+#endif
 #if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
         {
             static unsigned int hist_tick_skip = 0;
@@ -458,17 +475,6 @@ void VIWaitForRetrace(void) {
         {
             static unsigned int shadow_tick_skip = 0;
             dc_emu64_shadow_frame_open(shadow_tick_skip++);
-        }
-#endif
-#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
-        /* G3. NOT a table swap — it flips a boolean and re-checks the two slots
-         * it owns. Cheap enough to run on the frameskipped tick too, and it has
-         * to: that tick issues no display-list commands but the NEXT one does,
-         * and the A/B period must count the same ticks G1's does or the two
-         * instruments disagree about which frame was armed. */
-        {
-            static unsigned int cull_tick_skip = 0;
-            dc_emu64_cull_frame_open(cull_tick_skip++);
         }
 #endif
         return;
@@ -773,6 +779,16 @@ void VIWaitForRetrace(void) {
     }
 #endif
 
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+    /* ⚠️ G3 FIRST, same reason as the frameskip site above: its tripwire
+     * re-installs slots 59/60, and G1/G2 below overwrite all 64. Reverse the
+     * order and G3 evicts G1's thunks for exactly the two opcodes under study. */
+    {
+        static unsigned int cull_tick = 0;
+        dc_emu64_cull_frame_open(cull_tick++);
+    }
+#endif
+
 #if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
     /* Arm LAST, so the 512-byte table swap and everything above it are outside
      * the measured window. Counts PRESENTED frames locally for the reason in
@@ -795,16 +811,6 @@ void VIWaitForRetrace(void) {
     {
         static unsigned int shadow_tick = 0;
         dc_emu64_shadow_frame_open(shadow_tick++);
-    }
-#endif
-
-#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
-    /* G3, same placement and the same local tick counter as G1/G2 above. It
-     * costs two compares, not a 512-byte table swap, so its position in this
-     * block is about matching THEIR window rather than about its own cost. */
-    {
-        static unsigned int cull_tick = 0;
-        dc_emu64_cull_frame_open(cull_tick++);
     }
 #endif
 

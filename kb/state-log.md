@@ -1,5 +1,174 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-08 (session 9) — THE MUSIC PLAYS, THE STUTTER IS VOICE COUNT,
+## AND G3 TOOK 19.9 ms OUT OF THE TOWN FRAME
+
+Five runs, all 900 s (one ended early — the human closed the window), town keep
+list, `DC_AUTOWALK`, probe-free, `-DDC_PERF_PHASE`.
+
+### Run 1 — the free confirmation, and it reframed the audio problem
+
+`DC_AUDIO_SCENES=all`, unmodified tree plus the `DC_ARAM_AUDIO_DROP`
+derivation. Session 7 predicted BGM would appear with `all` and it did:
+**`SendStart::Mesg Full Queue` = 0**, `[NEOS_OUT] peak=6629`,
+`[DC/ARAM] audio=8300384 LOST=0 zero=0`.
+
+⭐ **And with the music finally playing, `DC_AUDIO_VOICELOG` answered the
+question three earlier runs could not.** Whole-run distribution, bucketed by
+voice-updates summed over the frame's four updates (bucket N = N/4 concurrent):
+
+```
+[DC/VOICE] v>= 0 n=8741  mean=2332us max= 8284us
+[DC/VOICE] v>= 8 n=16085 mean=3907us max= 8194us
+[DC/VOICE] v>=16 n=7985  mean=5701us max=10380us
+[DC/VOICE] v>=24 n=6061  mean=7583us max=12327us
+[DC/VOICE] v>=32 n=1794  mean=9355us max=15131us
+[DC/VOICE] v>=40 n=480  mean=11415us max=17022us
+[DC/VOICE] v>=48 n=460  mean=13533us max=18388us
+[DC/VOICE] v>=56 n=303  mean=17285us max=22214us
+```
+
+**Monotonic. `cost ≈ 2,332 us fixed + ~265 us per voice-update`.** Every
+`[STUTTER]` row reads `filt@=0 comb@=0`, so the conditional FIR and comb stages
+are refuted in the same run. **The "bimodal ~2.5 ms / ~10 ms" the project has
+chased since 2026-08-06 is nothing more exotic than SFX-only versus
+music-playing** — a stutter row shows `snd=43.4ms sndf=4 smax=10.8ms vmax=40`,
+and bucket `v>=40` has mean 11,415 us. It reconciles exactly.
+
+This is measurement rule 1's cousin, paid for twice now: **session 7 was right
+to retract the census that "refuted" voice count. It had measured silence.**
+Cost: `fps_p50` **17.4** against 29.8 silent, town `draw` **65.4 ms**, **192**
+`[STUTTER]` events. ⚠️ **Flycast's documented ~10× under-reproduction of the
+hardware stutter is now suspect** — 192/900 s here against 192/420 s on console
+is the same order, and the emulator figure that founded the claim was taken
+while the music was silent.
+
+### Run 2 — the two levers, and a human ear
+
+`-DDC_AUDIO_MIXRATE=24000 -DDC_AUDIO_SUBDELAY=0`, plus the port-queue drain and
+S8e. Against run 1, matched build line:
+
+| | run 1 | run 2 |
+|---|---:|---:|
+| `[STUTTER]` events | 192 | **70** |
+| `fps_p50` | 17.4 | **19.5** |
+| `synth_us` | 2,732 | **1,202** |
+| audio's phase (`vi`) | 13.0 ms | **6.8 ms** |
+| worst DAC frame (`v>=56`) | 17,285 us | **11,440 us** |
+
+`Full Queue 0`, `[DC/AUDIO] drain msgs=600` per 600 pumps — i.e. our drain now
+consumes every port window and `CreateAudioTask` finds nothing, which is the
+intended shape. Every voice bucket fell ~34 %; the fixed term fell 27 %.
+
+**Human, on the running build: "audiolev sounds pretty ok, its a little choppy
+when the fps dips but it is not stuttering as bad."** That sentence is what
+moved the remaining problem from audio to frame rate.
+
+### Run 3 — G3's correctness gate, and it is exact
+
+`DC_EMU64_CULL=1 -DDC_EMU64_CULL_VERIFY`, audio off (a correctness run, and
+VERIFY is slower than an uninstrumented build by construction — it runs our
+entry test AND the original handler on every batch).
+
+```
+[EMU64C] armed, mode=1 VERIFY (never culls; gate on falsecull=0)
+[EMU64C] trin=16200 cull=9848 vis=3052 punt=3300 refs=273600 reinst=0 falsecull=0 gfxp_bad=0
+```
+
+**473 report windows, every one `falsecull=0 gfxp_bad=0 reinst=0`, through to
+scene 9.** Not one batch we would have dropped was drawn by the reference path,
+and not once did our index walk disagree with `dl_G_TRIN` about where `gfx_p`
+lands. Town rate: **61 % of TRIN batches culled, ~9,120 vertex references
+skipped per presented frame** — against `[PHASE] vcull ≈ 9,963`, which is the
+instrument validating itself: two different pieces of code in two different
+files counting the same geometry.
+
+### Run 4 — G3 armed. −19.9 ms, the top of the predicted range
+
+`DC_EMU64_CULL=1` plus the audio levers. Against run 2:
+
+```
+[PHASE] draw=49.9 skip=3.8 vi=8.2 | cull=1.3 xform=11.1 | v=3501 vcull=1002 us/v=3.18
+[EMU64C] trin=16020 cull=9344 vis=3556 punt=3120 refs=260400 | cum reinst=0
+```
+
+| | run 2 | run 4 |
+|---|---:|---:|
+| town `draw` | 69.8 ms | **49.9 ms** |
+| `fps_p50` | 19.5 | **23.2** |
+| `vcull` | 9,915 | **1,002** |
+| `cull` phase | 3.9 ms | 1.3 ms |
+| `[STUTTER]` | 70 | **65** |
+
+`run_report --vs`: **VERDICT no regression detected.** ⭐ **`vcull` collapsing
+9,915 → 1,002 is the mechanism showing its work** — the late cull has almost
+nothing left to reject, because G3 rejected it before `set_position` and the
+`GX*` setters ever saw it. The 5.4-19.2 ms G4 predicted came in at **19.9**.
+
+⚠️ **The screenshot pair was NOT taken.** The VERIFY gate is a stronger and
+exact instrument and it passed, but measurement rule 2 is not formally
+satisfied and the next session should close it.
+
+### The adversarial review, and the two findings that mattered
+
+The walk, the `gfx_p` accounting, the punt predicates and the box all came back
+clean against `dl_G_TRIN` — including `n_faces == 1` and a partially-consumed
+last word. **The damage was to the instruments meant to police them:**
+
+1. **G3's tripwire ran AFTER `dc_emu64_hist_frame_open()`.** G1 and G2 rewrite
+   **all 64** dispatch slots per sampled frame; G3 re-installs its two. In that
+   order G3 evicts G1's thunks for **exactly the two opcodes G3 exists to fix**,
+   and `hist_enter()` charges their time to whichever opcode preceded them — so
+   a combined run would have reported `calls=0` for TRIN and quietly inflated
+   its neighbour. G3's frame-open now runs first at both `dc_vi.c` sites.
+2. **`falsecull=0` was not a gate.** `dc_gx_flush_vertices` returns at
+   `dc_gx.c:684` on a frameskipped tick **before** the cull test, so
+   `pc_gx_culled_draws` cannot move there and every correct cull would score as
+   a false positive. Counted separately as `nocmp=` now, and
+   `-DDC_NO_BATCH_CULL` + VERIFY is a hard `#error`.
+
+Generalised, and it belongs with rule 9: **a gate that cannot distinguish "the
+reference disagreed" from "the reference could not answer" is not a gate.**
+
+### The latent overrun that only a music-playing build could reach
+
+`max_audio_cmds = num_channels*20*updates_per_frame + _09*30 + 400` = **2,350**
+at 24 voices (`memory.c:1029`). On N64 that sizes `AG.abi_cmd_bufs[]`
+(`:1061`). **The DC path does not use those buffers** — `Neos_Update` calls
+`CreateAudioTask(pc_task_buf[cur], …)` (`neosthread.c:35`) into a fixed
+`Acmd pc_task_buf[2][1600]` (`:26`) — and `max_audio_cmds` appears nowhere else
+in the tree, so `Nas_smzAudioFrame` writes with no bound at all: **750 Acmds =
+6,000 B past the end** at a full voice load. Never observed because the command
+count scales with active voices and the music had never started. `S8e` in
+`make_src_shrink.py` grows it to 2,432 (+13,312 B of `.bss`) **before** the
+first music-playing run rather than after a corruption hunt.
+
+### The defaults moved, on purpose
+
+`DC_EMU64_CULL ?= 1`; and inside the `DC_AUDIO=1` block
+`DC_ARAM_AUDIO_DROP ?= 0`, `DC_AUDIO_MIXRATE ?= 24000`,
+`DC_AUDIO_SUBDELAY ?= 0`. All `?=`, all with documented reverts. Verified by
+building with none of them named and reading `dc/build/flags.stamp` back.
+**A result that lives only in a command line is one unset environment variable
+away from being lost** — the human asked for exactly this ("make sure we dont
+regress past this point").
+
+### Scoped, not built: the AICA question
+
+Asked directly: *"can we not use the dreamcast audio chip to offload?"* The
+answer is stage B (`kb/audio-stage-b-aica.md` §5), and the new measurement is
+the best argument it has ever had — the ~265 us/voice-update term is precisely
+what 64 hardware ADPCM channels do, while the sequencer stays inside the 2.3 ms
+fixed term. What still stands in the way is unchanged: jaudio ships **N64
+VADPCM** and AICA wants **Yamaha 4-bit ADPCM**, so every sample needs
+transcoding with loop points remapped and 24 over-length samples split, and
+8.3 MB of `audiorom.img` has to live in ~1.8 MB of usable sound RAM behind a
+per-sequence residency manager. A **BGM-only** variant was scoped as the cheap
+version — music is the many-voice case, SFX and voice are 0-4 voices — and
+would need no per-voice register driving, no envelope mapping and no LRU.
+**Decision taken: finish G3 first.** Nothing was built.
+
+
 ## 2026-08-08 (session 8) — THE SPLASH NOW CREDITS THE PEOPLE, AND THE README
 ## HAS A HALL OF HEROES
 
