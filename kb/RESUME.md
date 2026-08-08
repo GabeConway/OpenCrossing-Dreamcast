@@ -374,6 +374,19 @@ closed.
     `comb` needs XMTRX for the position FTRV at `:2863`. The live light-loop
     candidate is `chan_eval` (`dc_pvr.c:837-902`).
 
+    ⚠️⚠️ **REOPENED 2026-08-08 — this correction was itself wrong.** "Already
+    `fipr()`" is not the same as "already fast". Falco's own writeup
+    (<https://dreamcast.wiki/SH4_FIPR_Optimizations>) says the compiler
+    **cannot pipeline FIPR**, so back-to-back calls stall 4-5 cycles *each*;
+    and <https://dreamcast.wiki/SH4_FTRV_Optimizations> gives the rule —
+    **3+ dot products back-to-back against a constant vector ⇒ use FTRV.**
+    The block matches that twice over (3 dots vs `mv` rows, 3 vs `nm` rows) and
+    should be **two FTRVs, not six FIPRs**. The "holding `nm` in XMTRX loses"
+    argument is correct only for a *single-pass* loop — the community answer is
+    to split T&L into passes over 32-vertex blocks, which frees XMTRX per pass.
+    Full reasoning, sources and the pass-split design: `kb/research-sh4zam-gap.md`
+    §0a and §1 G-D. **Not yet A/B'd — this is a reopened question, not a result.**
+
 ## ⭐ SESSION 5 (2026-08-06) — the `-O0` reversal
 
 **The `-O0` directive is REVERSED by user decision.** `src/` builds at `-Os`
