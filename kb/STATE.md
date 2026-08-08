@@ -1,5 +1,29 @@
 # Session state — resume here
 
+## 🔴🔴 2026-08-08 (session 11b) — `xform` IS SPLIT. THE FRAME IS MEMORY-BOUND,
+## AND THE sh4zam QUEUE IS RE-RANKED AROUND IT
+
+`us/v = 3.24` is **648 SH-4 cycles per vertex** against ~60 of arithmetic. G5
+(`-DDC_PVR_VTXSPLIT=16`) split it, town, ledger closing at 88 %:
+
+| stage | ms/frame | |
+|---|---:|---|
+| `emit` | **2.15** | near clip + divide + `pvr_prim`'s 32 B copy → **G-C, now #1** |
+| `shade` | **2.03** | `shade_vertex`'s light loop — never on any list before |
+| `memo` | **1.68** | hash + 12-field compare, **122 cycles/vertex** — a cache miss |
+| `tex` / `post` | 0.62 / 0.57 | |
+| `lit` | **0.58** | ⭐ the six FIPRs §0a wants to rewrite — **1.9 % of the frame** |
+| `xf` | **0.23** | ⭐ the position FTRV |
+| sum / `xform` | 7.87 / 8.9 | the 1.0 ms residual is per-primitive loop overhead |
+
+⭐ **The memory-shaped stages are 75 % of `xform`; all the FP is 0.81 ms.**
+Corroborated from the other end by `tools/dcopt/icache_map.py` (the 12-symbol
+inner loop is 1.4x an 8 KB direct-mapped icache). ⚠️ Flycast models neither
+cache, so both understate hardware.
+
+**Queue: G-C (2.15) → `shade_vertex` (2.03) → memo (1.68) → G-B (13.31, still
+the largest and upstream of all of it) → §0a/G-D/G-F (0.81+0.70) last.**
+
 ## 🔴 2026-08-08 (session 11) — THE HARDWARE GAP HAS AN INSTRUMENT NOW, AND IT
 ## IS BLOCKED ON A BURN
 

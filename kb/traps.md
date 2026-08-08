@@ -21,6 +21,32 @@ Two consequences:
 Same family as the disc-timing entry below and the icache: **the emulator is
 missing a whole hardware mechanism, and its silence about it is not evidence.**
 
+## ⭐ SPLIT A BUCKET BEFORE OPTIMISING INSIDE IT — `xform` WAS 90 % NOT-MATHS (2026-08-08)
+
+`[PHASE] us/v` is the number this project optimises against, and at 3.24 µs it
+is **648 SH-4 cycles per vertex** — against roughly 60 cycles of vertex
+arithmetic. A whole queue item (`kb/research-sh4zam-gap.md` §0a, ranked #2) was
+about to rewrite six FIPRs as two FTRVs on the assumption that the arithmetic
+was the cost.
+
+G5 (`-DDC_PVR_VTXSPLIT`) split it: the FIPR block is **0.58 ms of a 30 ms
+frame**, the position FTRV is **0.23 ms**, and `memo` + `shade` + `emit` are
+**5.86 ms**. `memo` is 122 cycles a vertex for a hash and a 12-field compare —
+a cache miss, not maths.
+
+**This is measurement rule 7 for the third time** (`emu64_ms` per command, then
+`G_VTX`, now `xform`): an average over a bucket is not the cost of anything
+inside it, and a bucket nobody has split will attract optimisation aimed at
+whatever is easiest to imagine. **Split first. The split is cheap** — G5 is
+~40 lines and one sampled timer bracket per stage.
+
+⚠️ **Sample, do not bracket everything.** Timing all seven stages of every
+vertex is ~19,000 timer reads a frame — at TMU2's ~80 ns that is 1.5 ms of
+probe inside an 8.4 ms measurement, i.e. the instrument becomes the result.
+One primitive in 16 costs ~450 reads and converges over a window. Print the
+sample count so the scaling can be checked, and remember the 80 ns tick is a
+resolution floor: a `0.00` bucket means "below the noise", never "free".
+
 ## 🔴 MUTING THE CONSOLE AT `main()` STOPS THE GAME BOOTING ON HARDWARE (2026-08-08)
 
 **Paid for with a burn.** `AC-DC-20260808f-pmcr.cdi` called `dbgio_disable()`

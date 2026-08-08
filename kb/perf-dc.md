@@ -1,5 +1,26 @@
 # Where the town frame actually goes — measured, 2026-08-02
 
+> ## 🔴 [2026-08-08, session 11b] `xform` IS NOW SPLIT, AND THE FRAME IS
+> ## MEMORY-BOUND. `us/v` IS 648 CYCLES, NOT 60.
+>
+> This document's whole frame of reference is `[PHASE]`'s `cull` / `xform`
+> pair, and `xform` was a single 8.9 ms bucket everywhere below. G5
+> (`-DDC_PVR_VTXSPLIT=16`, `dc/src/dc_pvr.c`) splits it, town, 1-in-16
+> sampling, ledger closing at 88 %:
+>
+> ```
+> memo=1.68  xf=0.23  lit=0.58  tex=0.62  shade=2.03  post=0.57  emit=2.15
+> sum=7.87   against xform=8.9
+> ```
+>
+> ⭐ **The two floating-point stages are 0.81 ms of a 30 ms frame.** `memo`
+> alone is **122 cycles per vertex** for a hash and a 12-field compare — a
+> cache miss, not arithmetic — and `emit` is a 32-byte copy per corner into
+> the store queue. **Rank renderer work by this split, not by instruction
+> counts** (measurement rule 5, and rule 7 all over again). Full numbers and
+> the re-ranking: `kb/state-log.md` top entry and
+> `kb/research-sh4zam-gap.md` §3.
+
 > ## 🔴 [2026-08-06, session 6] G1 WAS RE-RUN — AND §2b's NUMBERS ARE HALF THEIR
 > ## REAL VALUE, INDEPENDENTLY OF THE `-O0` PROBLEM BELOW
 >
