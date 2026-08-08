@@ -1245,12 +1245,45 @@ void pc_audio_start_producer_thread(void) {
 static int s_audio_busy   = 0;   /* reentrancy guard, both directions */
 static u32 s_yield_calls  = 0;
 static u32 s_yield_frames = 0;
+/* Poll-only yields taken from INSIDE the audio path — jaudio fetching a
+ * sample off the disc. Non-zero here means the re-entrant case is real and is
+ * being served; it read as "did nothing at all" before 2026-08-08. */
+static u32 s_yield_polls  = 0;
 
 void dc_audio_disc_yield(void) {
     int frames = 0;
 
     if (!audio_open || s_scene_mask == 0u) return;
-    if (s_audio_busy) return;          /* this read WAS the audio path */
+
+    /* ⭐ THE RE-ENTRANT CASE IS NOT "DO NOTHING" — IT IS "POLL, DO NOT
+     * SYNTHESISE" (2026-08-08, third hardware iteration).
+     *
+     * Human, on the burn: "as the game is playing certain parts of the music
+     * are repeating." That word is diagnostic. An EMPTY ring produces SILENCE
+     * — dc_audio_stream_cb() zero-fills it. Hearing the same fragment again
+     * means the AICA channel was never handed new bytes at all, i.e.
+     * snd_stream_poll() did not run, and snd_stream keeps one channel keyed on
+     * with a looping buffer (see the gate comment above).
+     *
+     * And there is exactly one path that guaranteed that: jaudio fetching an
+     * instrument sample. pc_audio_process_frame -> Nas_WaveDmaCallBack ->
+     * Nas_StartDma -> ARStartDMA (dc_aram.c:732) -> the ARAM pager -> a disc
+     * read -> dc_audio_disc_yield -> `return` on this guard. So the reads most
+     * likely to happen WHILE MUSIC IS PLAYING — a new note needing a sample
+     * that is not cached — were the only reads in the program getting no
+     * service whatsoever, and each one is a 100-200 ms seek.
+     *
+     * The guard is correct about SYNTHESIS: re-entering pc_audio_process_frame
+     * from inside itself would corrupt jaudio's state. It was wrong about the
+     * POLL. snd_stream_poll() calls dc_audio_stream_cb(), which copies from
+     * our ring into AICA RAM and touches no jaudio state at all — it is safe
+     * at any depth, and it is the only thing that can stop the channel
+     * repeating. */
+    if (s_audio_busy) {
+        if (s_hnd != SND_STREAM_INVALID) (void)snd_stream_poll(s_hnd);
+        s_yield_polls++;
+        return;
+    }
 
     s_audio_busy = 1;
     s_yield_calls++;
@@ -1546,12 +1579,14 @@ void dc_audio_pump(void) {
 #endif
                 (unsigned)dc_aica_pos(0), (unsigned)dc_aica_pos(1),
                 (unsigned)dc_aica_pos(2), (unsigned)dc_aica_pos(3));
-        DC_LOGE("[DC/AUDIO] yield calls=%u frames=%u (audio produced INSIDE a "
-                "blocking disc read)\n",
-                (unsigned)s_yield_calls, (unsigned)s_yield_frames);
+        DC_LOGE("[DC/AUDIO] yield calls=%u frames=%u pollonly=%u (audio "
+                "produced INSIDE a blocking disc read; pollonly = reads issued "
+                "BY jaudio itself, which can only be polled)\n",
+                (unsigned)s_yield_calls, (unsigned)s_yield_frames,
+                (unsigned)s_yield_polls);
         s_pump_calls = 0; s_pump_frames = 0; s_pump_budget_hits = 0;
         s_pump_usec = 0;
-        s_yield_calls = 0; s_yield_frames = 0;
+        s_yield_calls = 0; s_yield_frames = 0; s_yield_polls = 0;
     }
     s_audio_busy = 0;
 #endif
