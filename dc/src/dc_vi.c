@@ -520,6 +520,13 @@ void VIWaitForRetrace(void) {
      * to be replaced. No-op unless -DDC_PMCR_HUD. */
     DC_PMCR_HUD_DRAW();
 
+    /* The console mute, armed a few hundred frames INTO the game loop rather
+     * than at main(). The block above dc_console_mute_tick() in dc_main.c
+     * carries the reason and the burn that paid for it: muting during boot
+     * changes boot's timing, and on hardware that stopped the game reaching
+     * the title at all. No-op unless -DDC_CONSOLE_MUTE. */
+    dc_console_mute_tick((unsigned int)pc_frame_counter);
+
     dc_gx_frame_timing_snapshot();
 
 #ifdef DC_PERF_PHASE

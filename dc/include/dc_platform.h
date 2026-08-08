@@ -230,6 +230,11 @@ extern int g_pc_verbose;
 void dc_log_impl(const char* fmt, ...);
 void dc_loge_impl(const char* fmt, ...);
 void dc_unimpl_report(const char* fn, const char* file, int line);
+
+/* The deferred console mute (dc_main.c, -DDC_CONSOLE_MUTE). Defined
+ * unconditionally — an empty function without the flag — so dc_vi.c's call
+ * site needs no #if and cannot fall out of step with the definition. */
+void dc_console_mute_tick(unsigned int presented_frames);
 int  dc_unimpl_count(void);
 void dc_unimpl_dump(void);
 

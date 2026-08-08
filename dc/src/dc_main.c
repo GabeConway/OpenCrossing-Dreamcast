@@ -1246,12 +1246,50 @@ static void dc_scif_fast_init(void) { }
  * The formatting cost remains and is microseconds.
  *
  * ⚠️ IT ALSO SILENCES CRASH DUMPS. That is the trade: a burn is either
- * instrumented or debuggable, not both. Leave it off for a triage burn. */
+ * instrumented or debuggable, not both. Leave it off for a triage burn.
+ *
+ * ⚠️⚠️ IT IS DEFERRED TO THE GAME LOOP, AND THAT IS NOT A STYLE CHOICE — IT
+ * IS A HARDWARE BUG THIS ALREADY CAUSED. The 2026-08-08 `-f` burn muted at the
+ * top of main() and never reached the game: the PMCR table appeared (so boot
+ * got past the asset load, past pvr_init and into boot_main's
+ * sound_initial2 loop) and then nothing. Muting at main() removes hundreds of
+ * milliseconds of SCIF blocking from the whole of init — KOS busy-waits on the
+ * TX FIFO, so every log line is an implicit delay, and boot ran with those
+ * delays for its entire life. Flycast cannot see this: it neither models the
+ * FIFO's timing nor was it ever run past the title on that image.
+ *
+ * So the mute now arms at `DC_CONSOLE_MUTE_FRAME` PRESENTED FRAMES (default
+ * 300, ~15 s), which is well inside the game loop. Boot keeps exactly the
+ * timing it has always had, and the measured frames are still silent.
+ * DC_CONSOLE_MUTE_FRAME=0 restores the old mute-at-main behaviour — which is
+ * kept only so the failure can be reproduced deliberately. */
 #if !defined(DC_HOST_STUB) && defined(DC_CONSOLE_MUTE) && DC_CONSOLE_MUTE > 0
 #include <kos/dbgio.h>
-static void dc_console_mute_init(void) { dbgio_disable(); }
+#ifndef DC_CONSOLE_MUTE_FRAME
+#define DC_CONSOLE_MUTE_FRAME 300
+#endif
+static void dc_console_mute_init(void) {
+#if (DC_CONSOLE_MUTE_FRAME) == 0
+    dbgio_disable();
+#endif
+}
+/* Called once per presented frame from dc_vi.c. One compare after it fires. */
+void dc_console_mute_tick(unsigned int presented_frames) {
+    static int done = ((DC_CONSOLE_MUTE_FRAME) == 0);
+    if (done) return;
+    if (presented_frames >= (unsigned int)(DC_CONSOLE_MUTE_FRAME)) {
+        done = 1;
+        DC_LOGE("[DC] console going quiet at frame %u (DC_CONSOLE_MUTE): "
+                "everything after this line is on the HUD or nowhere\n",
+                presented_frames);
+        dbgio_disable();
+    }
+}
 #else
 static void dc_console_mute_init(void) { }
+void dc_console_mute_tick(unsigned int presented_frames) {
+    (void)presented_frames;
+}
 #endif
 
 int main(int argc, char* argv[]) {

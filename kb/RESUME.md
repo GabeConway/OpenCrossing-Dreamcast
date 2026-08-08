@@ -6,9 +6,32 @@
 **Nothing in this session makes the game faster.** It builds the thing that
 makes steps 2-5 of the hardware plan falsifiable, plus one free finding.
 
+### 🔴 THE `-f` BURN FAILED, AND THE FAILURE IS A FINDING. BURN `-g` INSTEAD.
+
+**Human, on `AC-DC-20260808f-pmcr.cdi`:** *"The white table showed up but then
+the game never booted."*
+
+**Cause: `DC_CONSOLE_MUTE` armed at the top of `main()`.** KOS busy-waits on
+the SCIF FIFO with or without a cable, so this port's boot has always run with
+hundreds of ms of implicit console delay in it; deleting all of it at once
+changed init's timing and the game never left `boot_main`. The table appearing
+is what localises it — the HUD only draws from `VIWaitForRetrace`, so boot was
+already past the asset load and `pvr_init`. **Flycast could not have caught
+it:** that image had no `DC_AUTOSTART`, so the emulator run sat on the title
+screen and never reached the failure. Full write-up in `kb/traps.md`.
+
+**Fixed two ways, both in `-g`:**
+1. The mute now arms at `DC_CONSOLE_MUTE_FRAME` **presented frames** (default
+   300), inside the game loop. Boot keeps its original timing.
+2. The HUD leads with a **liveness line — `f= t= d= c=`** (presented frames,
+   logic ticks, GX draw calls, emu64 commands). A repeat failure is now
+   readable off the screen: `f=` frozen ⇒ the loop died; `f=` advancing with
+   `d=0 c=0` ⇒ the loop lives and the game is submitting nothing.
+
 ### What to do next, in order
 
-0. 🔴 **BURN `~/Downloads/AC-DC-20260808f-pmcr.cdi`** (740,090,153 B, padded)
+0. 🔴 **BURN `AC-DC-20260808g-pmcr.cdi`** — on the NAS (`Jupiter`, share
+   `Gabe`, `AC-DC/`) and in `~/Downloads`. Verified in Flycast to scene 9.
    and read the table off the TV. It is the shipping config plus
    `DC_PMCR=1 DC_PMCR_HUD=1 DC_CONSOLE_MUTE=1`, with no `DC_SCIF_FAST`, no
    `DC_AUTOSTART` and no probes. **It is a measurement image, not a play

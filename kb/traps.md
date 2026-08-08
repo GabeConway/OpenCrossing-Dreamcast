@@ -21,6 +21,45 @@ Two consequences:
 Same family as the disc-timing entry below and the icache: **the emulator is
 missing a whole hardware mechanism, and its silence about it is not evidence.**
 
+## 🔴 MUTING THE CONSOLE AT `main()` STOPS THE GAME BOOTING ON HARDWARE (2026-08-08)
+
+**Paid for with a burn.** `AC-DC-20260808f-pmcr.cdi` called `dbgio_disable()`
+as the second statement of `main()`. On the console the PMCR table appeared
+and the game never did.
+
+**What the symptom proves on its own, and it is worth reading before guessing:**
+the HUD is drawn from `VIWaitForRetrace`, which is first reached from
+`sound_initial2()` inside `boot_main()`. So a table on screen means boot got
+*past* the asset load, *past* `pvr_init()`, and into game init. The failure is
+downstream of everything the boot log would have shown.
+
+**The mechanism is timing, and it is invisible in the emulator.** KOS
+busy-waits on the SCIF TX FIFO whether or not a cable is attached, so at 57,600
+baud every logged line is an implicit delay — and this port's entire boot has
+always run with hundreds of milliseconds of those delays in it. Removing them
+all at once changes the order things complete in during init. Flycast models
+neither the FIFO timing nor, on that image, anything past the title: with no
+`DC_AUTOSTART` it sits on the title screen forever, so the emulator run that
+"passed" could not have reached the failure.
+
+**The fix, and the general rule.** The mute is now armed at
+`DC_CONSOLE_MUTE_FRAME` **presented frames** (default 300, ~15 s) from
+`dc_console_mute_tick()`, well inside the game loop: boot keeps the timing it
+has always had, the measured frames are still silent. `DC_CONSOLE_MUTE_FRAME=0`
+restores mute-at-`main()` and is kept only to reproduce the failure.
+
+⭐ **Generalise: a global change to how much the boot path BLOCKS is a change
+to the boot path.** Anything that removes or adds waiting during init —
+console rate, log volume, a sleep, a yield — must be armed after the game loop
+is up, or proven on hardware, not in Flycast.
+
+⚠️ **And: an image whose only output channel is the screen must put a liveness
+line on the screen.** That burn could not distinguish "the frame loop died"
+from "the loop is alive and the game is drawing nothing", because the HUD
+showed only the instrument's own numbers. `dc_pmcr.c`'s HUD now leads with
+`f= t= d= c=` (presented frames, logic ticks, GX draw calls, emu64 commands)
+for exactly that reason.
+
 ## ⚠️ ON HARDWARE THE CONSOLE MEASURES ITSELF — mute it on a measuring burn (2026-08-08)
 
 KOS busy-waits on the SCIF TX FIFO **whether or not a cable is attached**, so

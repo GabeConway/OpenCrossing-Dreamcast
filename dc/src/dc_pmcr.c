@@ -175,6 +175,18 @@ static u64 dc_pmcr_rd(void) {
     return perf_cntr_count(PRFC1);
 }
 
+/* The game-side counters the liveness line reports. Declared here rather than
+ * threaded through dc_pmcr_hud()'s arguments so that adding one later does not
+ * touch dc_vi.c: they are process-wide globals with stable names, and the HUD
+ * is the only reader. `s_logic_tick_count` in dc_vi.c is static, so the tick
+ * count comes in through the boundary call instead of an extern. */
+extern u32 pc_frame_counter;
+extern int pc_gx_draw_call_count;
+extern int pc_emu64_frame_cmds;
+
+static unsigned int s_ticks;
+static unsigned int dc_pmcr_logic_ticks(void) { return s_ticks; }
+
 /* A delta must never be negative. It can be, in exactly one situation: the
  * mode rotation calls perf_cntr_start(), which CLEARS the counter, so any
  * bracket straddling that instant would wrap. The rotation is placed inside
@@ -222,6 +234,7 @@ void dc_pmcr_tick_enter(int was_frameskip) {
     u64 now;
 
     if (!s_inited) dc_pmcr_init();
+    s_ticks++;
     now = dc_pmcr_rd();
     if (s_have_last) {
         u64 d = dc_pmcr_delta(now, s_last);
@@ -400,6 +413,31 @@ void dc_pmcr_hud(void) {
     s_hud_fb = (unsigned short*)(DC_VRAM32 + off);
 
     t0 = dc_pmcr_rd();
+
+    /* ⭐ THE LIVENESS LINE, AND IT IS FIRST BECAUSE IT IS THE ONE THAT ANSWERS
+     * "IT NEVER BOOTED". Paid for on hardware 2026-08-08: a burn came back
+     * showing this table over a black screen and nothing else, and there was
+     * no way to tell which of three very different things had happened —
+     * the frame loop had died, the loop was alive but the game was submitting
+     * nothing, or the game was fine and only its rendering was missing.
+     *
+     * These four counters separate all three, and they cost four reads:
+     *   f=  presented frames      — frozen ⇒ the loop is dead, and everything
+     *                               on the rest of the table is a corpse
+     *   t=  logic ticks           — advancing with f= frozen ⇒ stuck in a
+     *                               frameskip/wait loop, e.g. sound_initial2
+     *   d=  GX draw calls         — 0 with f= advancing ⇒ the loop lives and
+     *                               the game is drawing nothing
+     *   c=  emu64 commands        — 0 with d= 0 ⇒ no display list at all,
+     *                               so the stall is upstream of the renderer
+     * ⚠️ Drawn even before the counters produce anything, which is the point:
+     * a status line that needs the instrument to be working cannot report
+     * that the instrument is not working. */
+    snprintf(line, sizeof(line), "f%-6u t%-6u d%-4d c%-5d",
+             (unsigned int)pc_frame_counter,
+             (unsigned int)dc_pmcr_logic_ticks(),
+             pc_gx_draw_call_count, pc_emu64_frame_cmds);
+    dc_pmcr_hud_line(row++, line);
 
     snprintf(line, sizeof(line), "PMCR /frame   now=%s", s_modes[s_mode].name);
     dc_pmcr_hud_line(row++, line);

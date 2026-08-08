@@ -1055,7 +1055,14 @@ ifneq ($(DC_PMCR_HUD),)
 DEFINES += -DDC_PMCR_HUD=$(DC_PMCR_HUD)
 endif
 
-# DC_CONSOLE_MUTE=1 — dbgio_disable() at boot: no console output at all.
+# DC_CONSOLE_MUTE=1 — no console output from DC_CONSOLE_MUTE_FRAME onward.
+# ⚠️ IT IS DEFERRED INTO THE GAME LOOP AND MUST STAY THAT WAY: muting at the
+# top of main() cost a burn on 2026-08-08 — the game never reached the title,
+# because KOS busy-waits on the SCIF FIFO and boot had always run with those
+# hundreds of milliseconds of implicit delay. DC_CONSOLE_MUTE_FRAME=0 restores
+# the mute-at-main behaviour and is kept only to reproduce that failure.
+#
+# (was: dbgio_disable() at boot: no console output at all.)
 # FOR BURNS. On hardware the SCIF console is charged to the guest as frame
 # time whether or not a cable is attached, and a perf build emits ~10 lines
 # per 30-frame window — tens of milliseconds of stall inside the very window
@@ -1063,6 +1070,14 @@ endif
 # TV instead. ⚠️ It silences crash dumps too; leave it off for a triage burn.
 ifneq ($(DC_CONSOLE_MUTE),)
 DEFINES += -DDC_CONSOLE_MUTE=$(DC_CONSOLE_MUTE)
+endif
+
+# DC_CONSOLE_MUTE_FRAME=<N> — which PRESENTED frame the mute arms on.
+# Default 300 (~15 s). 0 = mute at the top of main(), which is the behaviour
+# that broke the 2026-08-08 `-f` burn; it is reachable on purpose and should
+# not be used for a measuring burn.
+ifneq ($(DC_CONSOLE_MUTE_FRAME),)
+DEFINES += -DDC_CONSOLE_MUTE_FRAME=$(DC_CONSOLE_MUTE_FRAME)
 endif
 
 # DC_PMCR_LOG=1 — force the [PMCR] console line back on in a HUD build (an
