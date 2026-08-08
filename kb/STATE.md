@@ -64,12 +64,17 @@ is 14-15 concurrent voices and a cap of 12 bounds the worst frame linearly.
 
 **`kb/RESUME.md` §0e carries the same list and the two must agree.**
 
-0. ⏸ **THE HARDWARE VERDICT ON `AC-DC-20260808b.cdi`** — built, padded,
-   unburned. It carries the disc-yield fix for the stutter a human traced to
-   the laser on a burn of the previous image. ⚠️ **Flycast cannot adjudicate
-   it** (`FastGDRomLoad=yes`, no seek model — which is how the same hypothesis
-   was wrongly refuted on 2026-08-06). `kb/RESUME.md` §0f has the diagnosis, the
-   kill switch and what to try if the verdict is "unchanged" or "worse".
+0. 🔴 **MEASURE THE HARDWARE GAP WITH SH7750 PMCR COUNTERS.** The console is
+   materially slower than Flycast — human: *"on hardware the game runs super
+   stable, fps and audio is worse for sure … the emulator runs buttery
+   smooth."* Expected in DIRECTION (Flycast models no instruction cache; the
+   SH-4's is 8 KB direct-mapped against a 2.88 MB `.text`) and **completely
+   unmeasured in magnitude**. ⚠️ **Flycast cannot answer this** — same trap as
+   the disc-timing refutation, one layer up. `kb/RESUME.md` §0h has the
+   experiment and the free host-side pre-check.
+0b. ⏸ **The hardware verdict on `AC-DC-20260808e.cdi`** — the audio/disc stack
+   after four burns. `kb/RESUME.md` §0g is the whole sequence and the four
+   rules it produced.
 1. **The G3 screenshot pair** (`DC_EMU64_CULL=0` vs `=1`). The VERIFY gate is a
    stronger instrument and it passed, but measurement rule 2 is not formally
    satisfied and this session did not take it.

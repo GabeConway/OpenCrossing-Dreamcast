@@ -137,76 +137,116 @@ measurement rule 2 is not formally satisfied. And on the visible path
 `dirty_check` + `setup_1tri_2tri_1quad` run **twice**; that comes off the
 headline and is not separately measured.
 
-## 0g. ⚠️ THE DISC STUTTER TOOK THREE ITERATIONS. READ ALL THREE BEFORE TOUCHING IT.
+## 0g. ⏸ THE AUDIO/DISC WORK IN FOUR BURNS — READ THIS BEFORE TOUCHING AUDIO
 
-Each burn falsified the previous fix's SCOPE, never its mechanism. The
-mechanism was right on the first try; the location was wrong twice.
+Every burn falsified the previous fix's **scope**, never its mechanism. The
+mechanism was right the first time; the location was wrong three times. That
+pattern is the lesson.
 
 | burn | human verdict | what it falsified |
 |---|---|---|
-| `AC-DC-20260808.cdi` | "still stutters … lines up with laser load sounds" | that the stutter was voice count. It was disc I/O — a hypothesis the project had recorded as REFUTED, on a Flycast A/B (`FastGDRomLoad=yes`, no seek model) |
-| `-b` (pager chunked + yield) | "same problem but less laser thrash … actually I think it's still there" | **the LOCATION.** `dc_dvd_pager_read()` is the ARAM pager; the game's own asset loading goes through `DVDRead` → `dc_dvd_read_impl`, and the keep-list loader had three more sites. Most of the bytes were never chunked |
-| `-c` (every read routed) | "certain parts of the music are REPEATING" | **the GUARD.** "Repeating" ≠ silence: an empty ring zero-fills. Repeating means `snd_stream_poll()` never ran — and jaudio's OWN sample fetches hit the `s_audio_busy` guard and returned without polling |
-| `-d` (poll when re-entrant + 512 KB cache) | ⏸ **awaiting** | — |
+| `AC-DC-20260808.cdi` | "still stutters … lines up with laser load sounds" | that the stutter was voice count. It is disc I/O — a hypothesis this project had recorded as **refuted**, on a Flycast A/B (`FastGDRomLoad=yes`, no seek model) |
+| `-b` pager chunked + yield | "same problem but less laser thrash … actually it's still there" | **the LOCATION.** `dc_dvd_pager_read()` is the ARAM pager; the game's own assets go `DVDRead` → `dc_dvd_read_impl`, and the keep-list loader had three more sites. Most bytes were never chunked |
+| `-c` every read routed | "certain parts of the music are **repeating**" | **the GUARD.** Repeating ≠ silence — an empty ring zero-fills. Repeating means `snd_stream_poll()` never ran, and jaudio's OWN sample fetches hit the `s_audio_busy` guard and returned without polling |
+| `-d` poll when re-entrant + 512 KB cache | "not solved but **way better**" | — |
+| `-e` 1 MB cache + pump ceiling + voice cap | ⏸ **awaiting** | — |
 
-**Three rules that came out of it, all of them general:**
+**Four rules, all general:**
 
-1. **There is now exactly ONE place a disc read may block:
+1. **There is exactly ONE place a disc read may block —
    `dc_dvd_read_yielding()` (`dc/src/dc_dvd.c`). Add new `fs_read` calls THERE,
    never at a call site.** Five sites route through it.
-2. **Yield BEFORE the seek, not only between chunks** — a 100-200 ms head
-   movement cannot be subdivided by any chunk size, so the only defence is
+2. **Yield BEFORE the seek**, not only between chunks. A 100-200 ms head
+   movement cannot be subdivided by any chunk size; the only defence is
    entering it with a full ring.
 3. **The re-entrant case is "poll, do not synthesise", not "do nothing".**
    `snd_stream_poll()` touches no jaudio state and is safe at any depth;
    re-entering `pc_audio_process_frame` is not.
+4. ⭐ **`DC_AUDIO_MAX_FRAMES` IS AN FPS CONSTANT, NOT AN AUDIO ONE.** Production
+   is capped at `MAX_FRAMES × 17.49 ms × 2 ticks` per presented frame. At the
+   old value of 2 that is 70 ms/frame — **the audio cannot keep up below
+   ~14 FPS however cheap synthesis becomes**, which is exactly "the title
+   screen sounds choppy because the fps is low". Now 6 (~4.8 FPS).
 
-⭐ **AND THE LARGEST SINGLE WIN WAS NOT CODE AT ALL: `DC_ARAM_WINDOW`
-131072 → 524288.** That value was measured when RAM was the binding constraint;
-RAM stopped binding on 2026-08-06 and nobody re-costed it. Matched runs:
-**disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions
-4,173 → 336**, cache hits unchanged, for 384 KB of a ~2 MB budget.
+⭐ **AND THE LARGEST WIN WAS NOT CODE: `DC_ARAM_WINDOW` 131072 → 1048576.**
+Matched 420 s runs:
+
+| | 128 KB | 512 KB | **1 MB** |
+|---|---:|---:|---:|
+| disc reads | 4,183 | 358 | **106** |
+| bytes off disc | 137.9 MB | 12.6 MB | **4.3 MB** |
+| evictions | 4,173 | 336 | **68** |
+
+It sat at 131072 because that was measured when **RAM was the binding
+constraint** — which stopped being true on 2026-08-06, and nobody re-costed it.
+⚠️ With the LRU pager on this knob is a **disc-seek** lever, not a RAM lever,
+and the "floor 851,968" note applies only at `DC_ARAM_LRU=0`.
 **Generalise: when a constraint is lifted, re-cost everything that was sized
-under it.** The build lines in §2 carry the new value.
+under it.** There are probably other constants in this tree still carrying a
+dead assumption.
 
-## 0f. ⏸ PARKED PENDING HARDWARE CONFIRMATION (2026-08-08)
+## 0h. 🔴 THE HEADLINE OPEN QUESTION — HARDWARE IS NOT THE EMULATOR
 
-**`~/Downloads/AC-DC-20260808b.cdi` is built, padded and UNBURNED.**
-`AC-DC-20260808.cdi` sits beside it as the without-the-fix control.
+**Human, on the console:** *"on hardware the game runs super stable, fps and
+audio is worse for sure. idk if the audio is the cause of it, or it's
+elsewhere … because the emulator runs buttery smooth."*
 
-A burn of the first image produced the finding that ends this session:
-*"the loading is much improved, though it still stutters but it's better. I can
-hear it's stuttering on disk load. the stutter almost perfectly lines up with
-laser load sounds."*
+**Expected in DIRECTION, unmeasured in MAGNITUDE.** Flycast models **no
+instruction cache**. The SH-4's is **8 KB, direct-mapped**, against a
+**2,883,248 B `.text`**. So every FPS number this project has ever produced —
+including today's 23.2 p50 — comes from a machine with a perfect icache.
 
-**Diagnosis:** `dc_dvd_pager_read()` blocks in one `fs_read` on the game
-thread, and the audio pump runs once per logic tick — so for the whole read
-NOTHING refills the 96 ms ring or the SPU's 128 ms buffer. A CD-R seek is
-100-200 ms and then transfers at ~500 KB/s, so a 256 KB archive read is ~500 ms
-of starvation and the AICA repeats its last fragment.
+⚠️ **AND NO AMOUNT OF FLYCAST WORK CAN ANSWER IT.** That is the same trap as
+the disc-timing refutation, one layer up: do not "A/B it in the emulator".
 
-**Fix (in `462e935`, ON by default):** the read is chunked at 16 KB and
-`dc_audio_disc_yield()` synthesises up to 4 DAC frames between chunks. **Not** a
-deeper buffer — that would buy the fix with permanent latency on every footstep.
-Kill switch `DC_DVD_READ_CHUNK=0`; counter `[DC/AUDIO] yield calls= frames=`.
+**The instrument that would settle it: SH7750 PMCR performance counters via KOS
+`perfctr`**, bracketing (a) the presented frame and (b)
+`pc_audio_process_frame()`, printed over SCIF on a burn. ~50 lines. It answers
+three things in one run: how much of a hardware frame is cache stall, whether
+audio really is the FPS cost on console, and whether the audio cost has a
+memory component at all. **Until it runs, "audio is what costs the frame rate
+on hardware" is a hypothesis, not a finding.**
 
-⚠️ **FLYCAST CANNOT ADJUDICATE THIS AND MUST NOT BE ASKED TO.** It runs
-`FastGDRomLoad=yes` and models no seek or transfer rate — which is exactly how
-this hypothesis got recorded as refuted on 2026-08-06 (`kb/closed.md`,
-`kb/traps.md`). It showed the absence of harm and nothing more: the yield fires
-(`yield calls=41 frames=15`), bytes per logical pager read 34,003 vs a 32,916
-baseline, `ASSET MISSING 0`, no assert.
+Second, cheaper probe if a burn is precious: the direct-mapped aliasing check is
+HOST-side and takes minutes — `sh-elf-nm` the ELF, take the hot jaudio and
+`dc_pvr`/`dc_gx` symbols mod 8192, and look for collisions along one call chain.
+No collisions kills the aliasing hypothesis without a burn.
 
-**FIRST ACTION NEXT SESSION: read the human's verdict on the burn.** If the
-disc stutter is gone, close it. If it is unchanged, the next suspects are the
-chunk size (16 KB may still be too coarse against a 100-200 ms *seek*, which no
-chunking can subdivide) and `DC_AUDIO_DISC_FRAMES`. If it is WORSE, suspect
-chunking having disturbed the read pattern and try `DC_DVD_READ_CHUNK=0`.
+## 0i. THE SHIPPING CONFIG AS OF THIS FLUSH
+
+```bash
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=1048576 DC_ARENA_BYTES=1200000 \
+DC_AUDIO_SCENES=all DC_AUDIO_DISC_FRAMES=8 DC_AUDIO_VOICES=12 \
+DC_CDI_PAD=1 bash dc/build-dc.sh
+```
+
+Everything else is a DEFAULT now and needs no flag: `DC_EMU64_CULL=1` (G3),
+and with `DC_AUDIO=1` → `DC_ARAM_AUDIO_DROP=0`, `DC_AUDIO_MIXRATE=24000`,
+`DC_AUDIO_SUBDELAY=0`, `DC_AUDIO_MAX_FRAMES=6`.
+
+**The CDI ledger in `~/Downloads/`, all padded and burnable, oldest first —
+they are a bisection set, do not delete them:**
+
+| file | what it adds |
+|---|---|
+| `AC-DC-20260808.cdi` | music plays + G3. No disc yield |
+| `-b` | yield in the ARAM pager only |
+| `-c` | yield at every read site |
+| `-d` | + poll when re-entrant, 512 KB cache |
+| `-e` | + 1 MB cache, pump ceiling 6, voice cap 12 |
 
 ## 0e. THE RANKED LIST FROM HERE (2026-08-08)
 
-0. ⏸ **The hardware verdict on `AC-DC-20260808b.cdi`** — §0f. Everything below
-   is behind it.
+0. 🔴 **MEASURE THE HARDWARE GAP WITH PMCR** — §0h. The console is materially
+   slower than Flycast and nobody knows by how much or why. Everything about
+   FPS is guesswork until this runs, and Flycast structurally cannot answer it.
+   The free host-side aliasing check comes first.
+0b. ⏸ **The hardware verdict on `AC-DC-20260808e.cdi`** — §0g. Two specific
+   questions: is the title-screen choppiness gone (that was the
+   `DC_AUDIO_MAX_FRAMES` trap), and is the town FPS gap constant or worse while
+   music plays?
 1. **The G3 screenshot pair.** The one measurement rule this session did not
    satisfy.
 2. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified,

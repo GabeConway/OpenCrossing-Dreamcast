@@ -1,5 +1,55 @@
 # Session log — what was observed running, in order
 
+## ⭐ 2026-08-08 (session 9, fourth iteration) — THE PUMP COULD NOT KEEP UP
+## BELOW 14 FPS, AND THE CONSOLE IS NOT THE EMULATOR
+
+**Human, on hardware:** *"sound right on kk scene, title screen because of the
+low fps it sounds choppy"* … *"the fps isn't as good on the hardware and I
+suspect it's audio related"* … *"on hardware the game runs super stable, fps
+and audio is worse for sure … the emulator runs buttery smooth."*
+
+⭐ **`DC_AUDIO_MAX_FRAMES=2` WAS AN FPS TRAP, AND THE ARITHMETIC IS EXACT.** One
+DAC frame is 17.49 ms of audio; the pump runs once per LOGIC tick; there are 2
+ticks per presented frame. So production is capped at
+`MAX_FRAMES × 17.49 × 2` per frame — **70 ms at the old value, i.e. the audio
+cannot keep up below ~14 FPS however cheap synthesis becomes.** That is
+precisely "the title screen sounds choppy because the fps is low", and it is
+not a synthesis-cost problem at all. The comment on the constant claimed it
+"binds only on the first pump after an arm" — true of a 30 FPS scene, false of
+every scene that struggles, which are the ones that needed it. Raised to 6
+(210 ms/frame, level to ~4.8 FPS); the loop's real bound is the ring filling,
+which this cap sits in front of, so raising it cannot overshoot.
+
+**`DC_ARAM_WINDOW` to 1 MB** (the header default all along) — matched 420 s
+runs: disc reads **4,183 → 358 → 106**, bytes off disc **137.9 → 12.6 →
+4.3 MB**, evictions **4,173 → 336 → 68**. `MEMLEDGER margin=3,705,420`, no OOM.
+
+**L1 applied, `DC_AUDIO_VOICES=12`.** Per-voice cost is exactly linear and the
+town peaked at 14-15 concurrent voices, so the cap binds on the worst frames and
+nowhere else: the `v>=56` bucket disappears and the worst DAC frame goes
+**15,891 → 11,191 us**. Degrades to priority-ordered note stealing
+(`__Nas_GetLowerPrio`), not to silence.
+
+### 🔴 AND THE FINDING THAT OUTRANKS ALL OF IT: THE CONSOLE IS NOT THE EMULATOR
+
+Flycast models **no instruction cache**. The SH-4's is **8 KB, direct-mapped**,
+against **2,883,248 B of `.text`**. Every FPS figure this project has ever
+produced — 11.6, 20.0, 23.2 — is from a machine with a perfect icache, and a
+human has now reported the gap directly.
+
+⚠️ **No Flycast experiment can size it.** That is the disc-timing trap one layer
+up, and this file now carries three instances of the same error shape in one
+week: a census pointed at silent audio, a gate whose oracle could not answer,
+and an emulator with no drive. **Ask what the instrument models.**
+
+**The experiment: SH7750 PMCR counters via KOS `perfctr`**, bracketing the
+presented frame and `pc_audio_process_frame()`, over SCIF on a burn (~50 lines).
+It answers in one run how much of a hardware frame is cache stall, whether audio
+really is the console's FPS cost, and whether the audio cost has a memory
+component. **A free host-side pre-check exists**: `sh-elf-nm` the ELF and look
+for hot symbols colliding mod 8192 along one call chain — no collisions kills
+the direct-mapped-aliasing hypothesis without spending a disc.
+
 ## ⭐ 2026-08-08 (session 9, third iteration) — THE STUTTER TOOK THREE BURNS,
 ## AND THE BIGGEST FIX WAS A CONSTANT NOBODY HAD RE-COSTED
 
