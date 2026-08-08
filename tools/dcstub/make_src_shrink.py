@@ -1538,6 +1538,60 @@ def _audio_rules(audio):
     out.append(("src/static/jaudio_NES/internal/dvdthread.c", "swap", dvd))
 
     if audio:
+        # -- S8e: neosthread.c, the RSP command buffer is TOO SMALL with sound
+        #    ON, and nothing in the program checks. This is the only rule in
+        #    this file that GROWS a buffer, and it is a correctness fix, not a
+        #    saving.
+        #
+        # jaudio sizes its own Acmd buffer from a bound it computes at spec
+        # time (memory.c:1029):
+        #
+        #     max_audio_cmds = num_channels * 20 * updates_per_frame
+        #                      + spec->_09 * 30 + 400
+        #                    = 24 * 20 * 4 + 1 * 30 + 400
+        #                    = 2,350
+        #
+        # (num_channels = NA_SPEC_CONFIG[0]._05 = 24, audioconst.c:9;
+        #  updates_per_frame = 4, memory.c:971, x spec = _04 = 1 at :1021;
+        #  _09 = 1, audioconst.c:13.)
+        #
+        # On N64 that bound sizes AG.abi_cmd_bufs[] (memory.c:1061). THE PC /
+        # DC PATH DOES NOT USE THOSE BUFFERS — Neos_Update calls
+        # CreateAudioTask(pc_task_buf[cur], …) (neosthread.c:35) into a FIXED
+        # `Acmd pc_task_buf[2][1600]` (:26) — and `max_audio_cmds` appears
+        # nowhere else in the tree, so Nas_smzAudioFrame writes commands with
+        # no bound of any kind. At the engine's own worst case that is 750
+        # Acmds = 6,000 B past the end: from pc_task_buf[0] it corrupts
+        # pc_task_buf[1], and from pc_task_buf[1] it corrupts whatever .bss
+        # follows.
+        #
+        # ⚠️ WHY IT HAS NEVER BEEN SEEN: the command count scales with ACTIVE
+        # VOICES, and until the port-queue drain landed (dc/src/dc_audio.c) the
+        # music never started, so the port had only ever run 0-4 concurrent
+        # voices. Turning the music on is exactly the change that walks this
+        # buffer into its bound. Sizing it correctly BEFORE the first
+        # music-playing run is the cheap half of that bet.
+        #
+        # 2,432 = 2,350 rounded up to a multiple of 64, so the pair costs
+        # 2 x (2432 - 1600) x 8 = 13,312 B of .bss against ~2.05 MB of
+        # headroom. Lowering DC_AUDIO_VOICES (L1) lowers the bound and leaves
+        # this merely generous, never short.
+        #
+        # The macro also sizes the GameCube `task_buf[2][1600]` at :163 inside
+        # the `#else`, which is not compiled here.
+        out.append(("src/static/jaudio_NES/internal/neosthread.c", "swap", [
+            (1, r"^#define NEOSTHREAD_ACMD_BUF_NUM 1600$",
+             "/* DC_SRC_SHRINK S8e: 1,600 -> 2,432 Acmds (+13,312 B of .bss).\n"
+             " * jaudio's own bound is max_audio_cmds = num_channels*20*\n"
+             " * updates_per_frame + _09*30 + 400 = 24*20*4 + 30 + 400 = 2,350\n"
+             " * (memory.c:1029), and the DC path writes into this fixed array\n"
+             " * rather than into the AG.abi_cmd_bufs[] that bound sizes\n"
+             " * (neosthread.c:35 vs memory.c:1061). Nas_smzAudioFrame checks\n"
+             " * nothing, so at 1,600 a full voice load runs 6,000 B off the end.\n"
+             " * Only reachable with sound ON, which is why the --audio=0 tree\n"
+             " * shrinks this same macro to 16 instead (S8d). */\n"
+             "#define NEOSTHREAD_ACMD_BUF_NUM 2432"),
+        ]))
         return out
 
     # -- S8a: seqsetup.c, the sequencer track pool --------------------------

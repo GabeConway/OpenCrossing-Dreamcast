@@ -545,16 +545,67 @@ void dc_gx_flush_if_begin_complete(void) {
  * draw. Merged batches share one matrix by construction (merging requires
  * dirty == 0).
  */
-static int dc_gx_batch_is_offscreen(int count) {
-    const DCGXVertex* v = g_gx.vertex_buffer;
-    float mn[3], mx[3];
+/* THE CLIP HALF, SPLIT OUT FOR G3 (2026-08-08). Body verbatim from what used
+ * to be the tail of dc_gx_batch_is_offscreen; nothing about the arithmetic
+ * changed, and the batch entry point below still calls it.
+ *
+ * WHY IT IS EXPORTED. G3 (dc/src/dc_emu64_cull.cpp) needs the SAME test one
+ * command earlier — at G_TRIN_INDEPEND entry, over emu64's own vertex array,
+ * before ~75 % of the vertex references it is about to expand are pushed
+ * through the GX attribute setters and then thrown away here. Two copies of a
+ * frustum test that must agree exactly is how a cull starts deleting visible
+ * geometry, so there is one copy and G3 hands it a box.
+ *
+ * ⚠️ IT READS g_gx, SO THE CALLER OWES IT CURRENT STATE. `g_gx.projection_mtx`
+ * is refreshed only by GXSetProjection inside emu64's dirty_check
+ * (emu64.c:3430-3436) and `g_gx.current_mtx` only by setup_1tri_2tri_1quad
+ * (emu64.c:2861/2865). Call it before either and it tests a matrix one command
+ * stale, which culls things that are on screen. G3 calls both first; the flush
+ * path below is downstream of both by construction.
+ *
+ * ⚠️ PURE SCALAR, ON PURPOSE — it touches no matrix unit, so it needs no
+ * dc_mtx_xmtrx_invalidate(). If RESUME §5 item 4 ever converts these 200 mults
+ * to FTRV, the invalidate becomes mandatory (precedent: dc_pvr.c:2812) and
+ * that change must not be landed in the same build as G3. */
+int dc_gx_aabb_is_offscreen(const float* mn, const float* mx) {
     float (*mv)[4];
     float (*pr)[4];
     int outside[6];
+    int ci, p;
+
+    mv = g_gx.pos_mtx[g_gx.current_mtx];
+    pr = g_gx.projection_mtx;
+    for (p = 0; p < 6; p++) outside[p] = 0;
+
+    for (ci = 0; ci < 8; ci++) {
+        float ox = (ci & 1) ? mx[0] : mn[0];
+        float oy = (ci & 2) ? mx[1] : mn[1];
+        float oz = (ci & 4) ? mx[2] : mn[2];
+        float e0 = mv[0][0] * ox + mv[0][1] * oy + mv[0][2] * oz + mv[0][3];
+        float e1 = mv[1][0] * ox + mv[1][1] * oy + mv[1][2] * oz + mv[1][3];
+        float e2 = mv[2][0] * ox + mv[2][1] * oy + mv[2][2] * oz + mv[2][3];
+        float cx = pr[0][0] * e0 + pr[0][1] * e1 + pr[0][2] * e2 + pr[0][3];
+        float cy = pr[1][0] * e0 + pr[1][1] * e1 + pr[1][2] * e2 + pr[1][3];
+        float cz = pr[2][0] * e0 + pr[2][1] * e1 + pr[2][2] * e2 + pr[2][3];
+        float cw = pr[3][0] * e0 + pr[3][1] * e1 + pr[3][2] * e2 + pr[3][3];
+        if (cx < -cw) outside[0]++;
+        if (cx >  cw) outside[1]++;
+        if (cy < -cw) outside[2]++;
+        if (cy >  cw) outside[3]++;
+        if (cz < -cw) outside[4]++;
+        if (cz >  cw) outside[5]++;
+    }
+    for (p = 0; p < 6; p++)
+        if (outside[p] == 8) return 1;
+    return 0;
+}
+
+static int dc_gx_batch_is_offscreen(int count) {
+    const DCGXVertex* v = g_gx.vertex_buffer;
+    float mn[3], mx[3];
 #ifdef DC_GX_NO_FAST_AABB
     int i, c;
 #endif
-    int ci, p;
 
 #ifdef DC_GX_NO_FAST_AABB
     mn[0] = mx[0] = v[0].position[0];
@@ -605,31 +656,7 @@ static int dc_gx_batch_is_offscreen(int count) {
     }
 #endif
 
-    mv = g_gx.pos_mtx[g_gx.current_mtx];
-    pr = g_gx.projection_mtx;
-    for (p = 0; p < 6; p++) outside[p] = 0;
-
-    for (ci = 0; ci < 8; ci++) {
-        float ox = (ci & 1) ? mx[0] : mn[0];
-        float oy = (ci & 2) ? mx[1] : mn[1];
-        float oz = (ci & 4) ? mx[2] : mn[2];
-        float e0 = mv[0][0] * ox + mv[0][1] * oy + mv[0][2] * oz + mv[0][3];
-        float e1 = mv[1][0] * ox + mv[1][1] * oy + mv[1][2] * oz + mv[1][3];
-        float e2 = mv[2][0] * ox + mv[2][1] * oy + mv[2][2] * oz + mv[2][3];
-        float cx = pr[0][0] * e0 + pr[0][1] * e1 + pr[0][2] * e2 + pr[0][3];
-        float cy = pr[1][0] * e0 + pr[1][1] * e1 + pr[1][2] * e2 + pr[1][3];
-        float cz = pr[2][0] * e0 + pr[2][1] * e1 + pr[2][2] * e2 + pr[2][3];
-        float cw = pr[3][0] * e0 + pr[3][1] * e1 + pr[3][2] * e2 + pr[3][3];
-        if (cx < -cw) outside[0]++;
-        if (cx >  cw) outside[1]++;
-        if (cy < -cw) outside[2]++;
-        if (cy >  cw) outside[3]++;
-        if (cz < -cw) outside[4]++;
-        if (cz >  cw) outside[5]++;
-    }
-    for (p = 0; p < 6; p++)
-        if (outside[p] == 8) return 1;
-    return 0;
+    return dc_gx_aabb_is_offscreen(mn, mx);
 }
 
 /* ==========================================================================

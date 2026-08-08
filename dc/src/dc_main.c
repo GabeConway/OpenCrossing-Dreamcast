@@ -689,6 +689,17 @@ void dc_platform_init(void) {
      * and on this port it is nearly a no-op (there is no command FIFO). */
     dc_gx_init();
 
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+    /* G3, AND IT MUST COME FIRST. G1 and G2 below snapshot ALL 64 dispatch
+     * slots at their init and restore all 64 on every sampled frame's close.
+     * Install G3's two trampolines before they look, and their snapshot
+     * contains them — so the histogram measures the build we are shipping and
+     * the restore puts the cull back. Reverse this order and the cull is
+     * evicted on the first sampled frame, silently. dc_emu64_cull.cpp's
+     * `reinst=` counter exists to catch exactly that mistake. */
+    dc_emu64_cull_init();
+#endif
+
 #if defined(DC_EMU64_HIST) && DC_EMU64_HIST > 0
     /* G1. Only reads and copies emu64's dispatch table, which is initialised
      * data — it is valid from load, well before emu64_init() runs — so this is

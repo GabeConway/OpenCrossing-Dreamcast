@@ -174,6 +174,19 @@ ENVARGS=(
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
 [ -n "${DC_AUDIO_SCENES+x}" ] && ENVARGS+=(-e DC_AUDIO_SCENES="$DC_AUDIO_SCENES")
+# Forward-only, and it MUST stay forward-only: dc/Makefile derives
+# DC_ARAM_AUDIO_DROP=0 from DC_AUDIO=1 with `?=`, and make treats an
+# environment variable as already-defined — so a plain `-e DC_ARAM_AUDIO_DROP=`
+# would blank the derivation and hand every sound build the silent-samples bug
+# the derivation exists to prevent.
+[ -n "${DC_ARAM_AUDIO_DROP+x}" ] && ENVARGS+=(-e DC_ARAM_AUDIO_DROP="$DC_ARAM_AUDIO_DROP")
+# The three peak-cost audio levers, forward-only: dc/Makefile guards each with
+# `ifneq (…,)`, so an unconditional -e would expand -DDC_AUDIO_MIXRATE= into
+# every TU and the `#if (DC_AUDIO_SUBDELAY) >= 0` test in dc_audio.c would be a
+# preprocessor error rather than a wrong build.
+[ -n "${DC_AUDIO_VOICES+x}" ]   && ENVARGS+=(-e DC_AUDIO_VOICES="$DC_AUDIO_VOICES")
+[ -n "${DC_AUDIO_MIXRATE+x}" ]  && ENVARGS+=(-e DC_AUDIO_MIXRATE="$DC_AUDIO_MIXRATE")
+[ -n "${DC_AUDIO_SUBDELAY+x}" ] && ENVARGS+=(-e DC_AUDIO_SUBDELAY="$DC_AUDIO_SUBDELAY")
 # R1's kill switch, forward-only: dc/Makefile has `DC_BGTEX_DEMAND ?= 1`, and
 # make treats an environment variable as already-defined — so a plain
 # `-e DC_BGTEX_DEMAND=` would blank the default and expand
@@ -227,6 +240,10 @@ ENVARGS=(
 # guard is `ifneq (...,0)` too, so an empty -e would arm it on every build.
 [ -n "${DC_EMU64_SHADOW_LOOP+x}" ] && \
     ENVARGS+=(-e DC_EMU64_SHADOW_LOOP="$DC_EMU64_SHADOW_LOOP")
+# G3, forward-only for the same reason as the two above -- its Makefile guard is
+# `ifneq ($(DC_EMU64_CULL),0)` and empty is not 0, so an unconditional -e would
+# arm the cull on every build that never asked for it.
+[ -n "${DC_EMU64_CULL+x}" ] && ENVARGS+=(-e DC_EMU64_CULL="$DC_EMU64_CULL")
 # Forward these ONLY if actually set. An empty -e VAR= still counts as "set"
 # for make's ?= operator, which would silently blank the Makefile default
 # (e.g. DECOMP_OPT would become empty and KOS_CFLAGS' own -O2 would win).

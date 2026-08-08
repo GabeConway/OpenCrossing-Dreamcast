@@ -404,6 +404,14 @@ extern u64 dc_gx_texload_time_us;
  * them. kb/research-fps-ideas.md F2. No-op when the cache is compiled out. */
 void dc_mtx_xmtrx_invalidate(void);
 
+/* The frustum half of dc_gx.c's batch cull, split out so G3 can run the SAME
+ * test one emu64 command earlier (dc/src/dc_emu64_cull.cpp). Takes a model- or
+ * view-space AABB in the space the CURRENT pos matrix expects.
+ * ⚠️ Reads g_gx.projection_mtx and g_gx.current_mtx — the caller owes it a
+ * dirty_check()/setup_1tri_2tri_1quad() first, or it tests a stale frustum and
+ * culls geometry that is on screen. */
+int dc_gx_aabb_is_offscreen(const float *mn, const float *mx);
+
 /* ⚠️ G1 AND G2 ARE MUTUALLY EXCLUSIVE, AND THE COLLISION IS SILENT.
  *
  * Both write the same 64-entry emu64 dispatch table. In dc_vi.c the arm order
@@ -439,6 +447,22 @@ void dc_emu64_shadow_init(void);
 void dc_emu64_shadow_frame_open(unsigned int tick);
 void dc_emu64_shadow_frame_close(void);
 void dc_emu64_shadow_report(void);
+#endif
+
+/* G3 — the AABB cull at G_TRIN_INDEPEND entry (dc/src/dc_emu64_cull.cpp).
+ *
+ * ⚠️ NOT MUTUALLY EXCLUSIVE WITH G1, UNLIKE G2 — and the reason is the
+ * install discipline, not luck. G1 and G2 rewrite ALL 64 dispatch slots on
+ * every sampled frame from a snapshot they took at their own init; G3 writes
+ * TWO slots ONCE, at init, and dc_main.c calls it BEFORE both of them, so
+ * their snapshot contains G3's trampolines and their restore puts them back.
+ * dc_emu64_cull_frame_open() carries a tripwire (`reinst=`) that re-installs
+ * and counts if that ordering is ever broken. Do NOT add a per-frame table
+ * swap here. */
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+void dc_emu64_cull_init(void);
+void dc_emu64_cull_frame_open(unsigned int tick);
+void dc_emu64_cull_report(void);
 #endif
 
 /* --- Timing helper shared by dc_os.c / dc_vi.c / dc_mem_ledger.c ----------- */

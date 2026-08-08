@@ -846,8 +846,14 @@ endif
 # (make treats an environment variable as already-defined, so ?= is a no-op
 # against it) — and so the shrink-tree keying below sees the final value.
 #
-# ⚠️ A build with sound also wants DC_XDEFS='-DDC_ARAM_AUDIO_DROP=0', or jaudio
-# synthesises from zeroed instrument samples ([NEOS_OUT] peak=0).
+# ⚠️ A build with sound also needs DC_ARAM_AUDIO_DROP=0, or jaudio synthesises
+# from zeroed instrument samples ([NEOS_OUT] peak=0). That used to be a manual
+# DC_XDEFS recipe documented in two places and wired in none, and it cost a
+# whole session: every DC_AUDIO=1 build before 2026-08-06 streamed all
+# 8,300,384 B of audiorom.img into ARAM and threw it away. It is DERIVED now —
+# see the block under DC_AUDIO below. Set DC_ARAM_AUDIO_DROP=1 explicitly to
+# get the old drop back with sound on (only useful for bisecting the ordering
+# hazard described at dc/src/dc_aram.c:295-312).
 DC_AUDIO_SCENES ?=
 ifneq ($(DC_AUDIO_SCENES),)
 DC_AUDIO ?= 1
@@ -857,6 +863,74 @@ endif
 DC_AUDIO ?= 0
 ifeq ($(DC_AUDIO),1)
 DEFINES += -DDC_AUDIO=1
+# The derivation. `?=` so an explicit DC_ARAM_AUDIO_DROP in the environment
+# still wins, and so a silent build is completely unaffected: with DC_AUDIO=0
+# nothing here fires and dc_aram.c keeps its own `#define … 1` default.
+DC_ARAM_AUDIO_DROP ?= 0
+endif
+
+# -----------------------------------------------------------------------------
+# THE THREE PEAK-COST LEVERS. Promoted from #ifndef-in-a-TU to first-class knobs
+# on 2026-08-08, because a measurement finally priced them.
+# -----------------------------------------------------------------------------
+# MEASURED, the first run in this project's history with music actually
+# playing (the port-queue drain in dc/src/dc_audio.c is what made that
+# possible). Cost of one jaudio DAC frame, bucketed by voice-updates summed
+# over the frame's four updates — so bucket N means N/4 concurrent voices:
+#
+#   v>= 0  n=8741  mean=2332us      v>=32  n=1794  mean= 9355us
+#   v>= 8  n=16085 mean=3907us      v>=40  n=480   mean=11415us
+#   v>=16  n=7985  mean=5701us      v>=48  n=460   mean=13533us
+#   v>=24  n=6061  mean=7583us      v>=56  n=303   mean=17285us
+#
+# ⭐ MONOTONIC. cost ≈ 2,332 us fixed + ~265 us per voice-update. THE BIMODAL
+# "~2.5 ms / ~10 ms" the project has been chasing since 2026-08-06 is simply
+# SFX-only versus music-playing, and `filt@=0 comb@=0` on every stutter row
+# says the conditional FIR/comb stages are not involved. The earlier census
+# that "refuted" voice count was taken while the music was silent — an
+# instrument pointed at a subsystem that is not running.
+#
+# DC_AUDIO_VOICES  (L1) NA_SPEC_CONFIG[0]._05, shipped 24. Per-voice work is
+#                  exactly linear, so this caps the WORST frame and barely
+#                  moves the mean. Degrades to priority-ordered note stealing
+#                  via __Nas_GetLowerPrio (channel.c:788-811) — no new drop
+#                  logic. It also bounds the Acmd command list: the DC path
+#                  writes into pc_task_buf[2][NEOSTHREAD_ACMD_BUF_NUM] with no
+#                  check, and jaudio's own bound is 24*20*4+30+400 = 2,350
+#                  (memory.c:1029). See S8e in tools/dcstub/make_src_shrink.py,
+#                  which grows that buffer to 2,432 so this knob is a
+#                  PERFORMANCE choice and not a safety requirement.
+# DC_AUDIO_MIXRATE (L2) NA_SPEC_CONFIG[0]._00, shipped 48000. The INTERNAL mix
+#                  rate, not the output rate. 24000 halves num_samples_per_update
+#                  (200 -> 96, memory.c:974) and therefore the resampler, the
+#                  envelope mixer and the reverb bus. PITCH IS PRESERVED — the
+#                  error term in the resample ratio is independent of this
+#                  field. ⚠️ It does NOT cut ADPCM decode, and it pushes more
+#                  notes over the pitch>=2.0 two-part threshold
+#                  (channel.c:129), which claws some of it back. Pick a value
+#                  whose rate/60/4 is a multiple of 8: 24000 -> 96 ✓.
+# DC_AUDIO_SUBDELAY (L5) NA_HALL_DELAY.sub_delay, shipped 0x14. 0 deletes the
+#                  hall reverb's SECOND tap: ~16 KB of memcpy and ~1,664 MACs
+#                  per DAC frame, for the echo tail only. Every consumer
+#                  already has an else branch. ⚠️ NOT the same lever as
+#                  NA_SPEC_CONFIG[0]._09 — that one NULL-derefs, and the
+#                  argument is at the write site in dc/src/dc_audio.c.
+#
+# All three default to "leave the shipped value alone", so an unset build is
+# byte-identical in behaviour. Forward-only guards for the same reason as every
+# other optional knob in this file.
+ifneq ($(DC_AUDIO_VOICES),)
+DEFINES += -DDC_AUDIO_VOICES=$(DC_AUDIO_VOICES)
+endif
+ifneq ($(DC_AUDIO_MIXRATE),)
+DEFINES += -DDC_AUDIO_MIXRATE=$(DC_AUDIO_MIXRATE)
+endif
+ifneq ($(DC_AUDIO_SUBDELAY),)
+DEFINES += -DDC_AUDIO_SUBDELAY=$(DC_AUDIO_SUBDELAY)
+endif
+
+ifneq ($(DC_ARAM_AUDIO_DROP),)
+DEFINES += -DDC_ARAM_AUDIO_DROP=$(DC_ARAM_AUDIO_DROP)
 endif
 
 # DC_AUDIO_HEAPLOG=1 — one-shot dump of the jaudio heaps' own bookkeeping
@@ -1392,6 +1466,44 @@ endif
 DC_EMU64_SHADOW_LOOP ?= 0
 ifneq ($(DC_EMU64_SHADOW_LOOP),0)
 DEFINES += -DDC_EMU64_SHADOW_LOOP=$(DC_EMU64_SHADOW_LOOP)
+EMU64_TBL_GLOBAL := 1
+endif
+
+# =============================================================================
+# G3: the AABB cull at G_TRIN_INDEPEND ENTRY (KILL SWITCH: =0, the default)
+# =============================================================================
+# The biggest measured lever in the project. G1 (2026-08-06, x2-corrected) put
+# G_TRIN_INDEPEND at 34.4 ms of a 45.6 ms town frame, and the [PHASE] line says
+# vcull=5250 against v=2899 — 75 % of the vertex references that opcode expands
+# are rejected by dc_gx_batch_is_offscreen() one step LATER, after emu64 has
+# walked the index stream, after set_position() has transformed every one of
+# them, and after our own GX* attribute setters have staged them. G4 priced our
+# half of a reference at 0.536 us and emu64's at roughly four times that;
+# rejecting the same batch one command earlier is worth 5.4-19.2 ms.
+#
+# The value is a SAMPLING PERIOD in presented frames, same convention as G1/G2:
+# 0 = off, 1 = armed always, N > 1 = armed one frame in N for a matched-frame
+# A/B out of a single run (kb/RESUME.md §0b rule 5).
+#
+# ⚠️ UNLIKE G2, THIS COEXISTS WITH G1 — by discipline, not by luck. G1 and G2
+# rewrite ALL 64 dispatch slots per sampled frame from a snapshot taken at their
+# own init; G3 writes TWO slots ONCE at init and dc_main.c calls it BEFORE both,
+# so their snapshot contains G3's trampolines and their restore puts them back.
+# dc_emu64_cull.cpp carries a per-frame tripwire (`reinst=`) for the day someone
+# reorders that. Do not add an #error here — add it if a fourth installer
+# appears.
+#
+# The correctness gate is -DDC_EMU64_CULL_VERIFY, which never culls: it runs our
+# entry test AND the original handler and counts any batch we would have dropped
+# that dc_gx.c's own flush-time cull drew (`falsecull=`, must be 0) plus any
+# disagreement about where gfx_p lands (`gfxp_bad=`, must be 0). That is a
+# correctness run, never a perf run — it is slower than an uninstrumented build
+# by construction.
+#
+# Same objcopy as G1/G2, same EMU64_TBL_GLOBAL, applied at most once below.
+DC_EMU64_CULL ?= 0
+ifneq ($(DC_EMU64_CULL),0)
+DEFINES += -DDC_EMU64_CULL=$(DC_EMU64_CULL)
 EMU64_TBL_GLOBAL := 1
 endif
 

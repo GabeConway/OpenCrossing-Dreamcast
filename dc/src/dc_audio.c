@@ -143,6 +143,11 @@ static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
 #ifndef DC_AUDIO_MIXRATE
 #define DC_AUDIO_MIXRATE 0      /* 0 = shipped 48000 (NA_SPEC_CONFIG[0]._00) */
 #endif
+/* L5 — the hall reverb's SECOND tap. -1 means "leave the shipped 0x14 alone";
+ * 0 deletes the tap. Same write site and same argument as L1/L2. */
+#ifndef DC_AUDIO_SUBDELAY
+#define DC_AUDIO_SUBDELAY (-1)
+#endif
 /* Below this many samples in the ring, the budget is ignored and a frame is
  * synthesised anyway: a late sample beats a gap. One jaudio DAC frame is
  * 2*DAC_SIZE = 2240 samples (rate.c:7), so this is one frame of slack. */
@@ -632,8 +637,17 @@ extern void pc_audio_process_frame(void);
  * for the measurement. Reachable through DC_XDEFS, which needs no Makefile
  * change and therefore cannot repeat the DC_EMU64_HIST forwarding trap
  * (kb/traps.md). */
-#ifdef DC_AUDIO_VOICELOG
+/* ⚠️ NO LONGER BEHIND THE PROBE FLAG. The port-queue drain below is a shipping
+ * fix, not an instrument, and it reads AG by field name for the same reason the
+ * census does. The paragraph above is kept because it is still the argument for
+ * why reading AG directly beats a hand-copied offset map; only the "behind a
+ * flag no shipping build sets" clause has expired. Still inside DC_AUDIO, so a
+ * silent build pulls in no decomp audio header at all. */
+#if DC_AUDIO && !defined(DC_HOST_STUB)
 #include "jaudio_NES/audiowork.h"
+#include "jaudio_NES/sub_sys.h"
+#include "jaudio_NES/os.h"
+#include "jaudio_NES/system.h"
 #endif
 
 /* NA_SPEC_CONFIG[] for the L1/L2 overrides in AIInit. Unlike audiowork.h above
@@ -642,6 +656,102 @@ extern void pc_audio_process_frame(void);
  * so a DC_AUDIO=0 build pulls in no decomp audio header at all. */
 #if DC_AUDIO && !defined(DC_HOST_STUB)
 #include "jaudio_NES/audioconst.h"
+#endif
+
+/* ==========================================================================
+ * THE PORT-QUEUE DRAIN — why the music never played
+ * ==========================================================================
+ * DIAGNOSED 2026-08-06, FIXED HERE. Na_GameFrame pushes ~55 commands per game
+ * frame into AG.audio_port_cmds[256] and posts ONE message per frame into the
+ * 64-slot AG.thread_cmd_proc_mq. The only consumer in the whole port was
+ * CreateAudioTask (sub_sys.c:727-740) — which runs only inside
+ * pc_audio_process_frame(), i.e. only when this file decides to SYNTHESISE.
+ *
+ * So the queue is drained only on ticks that synthesise, and there are two
+ * ways to have a tick that does not:
+ *   1. the scene gate is disarmed (DC_AUDIO_SCENES=3,9 leaves scenes 4 and 18
+ *      disarmed, and the run visits both), and
+ *   2. the ring is already full — the `have >= RING - HEADROOM` break below
+ *      exits the loop with frames == 0 even in an armed scene.
+ * Either way Z_osSendMesg starts returning -1 (os.c:51-56), Nap_SendStart stops
+ * advancing AG.thread_cmd_read_pos (sub_sys.c:274) and reports
+ * "SendStart::Mesg Full Queue" — 6 events in the measured run, and dc_os.c:606
+ * had already recorded that 85.3 % of all console output was that one message —
+ * and Nap_PortSet's `if (write_pos == read_pos) write_pos--` (sub_sys.c:222-225)
+ * then overwrites the SAME ring slot forever.
+ *
+ * ⭐ WHY THAT SILENCES MUSIC AND NOTHING ELSE. BGM's START_SEQ is issued
+ * exactly ONCE per scene / in-game hour (game64.c_inc:1511; mBGMPs_FLAG_EXECUTE
+ * at m_bgm.c:1543-1545 stops it re-firing). SFX re-issues from eight sites and
+ * VOICE from every dialogue message. A mechanism that silently drops one
+ * command is therefore INVISIBLE on speech and PERMANENT on music —
+ * __Nas_StartSeq never runs, grp->flags.enabled stays FALSE (system.c:822), and
+ * the sequencer ticks a group that was never armed. Exactly the reported
+ * symptom: talking, no music.
+ *
+ * THE FIX is the one dc_audio.c's own gate comment already said it intended:
+ * gate SYNTHESIS, not command processing. This function drains the queue on
+ * every pump, before the arm decision, and it is a faithful copy of
+ * CreateAudioTask's own consumer (sub_sys.c:727-740) — same reset_status
+ * discipline, same Nap_AudioPortProcess, same STOP_PROCESSING re-post — so an
+ * armed tick behaves identically to before (this drains, CreateAudioTask then
+ * finds nothing) and a disarmed tick stops losing commands.
+ *
+ * COST: one Z_osRecvMesg on an empty queue per pump in the steady state. The
+ * work it does do is command PROCESSING (group enables, volume sets, sequence
+ * starts) — pointer chasing over a 256-entry table, not synthesis. It cannot
+ * pull in a DAC frame.
+ *
+ * ⚠️ ORDER MATTERS: reset_status != 0 means a spec change is in flight and
+ * Nas_SpecChange has not finished; CreateAudioTask DISCARDS in that window
+ * (sub_sys.c:706-716) rather than processing, because the group table it would
+ * write into is being rebuilt. Copy that, do not "improve" it.
+ *
+ * Kill switch: -DDC_AUDIO_NO_DRAIN reverts to the pre-fix behaviour exactly.
+ * Counter: `drained=` on the [DC/AUDIO] pump line, and the verdict is that
+ * "SendStart::Mesg Full Queue" disappears from the console log. */
+#if DC_AUDIO && !defined(DC_HOST_STUB) && !defined(DC_AUDIO_NO_DRAIN)
+static u32 s_drain_msgs = 0;      /* port messages consumed by us            */
+static u32 s_drain_discards = 0;  /* consumed during a spec change, unread   */
+
+static void dc_audio_drain_port(void) {
+    u32 msg;
+    s32 port_cmds = 0;
+
+    /* Nap_SendStart's own precondition (sub_sys.c:661-663). Before this is
+     * TRUE, AG.thread_cmd_proc_mq_p is NULL and the queue does not exist. */
+    if (AUDIO_SYSTEM_READY != TRUE) return;
+    if (AG.thread_cmd_proc_mq_p == NULL) return;
+
+    if (AG.reset_status != 0) {
+        /* Spec change in flight — consume and drop, exactly as
+         * CreateAudioTask does on both of its reset paths. Dropping here is
+         * what keeps the queue from filling during the ~14-frame reset the
+         * comment at audiostruct.h:948-951 describes. */
+        while (Z_osRecvMesg(AG.thread_cmd_proc_mq_p, (OSMesg*)&msg,
+                            OS_MESG_NOBLOCK) != -1) {
+            s_drain_discards++;
+        }
+        return;
+    }
+
+    while (Z_osRecvMesg(AG.thread_cmd_proc_mq_p, (OSMesg*)&msg,
+                        OS_MESG_NOBLOCK) != -1) {
+        Nap_AudioPortProcess(msg);
+        port_cmds++;
+    }
+    s_drain_msgs += (u32)port_cmds;
+
+    /* The continuation after an AUDIOCMD_SYS_STOP_PROCESSING: the producer is
+     * waiting for us to ask for the rest of the window. Verbatim from
+     * sub_sys.c:738-740 — without it a STOP_PROCESSING command stalls the port
+     * permanently once we are the only consumer. */
+    if (port_cmds == 0 && AG.thread_cmd_queue_finished) {
+        (void)Nap_SendStart();
+    }
+}
+#else
+#define dc_audio_drain_port() ((void)0)
 #endif
 
 /* ==========================================================================
@@ -860,6 +970,40 @@ void AIInit(u8* stack) {
                 old_v, (unsigned)spec->_05, old_r, (unsigned)spec->_00,
                 (unsigned)((old_r / 60u / 4u) & ~7u),
                 (unsigned)((spec->_00 / 60u / 4u) & ~7u));
+
+        /* L5 — DC_AUDIO_SUBDELAY, NA_HALL_DELAY.sub_delay (audioconst.c:3,
+         * shipped 0x14). Same window as L1/L2 and for the same reason: this
+         * struct is read by Nas_SetDelayLine (memory.c:1614-1631, `d->sub_delay
+         * = b->sub_delay * 64`) from Nas_SpecChange's call at memory.c:1070,
+         * which is downstream of here. It is a plain non-const global.
+         *
+         * WHAT IT BUYS. The sub-delay is the hall reverb's SECOND tap, and it
+         * is the only part of the reverb path with a `!= 0` guard around it —
+         * every consumer already has an else branch, which is what makes this
+         * cheap to switch off rather than a rewrite. Per UPDATE (so x4 per DAC
+         * frame) it deletes an aDMEMMove of DMEM_2CH_SIZE (832 B), a
+         * Nas_SaveAuxBuffer + Nas_LoadAuxBuffer_B pair (~1.6 KB of copy), one
+         * aMix over 416 samples, and the matching branch of Nas_CpuFX —
+         * roughly 16 KB of memcpy and 1,664 MACs per DAC frame.
+         *
+         * WHAT IT COSTS: the echo tap. The primary reverb is untouched, and
+         * leak_rtl/leak_ltl are already 0 in the shipped table, so the
+         * cross-mix path was never running anyway.
+         *
+         * ⚠️ NOT the same lever as NA_SPEC_CONFIG[0]._09 (num_synth_reverbs).
+         * Setting _09 to 0 would delete the whole reverb block, and it is NOT
+         * safe: track.c:908/:983 let a sequence address
+         * AG.synth_delay[inst - 0xC0] as an instrument, and with no delay lines
+         * allocated driver.c:786 dereferences a NULL `sample->loop`. That lever
+         * stays closed. */
+#if (DC_AUDIO_SUBDELAY) >= 0
+        {
+            unsigned old_sd = (unsigned)NA_HALL_DELAY.sub_delay;
+            NA_HALL_DELAY.sub_delay = (u16)(DC_AUDIO_SUBDELAY);
+            DC_LOGE("[DC/AUDIO] hall sub_delay=%u->%u\n",
+                    old_sd, (unsigned)NA_HALL_DELAY.sub_delay);
+        }
+#endif
     }
 
     s_scene_mask = dc_audio_parse_scenes(s_scene_list);
@@ -1049,6 +1193,16 @@ void dc_audio_pump(void) {
     int armed;
 
     if (!audio_open) return;
+
+    /* BEFORE the scene-mask early return, and that placement is the point: a
+     * DC_AUDIO_SCENES=none build still runs jaudio's init and still has
+     * Na_GameFrame pushing ~55 commands a frame at a queue nobody reads. That
+     * is where dc_os.c:606's "85.3 % of all console lines are
+     * SendStart::Mesg Full Queue" came from. Draining costs one Z_osRecvMesg
+     * on an empty queue and it is the difference between a port that loses
+     * commands and one that does not. */
+    dc_audio_drain_port();
+
     /* DC_AUDIO_SCENES selected nothing: AIInit never opened a device, so there
      * is no stream to poll and no ARM7 to keep alive. Cost of a linked-in but
      * unselected audio subsystem is this compare. */
@@ -1265,6 +1419,15 @@ void dc_audio_pump(void) {
                 (unsigned)sou_scene_mode, (unsigned)s_armed,
                 (unsigned)s_gate_arms, (unsigned)s_gate_disarms,
                 (int)s_gain_q8);
+        /* The drain's own line. `msgs=` is how many port windows WE consumed
+         * that CreateAudioTask would not have; `disc=` is how many were
+         * dropped during a spec change, which is correct behaviour and not a
+         * loss. The real verdict on this fix is not either number — it is that
+         * "SendStart::Mesg Full Queue" stops appearing in the log at all. */
+#if DC_AUDIO && !defined(DC_HOST_STUB) && !defined(DC_AUDIO_NO_DRAIN)
+        DC_LOGE("[DC/AUDIO] drain msgs=%u disc=%u\n",
+                (unsigned)s_drain_msgs, (unsigned)s_drain_discards);
+#endif
         DC_LOGE("[DC/AUDIO] pump calls=%u synth_frames=%u budget_hits=%u "
                 "cb=%u pulled=%u fill=%d pollfail=%u us/600=%u "
                 "aicadrv=%08X aicaclk=%u kick=%u aicapos=%u,%u,%u,%u\n",

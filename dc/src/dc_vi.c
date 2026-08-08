@@ -460,6 +460,17 @@ void VIWaitForRetrace(void) {
             dc_emu64_shadow_frame_open(shadow_tick_skip++);
         }
 #endif
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+        /* G3. NOT a table swap — it flips a boolean and re-checks the two slots
+         * it owns. Cheap enough to run on the frameskipped tick too, and it has
+         * to: that tick issues no display-list commands but the NEXT one does,
+         * and the A/B period must count the same ticks G1's does or the two
+         * instruments disagree about which frame was armed. */
+        {
+            static unsigned int cull_tick_skip = 0;
+            dc_emu64_cull_frame_open(cull_tick_skip++);
+        }
+#endif
         return;
     }
 
@@ -656,6 +667,9 @@ void VIWaitForRetrace(void) {
 #if defined(DC_EMU64_SHADOW_LOOP) && DC_EMU64_SHADOW_LOOP > 0
             dc_emu64_shadow_report();
 #endif
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+            dc_emu64_cull_report();
+#endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "
                     "posms=%.2f\n",
@@ -781,6 +795,16 @@ void VIWaitForRetrace(void) {
     {
         static unsigned int shadow_tick = 0;
         dc_emu64_shadow_frame_open(shadow_tick++);
+    }
+#endif
+
+#if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
+    /* G3, same placement and the same local tick counter as G1/G2 above. It
+     * costs two compares, not a 512-byte table swap, so its position in this
+     * block is about matching THEIR window rather than about its own cost. */
+    {
+        static unsigned int cull_tick = 0;
+        dc_emu64_cull_frame_open(cull_tick++);
     }
 #endif
 
