@@ -48,21 +48,25 @@ src/             — vendored decomp game code (unchanged where possible)
 harness/         — emulator smoke tests (never contains ROM material)
 ```
 
-## Credits
+## Hall of Heroes
 
-This project stands on the shoulders of:
+This port stands on the shoulders of:
 
-- **[ACreTeam / ac-decomp](https://github.com/ACreTeam/ac-decomp)** — the complete
-  C decompilation of Animal Crossing that makes any of this possible.
-- **[flyngmt/ACGC-PC-Port](https://github.com/flyngmt/ACGC-PC-Port)** — the
-  original PC port of the decompilation (GX→OpenGL translation layer).
-- **[Dia2809's fork](https://github.com/Dia2809/ACGC-PC-Port)** — Linux support,
-  the OpenGL ES renderer, and the ARM branches.
-- **[GabeConway/OpenCrossing-Anbernic](https://github.com/GabeConway/OpenCrossing-Anbernic)**
-  — the low-end handheld port this project is bootstrapped from.
-- **[KallistiOS](https://github.com/KallistiOS/KallistiOS)** and the Dreamcast
-  homebrew community — especially the dca3, sm64-dc, and doom64-dc projects,
-  whose published techniques inform most of this plan.
+- **[ACreTeam / ac-decomp](https://github.com/ACreTeam/ac-decomp)** — the
+  complete C decompilation of Animal Crossing. Without it there is no port.
+- **[Cuyler36](https://github.com/Cuyler36)** — the Ghidra GameCube loader,
+  the save editor, and the reverse-engineering groundwork the decomp grew
+  from; also the unlocked-FPS work upstream.
+- **[flyngmt / ACGC-PC-Port](https://github.com/flyngmt/ACGC-PC-Port)** — the
+  original PC port: the GX→OpenGL layer and the keep-emu64 architecture this
+  project inherits wholesale.
+- **[Dia2809](https://github.com/Dia2809/ACGC-PC-Port)** — Linux support, the
+  OpenGL ES renderer, and the ARM branches: the base the handheld port used.
+- **[Falco Girgis](https://github.com/gyrovorbis)** — KallistiOS and
+  [sh4zam](https://github.com/gyrovorbis/sh4zam), the SH-4 math this port's
+  transform path runs on, plus direction given directly to this project.
+
+The same names, in the same order, are on the boot screen.
 
 Animal Crossing is © Nintendo. This project is not affiliated with or endorsed
 by Nintendo or Sega, and distributes none of their assets.

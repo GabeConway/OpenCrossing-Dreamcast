@@ -346,6 +346,9 @@ void pc_platform_update_window_size(void) {
  *   2. a progress bar    (-DDC_SPLASH_NO_BAR)    driven by the REAL keep-list
  *      load, which is the 15 s window in which a human cannot tell "loading"
  *      from "hung" (kb/traps.md).
+ *   3. the thanks block  (-DDC_SPLASH_NO_THANKS) the people this port is
+ *      built on, at 1x below the bar. Same list as the README's Hall of
+ *      Heroes, same order — keep the two in step.
  * Plus a vertical gradient instead of flat black, and a fade-in.
  *
  * A shine sweep across the letters was built and then turned OFF at the
@@ -374,6 +377,8 @@ void pc_platform_update_window_size(void) {
 #define SPL_BAR_H   8
 #define SPL_BAR_Y   (SPL_Y + SPL_H + 28)
 #define SPL_MASK_STRIDE ((SPL_SRC_W + 7) / 8)            /* 35 bytes */
+/* 332, 356, 380 with the defaults; the last line ends at 404 of 480. */
+#define SPL_THX_Y   (SPL_BAR_Y + SPL_BAR_H + 48)
 
 /* 1 bit per source pixel: 35 x 24 = 840 B. A byte-per-pixel mask would be
  * 6,624 B, and this file is compiled into an image that is already over its
@@ -409,6 +414,43 @@ static void spl_fill_rows(int y0, int y1) {
         for (x = 0; x < DC_SCREEN_WIDTH; x++) row[x] = c;
     }
 }
+
+#ifndef DC_SPLASH_NO_THANKS
+/* The people this port is built on. Drawn ONCE, at 1x, entirely below the
+ * animated band and below the bar, so nothing in the hold loop or in
+ * dc_splash_progress() ever repaints over it — that is what makes it free of
+ * both flicker and a second glyph mask.
+ *
+ * Costs no RAM: bfont is in the Dreamcast BIOS, and these are string literals
+ * in .rodata (94 B). ASCII only and hyphens rather than a middot, because the
+ * thin bfont face this draws with is the Latin one.
+ *
+ * ⚠️ Keep this list, its spelling and its order identical to the README's
+ * "Hall of Heroes". The screen is the version most people will ever see. */
+static const char* const s_spl_thanks[] = {
+    "SPECIAL THANKS TO",
+    "ACreTeam  -  Cuyler36  -  Dia2809",
+    "flyngmt  -  Falco Girgis",
+};
+
+static void spl_draw_thanks(void) {
+    unsigned i;
+
+    /* Dim slate: legible over the gradient, but well under the title's 198,
+     * 204, 226 so it reads as a footer and not as a second headline. */
+    bfont_set_foreground_color(0xFF8C96B4);
+    bfont_set_background_color(0x00000000);
+
+    for (i = 0; i < sizeof(s_spl_thanks) / sizeof(s_spl_thanks[0]); i++) {
+        int len = (int)strlen(s_spl_thanks[i]);
+        int x   = (DC_SCREEN_WIDTH - len * BFONT_THIN_WIDTH) / 2;
+        if (x < 0) x = 0;               /* never scribble off the left edge */
+        /* opaque=false — the gradient shows through instead of a black box. */
+        bfont_draw_str_vram_fmt(x, SPL_THX_Y + (int)i * BFONT_HEIGHT, false,
+                                "%s", s_spl_thanks[i]);
+    }
+}
+#endif
 
 /* Redraw the text band. `phase` is the shine position in [0,1] as a fraction of
  * a sweep that starts off the left edge and ends off the right; `fade` is 0..255
@@ -551,6 +593,14 @@ static void dc_splash(void) {
     /* STEP 2 — the field. This also erases the scratch draw. */
     spl_fill_rows(0, DC_SCREEN_HEIGHT);
     s_spl_ready = 1;
+
+    /* STEP 2b — the thanks, once, over the finished field. It must come AFTER
+     * the fill (which would erase it) and it leaves bfont's foreground colour
+     * dim, which is safe only because the mask above is already captured and
+     * nothing else in the image draws with bfont. */
+#ifndef DC_SPLASH_NO_THANKS
+    spl_draw_thanks();
+#endif
 
     /* STEP 3 — hold and animate. Any button skips; the pad is polled through
      * maple, which KOS drives from the vblank IRQ, so this needs no scheduler.

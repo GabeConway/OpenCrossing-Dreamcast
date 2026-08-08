@@ -1,5 +1,46 @@
 # Session log — what was observed running, in order
 
+## 2026-08-08 (session 8) — THE SPLASH NOW CREDITS THE PEOPLE, AND THE README
+## HAS A HALL OF HEROES
+
+Cosmetic, at the maintainer's direction, and recorded only because the boot
+screen is the version of the credits most people will ever see.
+
+**What changed.** `DC_SPLASH_TEXT` is untouched — "TechProGabe Presents..."
+still owns the middle of the screen at 2x. Added under the progress bar, at
+1x in a dim slate (`0xFF8C96B4`) so it reads as a footer:
+
+```
+                 SPECIAL THANKS TO
+         ACreTeam  -  Cuyler36  -  Dia2809
+            flyngmt  -  Falco Girgis
+```
+
+`README.md`'s `## Credits` became `## Hall of Heroes` carrying the same five
+names in the same order. The maintainer's instruction was **people, not
+projects** — the OpenCrossing-Anbernic and KallistiOS-community bullets came
+out, and Cuyler36 and Falco Girgis went in.
+
+**Why it is free.** bfont lives in the Dreamcast BIOS, so the three lines cost
+94 B of `.rodata` and no RAM. They are drawn **once**, in a new STEP 2b right
+after the gradient fill, and they sit entirely below the repainted text band
+(`SPL_Y..SPL_Y+SPL_H`) and below the bar — so neither the hold loop nor
+`dc_splash_progress()` ever writes over them. That is what buys a second block
+of text with no second glyph mask and no flicker on a surface that has no back
+buffer. Kill switch `-DDC_SPLASH_NO_THANKS`; knob documented in
+`BUILDING-DC.md`.
+
+**Verified on a picture, not on counters** (`kb/traps.md`). Screenshot build,
+Flycast, `--fb-writeback`: `frame-0000` of the run shows all three lines
+centred, legible over the gradient, nothing clipped, title unchanged.
+`.text` 2,871,792 B — the same size class as before. Console still prints
+`[DC] splash: "TechProGabe Presents..." mask 1206 px of 6624, 552x48 at
+44,200, 2000 ms`, and the run reaches the town at **29.8 FPS / 99 %**, so
+nothing on the boot path moved.
+
+⚠️ The screen and the README are **one list in two places**. Change one and
+change the other; the comment above `s_spl_thanks[]` says so.
+
 ## ⭐⭐⭐ 2026-08-06 (session 7, later) — THE MUSIC NEVER PLAYS, AND IT IS THE
 ## AUDIO COMMAND QUEUE. THE VOICE CENSUS MEASURED A BROKEN STATE
 
