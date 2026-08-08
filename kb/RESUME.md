@@ -51,7 +51,7 @@ lost.** The burn line is now just:
 ```bash
 DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
 DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1200000 \
+DC_ARAM_WINDOW=524288 DC_ARENA_BYTES=1200000 \
 DC_AUDIO_SCENES=all DC_CDI_PAD=1 bash dc/build-dc.sh
 ```
 
@@ -136,6 +136,38 @@ taken — the VERIFY gate is the stronger instrument and it passed, but
 measurement rule 2 is not formally satisfied. And on the visible path
 `dirty_check` + `setup_1tri_2tri_1quad` run **twice**; that comes off the
 headline and is not separately measured.
+
+## 0g. ⚠️ THE DISC STUTTER TOOK THREE ITERATIONS. READ ALL THREE BEFORE TOUCHING IT.
+
+Each burn falsified the previous fix's SCOPE, never its mechanism. The
+mechanism was right on the first try; the location was wrong twice.
+
+| burn | human verdict | what it falsified |
+|---|---|---|
+| `AC-DC-20260808.cdi` | "still stutters … lines up with laser load sounds" | that the stutter was voice count. It was disc I/O — a hypothesis the project had recorded as REFUTED, on a Flycast A/B (`FastGDRomLoad=yes`, no seek model) |
+| `-b` (pager chunked + yield) | "same problem but less laser thrash … actually I think it's still there" | **the LOCATION.** `dc_dvd_pager_read()` is the ARAM pager; the game's own asset loading goes through `DVDRead` → `dc_dvd_read_impl`, and the keep-list loader had three more sites. Most of the bytes were never chunked |
+| `-c` (every read routed) | "certain parts of the music are REPEATING" | **the GUARD.** "Repeating" ≠ silence: an empty ring zero-fills. Repeating means `snd_stream_poll()` never ran — and jaudio's OWN sample fetches hit the `s_audio_busy` guard and returned without polling |
+| `-d` (poll when re-entrant + 512 KB cache) | ⏸ **awaiting** | — |
+
+**Three rules that came out of it, all of them general:**
+
+1. **There is now exactly ONE place a disc read may block:
+   `dc_dvd_read_yielding()` (`dc/src/dc_dvd.c`). Add new `fs_read` calls THERE,
+   never at a call site.** Five sites route through it.
+2. **Yield BEFORE the seek, not only between chunks** — a 100-200 ms head
+   movement cannot be subdivided by any chunk size, so the only defence is
+   entering it with a full ring.
+3. **The re-entrant case is "poll, do not synthesise", not "do nothing".**
+   `snd_stream_poll()` touches no jaudio state and is safe at any depth;
+   re-entering `pc_audio_process_frame` is not.
+
+⭐ **AND THE LARGEST SINGLE WIN WAS NOT CODE AT ALL: `DC_ARAM_WINDOW`
+131072 → 524288.** That value was measured when RAM was the binding constraint;
+RAM stopped binding on 2026-08-06 and nobody re-costed it. Matched runs:
+**disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions
+4,173 → 336**, cache hits unchanged, for 384 KB of a ~2 MB budget.
+**Generalise: when a constraint is lifted, re-cost everything that was sized
+under it.** The build lines in §2 carry the new value.
 
 ## 0f. ⏸ PARKED PENDING HARDWARE CONFIRMATION (2026-08-08)
 
@@ -575,7 +607,7 @@ Common prefix (**note the keep list and the arena — both changed this session*
 ```bash
 DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
 DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-DC_ARAM_WINDOW=131072 DC_ARENA_BYTES=1200000 DC_AUTOSTART=300 DC_SCIF_FAST=1 \
+DC_ARAM_WINDOW=524288 DC_ARENA_BYTES=1200000 DC_AUTOSTART=300 DC_SCIF_FAST=1 \
 ```
 
 **PERF run — no framebuffer probe:**

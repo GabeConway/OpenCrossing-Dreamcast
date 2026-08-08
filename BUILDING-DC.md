@@ -106,7 +106,7 @@ colima (4 cores), `-j4`:
 | `DC_AUTOVAR_INIT` | unset | `zero` → `-ftrivial-auto-var-init=zero`. The A/B for the 99 uninitialised reads the warnscan found |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
 | `DC_ARENA_BYTES` | header | arena size (bucket 6). **Shrink, never grow** — it competes with libc |
-| `DC_ARAM_WINDOW` | header | resident graph-ARAM window. Floor 851,968 (`forest_1st.arc`) |
+| `DC_ARAM_WINDOW` | header (1,048,576) | resident graph-ARAM window. ⚠️ **With the LRU pager ON this is a CACHE, and its size is a DISC-SEEK knob, not just a RAM knob** — the 851,968 "floor" applies only with `DC_ARAM_LRU=0`. **USE 524288 (measured 2026-08-08).** It had been pinned at 131072 since RAM was the binding constraint; RAM stopped binding on 2026-08-06 and nobody revisited it, so instrument samples and archive streaming were still fighting over four 32 KB blocks. Matched 420 s runs, only the window differing: **disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions 4,173 → 336, cache hits unchanged.** On real hardware each avoided read is an avoided 100-200 ms **seek**, which is what a human hears as laser thrash and as the music repeating. Costs 384 KB (`margin` 4,229,708, no OOM) |
 | `DC_DIAG` | `0` | `1` → `PC_DIAG()` bring-up tracing inside `graph_proc` |
 | `DC_FB_PROBE` | unset | `<N>` → guest-side screenshot every N presented frames. Needs `smoke.sh --fb-writeback` to see anything |
 | `DC_ARENA_PROBE` | unset | `<N>` → arena touched/used + libc break every N presented frames |

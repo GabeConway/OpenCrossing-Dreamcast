@@ -1,5 +1,58 @@
 # Session log — what was observed running, in order
 
+## ⭐ 2026-08-08 (session 9, third iteration) — THE STUTTER TOOK THREE BURNS,
+## AND THE BIGGEST FIX WAS A CONSTANT NOBODY HAD RE-COSTED
+
+Each burn falsified the previous fix's SCOPE and never its mechanism.
+
+**Burn `-b` (pager chunked): "same problem but less laser thrash … actually I
+think it's still there."** The chunking worked and was in the wrong function.
+`dc_dvd_pager_read()` is the ARAM pager; the game's own asset loading goes
+`DVDRead` → `dc_dvd_read_impl()`, and the `DC_ASSET_STUB` keep-list loader had
+three more `fs_seek`+`fs_read` pairs. Most of the bytes a scene load reads were
+never chunked. Fixed by making **one** function the only place a disc read may
+block — `dc_dvd_read_yielding()` — with all five sites calling it, plus two
+rules the burn taught: **yield before the seek** (a 100-200 ms head movement
+cannot be subdivided, so the only defence is entering it with a full ring) and
+**a short first chunk** (2 KB, so the yield lands as soon as the head arrives).
+
+**Burn `-c` (every read routed): "certain parts of the music are REPEATING."**
+⭐ That word is the diagnosis. An empty ring produces SILENCE —
+`dc_audio_stream_cb()` zero-fills. Repeating means the AICA channel was never
+handed new bytes, i.e. `snd_stream_poll()` did not run, and snd_stream keeps one
+channel keyed on with a looping buffer. And one path guaranteed it: jaudio's own
+sample fetch (`pc_audio_process_frame → Nas_WaveDmaCallBack → Nas_StartDma →
+ARStartDMA → the pager → a disc read → dc_audio_disc_yield`) hit the
+`s_audio_busy` guard and returned. **The reads most likely to happen WHILE MUSIC
+PLAYS were the only ones in the program getting no service at all.** The guard
+is right about synthesis and wrong about the poll: `snd_stream_poll()` touches
+no jaudio state and is safe at any depth. The re-entrant case polls now
+(`pollonly=` on the yield line, non-zero in the smoke).
+
+### ⭐ AND THE LARGEST WIN WAS NOT CODE — `DC_ARAM_WINDOW` 131072 → 524288
+
+Matched 420 s Flycast runs, only the window differing:
+
+| | 128 KB | **512 KB** |
+|---|---:|---:|
+| disc reads | 4,183 | **358** |
+| bytes off disc | 137,943,392 | **12,597,984** |
+| evictions | 4,173 | **336** |
+| cache hits | 15,605 | 15,930 |
+
+**11.7× fewer reads, i.e. 11.7× fewer SEEKS on hardware**, for 384 KB of a
+~2 MB budget (`MEMLEDGER margin=4,229,708`, no OOM, `ASSET MISSING 0`, scenes
+0 → 3 → 4 → 18 → 9). ⚠️ With the LRU pager on, this knob is a **disc-seek**
+lever and not merely a RAM lever, and the "floor 851,968" note applies only
+with `DC_ARAM_LRU=0`.
+
+**Why it sat at 131072: it was measured when RAM was the binding constraint.**
+That ended on 2026-08-06. **Generalise: when a constraint is lifted, re-cost
+everything that was sized under it** — the value was not wrong when it was set,
+it was wrong the moment the reason for it went away. Historical build lines in
+this file and in `kb/perf-dc.md` / `kb/heap-two-pools.md` still read 131072 and
+are LEFT that way: they record runs that really did use it.
+
 ## ⏸ 2026-08-08 (session 9, later) — A BURN SAYS THE REMAINING STUTTER IS THE
 ## LASER, AND FLYCAST HAD REFUTED THAT ON A MACHINE WITH NO DRIVE
 
