@@ -170,6 +170,7 @@ ENVARGS=(
     -e DC_AUDIO_HEAPLOG="${DC_AUDIO_HEAPLOG:-}"
     -e DC_AUDIO_HEAPLOG_TICK="${DC_AUDIO_HEAPLOG_TICK:-}"
     -e DC_PVR_BATCH_LOG="${DC_PVR_BATCH_LOG:-}"
+    -e DC_PVR_VTXSPLIT="${DC_PVR_VTXSPLIT:-}"
     # P1, the PMCR profiler. Safe in the unconditional form -- unlike G1/G2/G3
     # below, its dc/Makefile guards are `ifneq ($(DC_PMCR),)`, so EMPTY means
     # off and blanking them cannot arm anything.

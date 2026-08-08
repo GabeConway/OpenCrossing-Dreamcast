@@ -1,5 +1,75 @@
 # Session log — what was observed running, in order
 
+## 🔴🔴 2026-08-08 (session 11b) — G5 SPLIT `xform`, AND THE FRAME IS
+## MEMORY-BOUND. EVERY sh4zam MATRIX IDEA IS AIMED AT 0.8 ms OF A 30 ms FRAME.
+
+`[PHASE] us/v` — the number this project optimises against — is **3.24 µs per
+submitted vertex, i.e. 648 SH-4 cycles at 200 MHz**, against maybe 60 cycles of
+actual vertex arithmetic. Nobody had ever asked where the other ~590 went, and
+`kb/research-sh4zam-gap.md` §0a was about to spend a session rewriting six
+FIPRs as two FTRVs on the assumption that the vertex math was the cost.
+
+`-DDC_PVR_VTXSPLIT=16` (G5) brackets seven stages of the vertex loop, sampling
+one primitive in 16. Town, `[SCENE_MODE] 18 -> 9`, `xform=8.9`, `v=2745
+vlit=2613`, `drops=9` of 558,095 samples. Per PRESENTED frame:
+
+```
+[VTXSPLIT] memo=1.68 xf=0.23 lit=0.58 tex=0.62 shade=2.03 post=0.57 emit=2.15
+           | sum=7.87 prims=8929522 samp=558095 memohit=835733 drops=9 1in16
+```
+
+**The ledger closes: `sum 7.87` against `xform 8.9` — 88 % attributed**, the
+1.0 ms residual being per-primitive loop overhead no bracket covers. Three
+consecutive windows printed identical figures to 0.01 ms, so this is not noise.
+
+### What it says, and it is not what the queue assumed
+
+| | ms | share of `xform` |
+|---|---:|---:|
+| **emit** (near clip, divide, `pvr_prim`'s 32 B copy) | **2.15** | 27 % |
+| **shade** (`shade_vertex`, the per-light loop) | **2.03** | 26 % |
+| **memo** (hash + 12-field compare, on EVERY vertex) | **1.68** | 21 % |
+| tex / post | 0.62 / 0.57 | 15 % |
+| **lit** — ⭐ *the six FIPRs §0a wants to replace* | **0.58** | 7 % |
+| **xf** — ⭐ *the position FTRV* | **0.23** | 3 % |
+
+⭐⭐ **§0a and G-D are aimed at 0.58 ms of a 30 ms frame — 1.9 %** — and a
+perfect rewrite takes maybe half of that. `lit` is 222 ns over 2,613 lit
+vertices = **44 cycles**, about what six FIPRs, an FSRRA and a normalize ought
+to cost. The block is not slow. The 2026-08-06 note that called it "already
+optimal" was closer to right than the 2026-08-08 reopening of it, and this
+is the measurement that settles the exchange rather than another argument.
+**Every matrix-unit idea in that document is chasing ~0.8 ms combined.**
+
+⭐⭐⭐ **THE FRAME IS MEMORY-BOUND.** `memo` costs **122 cycles per vertex** for
+a hash and a 12-field compare — that is not arithmetic, it is the random read
+of `verts[s_vmemo_src[slot]]` missing the operand cache. `emit` is a 32-byte
+copy per corner into the store queue. The three memory-shaped stages are
+**5.86 ms, 75 % of `xform`**; the two FP stages are 0.81 ms.
+
+Two independent measurements now say the same thing from opposite ends: this
+one, and `tools/dcopt/icache_map.py` finding the 12-symbol inner draw loop is
+1.4x an 8 KB direct-mapped instruction cache. **And Flycast models neither
+cache**, so both are understatements of the hardware.
+
+### The re-ranking
+
+1. **G-C (emit, 2.15 ms)** — `pvr_dr_*` instead of `pvr_prim`. KOS 2.3 makes it
+   cheap: `pvr_dr_target()` is `pvr_dr_addr ^= 32`, `pvr_dr_commit` is
+   `sq_flush`, and `pvr_list_begin` has already `sq_lock`ed the TA, so DR and
+   `pvr_prim` share one QACR setup and may be mixed.
+2. **`shade_vertex` (2.03 ms)** — has never been on any list. Now second.
+3. **memo (1.68 ms)** — net positive today (~50 % hit rate saves ~4.0 ms for
+   1.68 ms) but keyed on a content compare. G-B replaces it structurally.
+4. **G-B (13.31 ms)** — still the largest block in the project and untouched by
+   all of the above; it is emu64's expansion, upstream of this loop.
+5. §0a / G-D / G-F — 0.58 + 0.23 + 0.70 ms. Last, if ever.
+
+⚠️ **Static camera, one town view** — same caveat as the §3 run it extends.
+⚠️ TMU2's tick is 80 ns and a stage is 100-600 ns, so a single sample is worth
+±1 tick; only the window mean is meaningful and a 0.00 bucket would mean
+"below the noise", not "free".
+
 ## ⭐⭐ 2026-08-08 (session 11) — P1: THE INSTRUMENT FOR THE HARDWARE GAP IS
 ## BUILT, AND THE FREE HOST-SIDE CHECK ALREADY SAYS THE ICACHE CANNOT HOLD THE
 ## INNER LOOP

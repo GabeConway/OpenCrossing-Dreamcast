@@ -2151,6 +2151,92 @@ typedef struct {
 #endif
 } ClipVtx;
 
+/* ==========================================================================
+ * G5 / [VTXSPLIT] — where the 610 cycles per vertex actually go
+ * ==========================================================================
+ * `-DDC_PVR_VTXSPLIT=<N>`, off by default, N = sample one primitive in N.
+ *
+ * WHY THIS EXISTS. `[PHASE] us/v` is the number this project optimises
+ * against, and it sits at **3.05 us per submitted vertex — 610 SH-4 cycles at
+ * 200 MHz.** The arithmetic in the loop it measures is one FTRV, six FIPRs and
+ * a reciprocal square root: call it 60 cycles. **So ~90 % of `xform` is not
+ * the vertex math, and nothing has ever said what it is.**
+ *
+ * That matters immediately, because `kb/research-sh4zam-gap.md` §0a proposes
+ * replacing those six FIPRs with two FTRVs. Against 610 cycles that is a ~5 %
+ * lever wearing the clothes of a headline. This splits the 610 first, for the
+ * same reason G4 split `G_TRIN_INDEPEND` before anyone costed G3:
+ * **measurement rule 7 — an average is not the cost of any part of it.**
+ *
+ * THE BUCKETS, in loop order:
+ *   memo  the per-batch vertex memo: hash + the 12-field compare. Paid on
+ *         EVERY vertex, hit or miss — it is the price of asking
+ *   xf    the position transform (one FTRV, or 16 mul/12 add at -DDC_PVR_NO_FTRV)
+ *   lit   eye + normal: the six FIPRs §0a wants to make two FTRVs, plus the
+ *         normalize. Zero on an unlit batch, which is why `vlit` is next to it
+ *   tex   apply_texgen + the u/v scale
+ *   shade shade_vertex(): the per-light loop
+ *   post  punch-through alpha, the TEV constant/fold overrides, memo store
+ *   emit  emit_triangle x1 or x2: near clip, perspective divide, and
+ *         pvr_prim's 32-byte copy into the store queue — G-C's target
+ *
+ * HOW IT SAMPLES, and why it must. Bracketing every stage of every vertex
+ * would be ~19,000 timer reads a frame; at TMU2's ~80 ns that is 1.5 ms of
+ * probe inside an 8.4 ms measurement. So it samples **one primitive in N** and
+ * scales by the sample count. `prims=`/`samp=` are printed so the scaling can
+ * be checked rather than trusted.
+ *
+ * ⚠️ TMU2 TICKS ARE 80 ns AND A STAGE IS ~100-600 ns. A single sample is
+ * therefore worth ±1 tick and means nothing; only the window mean does. That
+ * is a floor on what this can resolve, and a bucket reported as 0.00 means
+ * "below the noise", never "free". The same clock and the same 80 ns tick as
+ * [GXSPLIT] (dc_gx.c:230), on purpose — the two are comparable.
+ *
+ * ⚠️ It reads TCNT2 directly rather than calling a clock function: one
+ * volatile load, no call, no us->ns conversion. TMU2 counts DOWN.
+ */
+#if defined(DC_PVR_VTXSPLIT) && (DC_PVR_VTXSPLIT) > 0
+#define VS_TCNT2      (*(volatile unsigned int *)0xffd80024)
+#define VS_TICK_NS    80u
+#define VS_WRAP_GUARD 0x00400000u
+
+enum { VS_MEMO = 0, VS_XF, VS_LIT, VS_TEX, VS_SHADE, VS_POST, VS_EMIT,
+       VS_NBUCKET };
+static u64 s_vs_acc[VS_NBUCKET];
+static unsigned int s_vs_prims, s_vs_samples, s_vs_hits, s_vs_drops;
+static const char* const s_vs_name[VS_NBUCKET] = {
+    "memo", "xf", "lit", "tex", "shade", "post", "emit"
+};
+
+/* One sampled primitive's running mark. `on` is evaluated once per primitive
+ * so the whole bracket set compiles to a single predictable branch. */
+typedef struct { unsigned int t; int on; } VsMark;
+
+static inline void vs_charge(VsMark* m, int bucket) {
+    unsigned int now = VS_TCNT2;
+    unsigned int d = m->t - now;      /* DOWN counter */
+    m->t = now;
+    if (d >= VS_WRAP_GUARD) { s_vs_drops++; return; }
+    s_vs_acc[bucket] += d;
+}
+
+#define VS_DECL          VsMark vsm
+#define VS_SAMPLE_BEGIN  do {                                                 \
+        s_vs_prims++;                                                         \
+        vsm.on = ((s_vs_prims % (unsigned int)(DC_PVR_VTXSPLIT)) == 0u);      \
+        if (vsm.on) { s_vs_samples++; vsm.t = VS_TCNT2; }                     \
+    } while (0)
+#define VS_MARK(b)       do { if (vsm.on) vs_charge(&vsm, (b)); } while (0)
+#define VS_HIT           do { if (vsm.on) s_vs_hits++; } while (0)
+#define VS_SAMPLE_END    ((void)0)
+#else
+#define VS_DECL          ((void)0)
+#define VS_SAMPLE_BEGIN  ((void)0)
+#define VS_MARK(b)       ((void)0)
+#define VS_HIT           ((void)0)
+#define VS_SAMPLE_END    ((void)0)
+#endif
+
 static void emit_projected(const ClipVtx* c, unsigned int flags) {
     pvr_vertex_t pv;
     float inv_w = 1.0f / c->w;
@@ -3064,7 +3150,9 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
     for (i = 0; i + per_prim <= count; i += step) {
         ClipVtx cv[4];
         int k;
+        VS_DECL;
 
+        VS_SAMPLE_BEGIN;
         for (k = 0; k < per_prim; k++) {
             const DCGXVertex* v = &verts[i + k];
             float ox = v->position[0], oy = v->position[1], oz = v->position[2];
@@ -3077,8 +3165,11 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 vmemo_same(v, &verts[s_vmemo_src[slot]])) {
                 cv[k] = s_vmemo_val[slot];
                 dc_pvr_vmemo_hit++;
+                VS_MARK(VS_MEMO);
+                VS_HIT;
                 continue;
             }
+            VS_MARK(VS_MEMO);
 #endif
 
 #ifdef DC_PVR_NO_FTRV
@@ -3097,6 +3188,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 cv[k].x = tx; cv[k].y = ty; cv[k].z = tz; cv[k].w = tw;
             }
 #endif
+            VS_MARK(VS_XF);
 
 #if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)
             if (need_light)
@@ -3123,13 +3215,16 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 }
             }
             }
+            VS_MARK(VS_LIT);
 
             apply_texgen(v, &cv[k].u, &cv[k].v);
             if (tex) {
                 cv[k].u *= tex->u_scale;
                 cv[k].v *= tex->v_scale;
             }
+            VS_MARK(VS_TEX);
             cv[k].argb = shade_vertex(v, eye, nrm);
+            VS_MARK(VS_SHADE);
 #ifndef DC_PVR_NO_PUNCHTHRU
 #ifndef DC_PVR_PT_KEEP_VTXALPHA
             /* SHADE ALPHA IS NOT AN OPACITY, AND IT MUST NOT REACH THE PT
@@ -3362,6 +3457,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             s_vmemo_tag[slot] = s_vmemo_gen;
             s_vmemo_val[slot] = cv[k];
 #endif
+            VS_MARK(VS_POST);
         }
 
         if (per_prim == 3) {
@@ -3373,6 +3469,8 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             emit_triangle(&cv[0], &cv[1], &cv[2]);
             emit_triangle(&cv[0], &cv[2], &cv[3]);
         }
+        VS_MARK(VS_EMIT);
+        VS_SAMPLE_END;
     }
 
 #ifdef DC_PVR_BATCH_LOG
@@ -3462,6 +3560,35 @@ void dc_pvr_report(void) {
             "dropped=%u unsupported_prims=%u\n",
             s_frames, s_batches, s_tris_in, s_tris_out, s_tris_clipped,
             s_tris_dropped, s_prim_unsupported);
+#if defined(DC_PVR_VTXSPLIT) && (DC_PVR_VTXSPLIT) > 0
+    /* G5. Free-running totals scaled back up by the sample rate, then divided
+     * by frames — so this is **ms per PRESENTED frame**, the same denominator
+     * as [PHASE] and [GXSPLIT], and it should sum to roughly [PHASE] xform=.
+     *
+     * A shortfall against xform= is not a bucket being interesting: it is
+     * per-primitive loop overhead that no bracket covers, and it is printed as
+     * `sum=` so the reader does not have to do that subtraction to find out. */
+    {
+        int b;
+        double scale = (double)(DC_PVR_VTXSPLIT);
+        double fr = s_frames ? (double)s_frames : 1.0;
+        double sum = 0.0;
+        char line[256];
+        int n = 0;
+        for (b = 0; b < VS_NBUCKET; b++) {
+            double ms = (double)s_vs_acc[b] * (double)VS_TICK_NS * scale
+                        / 1e6 / fr;
+            sum += ms;
+            n += snprintf(line + n, sizeof(line) - (size_t)n, "%s=%.2f ",
+                          s_vs_name[b], ms);
+            if (n < 0 || (size_t)n >= sizeof(line)) break;
+        }
+        DC_LOGE("[VTXSPLIT] %s| sum=%.2f prims=%u samp=%u memohit=%u "
+                "drops=%u 1in%u\n",
+                line, sum, s_vs_prims, s_vs_samples, s_vs_hits, s_vs_drops,
+                (unsigned int)(DC_PVR_VTXSPLIT));
+    }
+#endif
 #ifndef DC_PVR_NO_TEX1ALPHA
     DC_LOGE("[DC/PVR] tex1alpha batches=%u of %u\n", s_tex1_batches, s_batches);
 #endif

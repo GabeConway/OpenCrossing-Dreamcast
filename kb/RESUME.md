@@ -1,5 +1,44 @@
 # RESUME — pick the session back up here
 
+## 🔴🔴 SESSION 11b (2026-08-08) — `xform` IS SPLIT, AND THE FRAME IS
+## MEMORY-BOUND. THE sh4zam QUEUE IS RE-RANKED. READ THIS BEFORE §1 BELOW.
+
+`us/v = 3.24` is **648 SH-4 cycles per vertex** against ~60 cycles of vertex
+arithmetic. G5 (`-DDC_PVR_VTXSPLIT=16`, `dc/src/dc_pvr.c`) split it, town,
+sampling 1 primitive in 16, ledger closing at **88 %**:
+
+```
+[VTXSPLIT] memo=1.68 xf=0.23 lit=0.58 tex=0.62 shade=2.03 post=0.57 emit=2.15
+           | sum=7.87  (against [PHASE] xform=8.9)
+```
+
+⭐⭐ **`kb/research-sh4zam-gap.md` §0a/G-D are aimed at `lit` = 0.58 ms of a
+30 ms frame — 1.9 %, and a perfect FTRV rewrite takes about half of it.** At
+222 ns over 2,613 lit vertices the block runs at **44 cycles**, which is what
+six FIPRs, an FSRRA and a normalize should cost. **It was never slow.** The
+position FTRV is **0.23 ms**. Every matrix-unit idea in that document is
+chasing ~0.8 ms combined; §0a is demoted to the bottom on a measurement.
+
+⭐⭐⭐ **THE FRAME IS MEMORY-BOUND, NOT FPU-BOUND.** `memo` is **122 cycles a
+vertex** for a hash and a 12-field compare — that is the random read into
+`verts[]` missing the operand cache, not arithmetic. With `emit` (a 32-byte
+copy per corner into the SQ) and `shade`, the memory-shaped stages are
+**5.86 ms, 75 % of `xform`**. Independently corroborated by
+`tools/dcopt/icache_map.py`: the 12-symbol inner loop is **1.4x** an 8 KB
+direct-mapped icache. ⚠️ **Flycast models neither cache, so both are
+understatements.**
+
+**The queue that follows, replacing §1's:**
+1. **G-C — `emit`, 2.15 ms.** `pvr_dr_*` instead of `pvr_prim`. KOS 2.3:
+   `pvr_dr_target()` is `pvr_dr_addr ^= 32`, `pvr_dr_commit` is `sq_flush`,
+   and `pvr_list_begin` already `sq_lock`s the TA — DR and `pvr_prim` share
+   one QACR setup and can be mixed. ⚠️ §4e first.
+2. **`shade_vertex` — 2.03 ms.** Never examined, never on any list.
+3. **memo — 1.68 ms.** Net positive today; G-B replaces it structurally.
+4. **G-B — 13.31 ms**, still the largest block in the project and upstream of
+   everything above. Unchanged, and still a multi-session change.
+5. §0a / G-D / G-F — 0.58 + 0.23 + 0.70 ms. Last, if ever.
+
 ## 🔴 SESSION 11 (2026-08-08) — THE HARDWARE GAP NOW HAS AN INSTRUMENT, AND IT
 ## IS WAITING ON A BURN. READ THIS BEFORE §0h, WHICH IT ANSWERS HALF OF.
 

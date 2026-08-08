@@ -506,6 +506,61 @@ because that predates session 9's fourth-iteration levers. `fps_p50` **25.9**.
 **Inside TRIN: `cull 0.70 + xform 8.38 = 9.08` attributed, `13.31 ms` NOT —
 43.8 % of the entire draw.**
 
+### 🔴 2026-08-08 — G5 SPLIT `xform` AND IT RE-RANKS THIS WHOLE DOCUMENT
+
+`-DDC_PVR_VTXSPLIT=16` (`dc/src/dc_pvr.c`). Town, `[SCENE_MODE] 18 -> 9`,
+`us/v=3.24`, `xform=8.9 ms`, `v=2745 vlit=2613`. Per PRESENTED frame:
+
+| stage | ms | of xform | what it is |
+|---|---:|---:|---|
+| **emit** | **2.15** | 27 % | near clip + perspective divide + `pvr_prim`'s 32-byte copy — **G-C** |
+| **shade** | **2.03** | 26 % | `shade_vertex()`, the per-light loop |
+| **memo** | **1.68** | 21 % | the vertex memo's hash + 12-field compare, **paid on every vertex** |
+| tex | 0.62 | 8 % | `apply_texgen` + uv scale |
+| **lit** | **0.58** | 7 % | ⭐ **the six FIPRs §0a is about** |
+| post | 0.57 | 7 % | PT alpha, TEV const/fold, memo store |
+| **xf** | **0.23** | 3 % | ⭐ **the position FTRV** |
+| sum / xform | 7.87 / 8.9 | 88 % | the 1.0 ms residual is per-primitive loop overhead |
+
+⭐⭐ **§0a AND G-D ARE AIMED AT 0.58 ms OF A 30 ms FRAME — 1.9 %, and a
+perfect FTRV rewrite takes maybe half of it.** `lit` is 222 ns over 2,613 lit
+vertices = **44 cycles**, which is about what six FIPRs, an FSRRA and a
+normalize *should* cost. The block is not slow. **§0a is hereby DEMOTED from
+#2 to the bottom of the list**, on a measurement rather than an argument —
+and the 2026-08-06 correction it "reopened" was closer to right than the
+reopening was. The position FTRV is **0.23 ms**: every matrix-unit idea in
+this document is chasing ~0.8 ms combined.
+
+⭐⭐⭐ **THE FRAME IS MEMORY-BOUND, NOT FPU-BOUND.** `memo` costs **122 cycles
+per vertex** for a hash and a 12-field compare — that is not arithmetic, that
+is the random access into `verts[s_vmemo_src[slot]]` missing the operand
+cache. `emit` is `pvr_prim` copying 32 bytes per corner into the store queue.
+Together with `shade`, the three memory-shaped stages are **5.86 ms, 75 % of
+`xform`**, and the two FP stages are 0.81 ms. This is the same conclusion the
+icache work reached from the other end (`tools/dcopt/icache_map.py`: the
+12-symbol inner loop is 1.4x an 8 KB direct-mapped cache), and it means
+**Flycast understates all of it** — it models no cache at all.
+
+**The re-ranking that follows from this:**
+
+1. **G-C (emit, 2.15 ms)** — now #1. `pvr_dr_*` writes the vertex straight into
+   the store queue and deletes both the stack `pvr_vertex_t` and `sq_fast_cpy`'s
+   read-back. ⚠️ Read §4e first, and note KOS 2.3 makes this easy: `pvr_dr_target()`
+   is `pvr_dr_addr ^= 32` and `pvr_dr_commit` is `sq_flush`, while
+   `pvr_list_begin` has already `sq_lock`ed the TA — so DR and `pvr_prim` share
+   one QACR setup and can be mixed.
+2. **`shade_vertex` (2.03 ms)** — never examined, never on this list. It is now
+   the second largest stage in the vertex path.
+3. **memo (1.68 ms)** — the cache is still net positive (~50 % hit rate saves
+   ~4.0 ms of stages for 1.68 ms), but it is keyed on a 12-field content
+   compare. **G-B would replace it structurally**: emu64's index stream already
+   knows which corners share a vertex, so an index-keyed memo needs no hash, no
+   compare and no random read, and would hit ~100 %.
+4. **G-B (13.31 ms)** — still the largest single block in the project, and
+   untouched by any of the above: it is emu64's expansion loop, upstream of
+   everything measured here.
+5. §0a / G-D / G-F — **0.58 + 0.23 + 0.70 ms.** Do these last, if ever.
+
 ### The ranking, re-costed against 30.39 ms
 
 | gap | addressable | verdict |

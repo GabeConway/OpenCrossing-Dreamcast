@@ -1008,6 +1008,25 @@ ifneq ($(DC_TEX_LOG),)
 DEFINES += -DDC_TEX_LOG=$(DC_TEX_LOG)
 endif
 
+# DC_PVR_VTXSPLIT=<N> — G5. Split [PHASE] xform= into its seven stages
+# (memo / xf / lit / tex / shade / post / emit), sampling one primitive in N.
+# Absent by default.
+#
+# WHY: us/v is 3.05, i.e. 610 SH-4 cycles per submitted vertex, against maybe
+# 60 cycles of actual vertex math. ~90 % of xform has never been attributed,
+# and kb/research-sh4zam-gap.md §0a's FIPR->FTRV proposal aims at part of that
+# 60. Same argument G4 made before G3 was costed: split it first
+# (measurement rule 7).
+#
+# N=16 is a reasonable start: ~900 primitives a frame means ~56 samples, and
+# the probe costs ~56 x 8 TMU reads instead of ~19,000.
+# ⚠️ TMU2's tick is 80 ns and a stage is 100-600 ns, so a single sample is
+# worth +/-1 tick. Only the window mean means anything, and a 0.00 bucket is
+# "below the noise", not "free".
+ifneq ($(DC_PVR_VTXSPLIT),)
+DEFINES += -DDC_PVR_VTXSPLIT=$(DC_PVR_VTXSPLIT)
+endif
+
 # DC_PVR_BATCH_LOG=<N> — dump every renderer batch's state on every Nth frame.
 # Set it to the SAME N as DC_FB_PROBE so the lines describe the frame the
 # screenshot captured; that pairing is what lets a region of a decoded PNG be
