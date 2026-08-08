@@ -378,6 +378,14 @@ void pc_audio_start_producer_thread(void);
 /* Drives jaudio synthesis and services the KOS stream. Called once per frame
  * from VIWaitForRetrace; budgeted so it can never stall the game loop. */
 void dc_audio_pump(void);
+
+/* Produce audio from INSIDE a blocking disc read (dc_dvd.c chunks its fs_read
+ * and calls this between chunks). Reentrancy-guarded in both directions —
+ * synthesis can itself fetch a sample and land back in the pager — so it is
+ * safe to call from anywhere that is about to block for longer than the ~224 ms
+ * of buffer the audio path carries. Compiles to an empty body when DC_AUDIO=0.
+ * Rationale, and why Flycast could never show the bug: dc/src/dc_audio.c. */
+void dc_audio_disc_yield(void);
 void pc_audio_mq_init(void);
 void pc_audio_mq_shutdown(void);
 void pc_audio_update_volumes(void);

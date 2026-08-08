@@ -1186,6 +1186,104 @@ void pc_audio_start_producer_thread(void) {
  *    disabled, game64.c_inc:1026 tests !p5) — which is exactly today's
  *    DC_AUDIO=0 behaviour in every scene, so a disarmed scene is no worse off
  *    than the shipping default. */
+/* ==========================================================================
+ * THE DISC YIELD — why the music stutters on real hardware and not in Flycast
+ * ==========================================================================
+ * HUMAN, ON A CD-R BURN, 2026-08-08: "I can hear it's stuttering on disk load
+ * … the stutter almost perfectly lines up with laser load sounds."
+ *
+ * ⚠️ THIS REOPENS A HYPOTHESIS THE PROJECT RECORDED AS REFUTED. "Disc-cache
+ * misses cause the stutter" was killed on 2026-08-06 by taking the ARAM cache
+ * from 4 to 16 blocks: hit rate 83 -> 97.9 %, disc reads 3.54 -> 0.77/s, and
+ * the stutter did not move. But that A/B was run IN FLYCAST, whose harness
+ * sets FastGDRomLoad=yes and which models no seek time and no 500 KB/s
+ * transfer at all. It measured a machine where a disc read is free. On silicon
+ * it is not, and the refutation never applied there. (Same shape as the voice
+ * census that measured silence — kb/traps.md.)
+ *
+ * THE ARITHMETIC, and it says the cushion cannot survive one read:
+ *
+ *   our ring     RING_BUF_SAMPLES - DC_AUDIO_HEADROOM = 6,144 s16
+ *                = 3,072 stereo pairs @ 32 kHz         =  96 ms
+ *   SPU buffer   DC_AUDIO_STREAM_BYTES 8,192 B/channel = 128 ms
+ *                                               total  ~224 ms
+ *
+ * against a CD-R seek of 100-200 ms FOLLOWED BY a transfer at ~500 KB/s — so a
+ * 256 KB archive read is ~500 ms of wall clock in which NOTHING refills either
+ * buffer, because dc_dvd_pager_read() blocks in one fs_read on the game thread
+ * and the audio pump only runs once per logic tick. The AICA runs its buffer
+ * dry and repeats the last fragment. That is the sound being described, and it
+ * lines up with the laser because it IS the laser.
+ *
+ * THE FIX IS NOT A BIGGER BUFFER. Buying 500 ms of cushion means 500 ms of
+ * latency on every footstep and every UI blip, permanently, to hide an event
+ * that happens a few times a minute. Instead the disc read is chunked and
+ * audio is produced BETWEEN the chunks — the stall is used rather than padded,
+ * and steady-state latency is unchanged.
+ *
+ * ⚠️ REENTRANCY IS REAL, NOT THEORETICAL. Synthesis can fetch a sample:
+ * pc_audio_process_frame -> Nas_WaveDmaCallBack (system.c:326) -> Nas_StartDma
+ * -> ARStartDMA -> dc_aram.c -> dc_dvd_pager_read -> here. `s_audio_busy` is
+ * what stops that recursing; the inner call returns immediately and the outer
+ * read simply completes without yielding. It also guards dc_audio_pump()
+ * itself, so a pager read reached from the ordinary pump cannot re-enter
+ * synthesis either.
+ *
+ * Kill switch: DC_DVD_READ_CHUNK=0 (dc/src/dc_dvd.c) restores the single
+ * fs_read. Counters: `yield calls=/frames=` on the [DC/AUDIO] line.
+ */
+#if DC_AUDIO && !defined(DC_HOST_STUB)
+#ifndef DC_AUDIO_DISC_FRAMES
+/* Frames one yield may synthesise. The pump's own cap is 2, which is right for
+ * a per-tick producer that is keeping level; a yield is CATCHING UP inside a
+ * stall and has to be allowed to outrun consumption or the ring drains anyway.
+ * At DC_DVD_READ_CHUNK = 16 KB the chunk is ~32 ms of CD-R time and 2 frames
+ * is ~35 ms of audio, so 4 is double the steady-state requirement. */
+#define DC_AUDIO_DISC_FRAMES 4
+#endif
+
+static int s_audio_busy   = 0;   /* reentrancy guard, both directions */
+static u32 s_yield_calls  = 0;
+static u32 s_yield_frames = 0;
+
+void dc_audio_disc_yield(void) {
+    int frames = 0;
+
+    if (!audio_open || s_scene_mask == 0u) return;
+    if (s_audio_busy) return;          /* this read WAS the audio path */
+
+    s_audio_busy = 1;
+    s_yield_calls++;
+
+#if DC_AICA_CLOCK_KICK
+    /* The ARM7 wedge workaround has to keep running here too — a stall is
+     * exactly when it must not be starved. */
+    dc_aica_clock_kick();
+#endif
+
+    /* Deliberately does NOT re-ask the scene gate: dc_audio_gate_update() has
+     * a settle counter tied to the tick rate, and a disc read is not a tick.
+     * Use the arm state the last pump established. */
+    while (s_armed && frames < (int)(DC_AUDIO_DISC_FRAMES)) {
+        if (pc_audio_get_buffer_fill() >=
+            (int)(RING_BUF_SAMPLES - DC_AUDIO_HEADROOM))
+            break;                     /* ring is as full as it ever gets */
+        pc_audio_process_frame();
+        frames++;
+    }
+    s_yield_frames += (u32)frames;
+
+    /* The poll matters even when frames == 0: it is what moves bytes from the
+     * ring into AICA RAM, and during a long read it is the only thing keeping
+     * the SPU's own 128 ms buffer from running dry. */
+    if (s_hnd != SND_STREAM_INVALID) (void)snd_stream_poll(s_hnd);
+
+    s_audio_busy = 0;
+}
+#else
+void dc_audio_disc_yield(void) { }
+#endif
+
 void dc_audio_pump(void) {
 #if DC_AUDIO && !defined(DC_HOST_STUB)
     u64 t0;
@@ -1193,6 +1291,11 @@ void dc_audio_pump(void) {
     int armed;
 
     if (!audio_open) return;
+    /* Paired with dc_audio_disc_yield()'s guard: a pager read reached from
+     * inside this pump must not re-enter synthesis. Set for the whole body,
+     * cleared on every return path below. */
+    if (s_audio_busy) return;
+    s_audio_busy = 1;
 
     /* BEFORE the scene-mask early return, and that placement is the point: a
      * DC_AUDIO_SCENES=none build still runs jaudio's init and still has
@@ -1206,7 +1309,7 @@ void dc_audio_pump(void) {
     /* DC_AUDIO_SCENES selected nothing: AIInit never opened a device, so there
      * is no stream to poll and no ARM7 to keep alive. Cost of a linked-in but
      * unselected audio subsystem is this compare. */
-    if (s_scene_mask == 0u) return;
+    if (s_scene_mask == 0u) { s_audio_busy = 0; return; }
 
 #if DC_AICA_CLOCK_KICK
     /* Before anything else: if the ARM7 is wedged, nothing downstream of it can
@@ -1443,9 +1546,14 @@ void dc_audio_pump(void) {
 #endif
                 (unsigned)dc_aica_pos(0), (unsigned)dc_aica_pos(1),
                 (unsigned)dc_aica_pos(2), (unsigned)dc_aica_pos(3));
+        DC_LOGE("[DC/AUDIO] yield calls=%u frames=%u (audio produced INSIDE a "
+                "blocking disc read)\n",
+                (unsigned)s_yield_calls, (unsigned)s_yield_frames);
         s_pump_calls = 0; s_pump_frames = 0; s_pump_budget_hits = 0;
         s_pump_usec = 0;
+        s_yield_calls = 0; s_yield_frames = 0;
     }
+    s_audio_busy = 0;
 #endif
 }
 

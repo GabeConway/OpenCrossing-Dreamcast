@@ -220,7 +220,59 @@ int dc_dvd_pager_read(int entry, unsigned int off, void* dst, unsigned int len) 
     dvd_pager_use[i] = ++dvd_pager_clock;
 
     if (fs_seek(fd, (s32)off, SEEK_SET) < 0) return -1;
+
+    /* ⚠️ THIS READ IS WHERE THE MUSIC STUTTERS ON REAL HARDWARE.
+     *
+     * It blocks on the game thread, and the audio pump runs once per logic
+     * tick — so for the whole duration of the read NOTHING refills our ring
+     * (96 ms) or the SPU's own buffer (128 ms). A CD-R seek is 100-200 ms and
+     * then transfers at ~500 KB/s, so a 256 KB archive read is ~500 ms of
+     * silence-by-starvation and the AICA repeats its last fragment. Human, on
+     * a burn: "the stutter almost perfectly lines up with laser load sounds."
+     *
+     * ⚠️ FLYCAST CANNOT SEE THIS. The harness runs FastGDRomLoad=yes and the
+     * emulator models neither seek nor transfer rate, which is why the
+     * 2026-08-06 A/B that took the ARAM hit rate 83 -> 97.9 % saw no change
+     * and the disc hypothesis was recorded as refuted. It was refuted on a
+     * machine where this line is free.
+     *
+     * So the read is chunked and audio is produced BETWEEN chunks. Chunking a
+     * sequential read on an already-open fd adds no seeks — the head keeps
+     * moving forward — and the yield is reentrancy-guarded, because synthesis
+     * can itself fetch a sample and land back in this function.
+     *
+     * Sizing: at ~500 KB/s a 16 KB chunk is ~32 ms of drive time, and one
+     * yield may synthesise 4 DAC frames (~70 ms of audio). Production
+     * therefore outruns consumption inside the stall, which is the point —
+     * the ring should come OUT of a long read fuller than it went in.
+     *
+     * Kill switch: DC_DVD_READ_CHUNK=0 restores the single fs_read verbatim. */
+#ifndef DC_DVD_READ_CHUNK
+#define DC_DVD_READ_CHUNK 16384
+#endif
+#if (DC_DVD_READ_CHUNK) > 0
+    {
+        u32 done = 0;
+        got = 0;
+        while (done < len) {
+            u32 want = len - done;
+            s32 n;
+            if (want > (u32)(DC_DVD_READ_CHUNK)) want = (u32)(DC_DVD_READ_CHUNK);
+            n = (s32)fs_read(fd, (u8*)dst + done, (size_t)want);
+            if (n <= 0) break;
+            done += (u32)n;
+            got = (s32)done;
+            /* AFTER the chunk, not before: the first chunk should start as
+             * soon as possible, since the seek has already been paid and the
+             * caller is blocked either way. Skipped on the last chunk — the
+             * ordinary pump is a few instructions away by then. */
+            if (done < len) dc_audio_disc_yield();
+            if ((u32)n < want) break;      /* short read: EOF */
+        }
+    }
+#else
     got = (s32)fs_read(fd, dst, (size_t)len);
+#endif
 
     dvd_pager_reads++;
     if (got > 0) dvd_pager_bytes += (unsigned int)got;
