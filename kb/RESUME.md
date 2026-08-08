@@ -1,5 +1,16 @@
 # RESUME — pick the session back up here
 
+## SESSION 8 (2026-08-08) — COSMETIC ONLY. THE RANKED LIST BELOW IS UNCHANGED
+
+`762ebbd` added a "SPECIAL THANKS TO" block to the boot splash (ACreTeam,
+Cuyler36, Dia2809, flyngmt, Falco Girgis) and renamed the README's `Credits`
+to `Hall of Heroes` with the same five names in the same order. **Keep the two
+lists in step** — the screen is the credits most people will ever see.
+No engine, RAM or perf change: 94 B of `.rodata`, `.text` still 2,871,792 B,
+the verification run still reaches the town at 29.8 FPS / 99 %. Kill switch
+`-DDC_SPLASH_NO_THANKS`. **Session 7's item 1 (the music) is still the top of
+the queue and nothing in it was touched.**
+
 ## ⭐⭐⭐ SESSION 7 (2026-08-06) — READ THIS FIRST
 
 1. 🔴 **THE MUSIC NEVER PLAYS, AND IT IS NOT THE SYNTHESISER.** The audio
