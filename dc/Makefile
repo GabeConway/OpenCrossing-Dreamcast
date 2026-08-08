@@ -1170,8 +1170,26 @@ DC_CXX := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(DC_DIR)/src/*.cpp)))
 # is a := assignment far above this line and would expand an empty SHZ_DIR into
 # a bare `-I/include`, which is a real directory on some systems and silently
 # not this one.
-SHZ_C := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(SHZ_DIR)/source/*.c)))
+# G-A (kb/research-sh4zam-gap.md §1): the glob below USED TO BE source/*.c only,
+# i.e. the four top-level files. Upstream's CMakeLists names SEVEN sources for a
+# Dreamcast build, and the three missing ones are all under source/sh4/. Without
+# them the library half-links: shz_fft, shz_sq_memcpy32, shz_memcpy128,
+# shz_memset8 and the shz_xmtrx_load_apply_store_* forms have no definition, and
+# the only reason nothing broke is that nothing in dc/ called them yet.
+#
+# ⚠️ source/sw/ IS DELIBERATELY NOT GLOBBED, and a recursive wildcard here is a
+# BUILD BREAK, not a slowdown: shz_xmtrx_sw.c defines its own xmtrx_state_ that
+# conflicts with the SH-4 backend. The old glob excluded it by accident of
+# depth; this list excludes it on purpose. Name the three files, do not recurse.
+SHZ_C := $(patsubst $(ROOT)/%,%,$(sort $(wildcard $(SHZ_DIR)/source/*.c) \
+                                       $(SHZ_DIR)/source/sh4/shz_complex_sh4.c))
 DC_C  += $(SHZ_C)
+
+# The two hand-written .s files. Plain gas syntax (`!` comments, no cpp
+# directives), so they are assembled, not preprocessed — hence their own rule
+# near the bottom of this file rather than a TU_LANG override here.
+SHZ_S := $(patsubst $(ROOT)/%,%,$(SHZ_DIR)/source/sh4/shz_xmtrx_sh4.s \
+                                $(SHZ_DIR)/source/sh4/shz_mem_sh4.s)
 
 # Padclamp.c lives under the excluded src/static/dolphin/pad/ but is pure math
 # (analog-stick clamping) with no Dolphin hardware dependency. The PC port adds
@@ -1274,8 +1292,12 @@ DC_CXX_OBJS   := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(DC_CXX)))
 CXXFROMC_OBJS := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(CXXFROMC_SRC)))
 C11_OBJS      := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(C11_SRC)))
 
-OBJS := $(GAME_C_OBJS) $(GAME_CXX_OBJS) $(DC_C_OBJS) $(DC_CXX_OBJS)
-DEPS := $(OBJS:.o=.d)
+SHZ_S_OBJS    := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(SHZ_S)))
+
+OBJS := $(GAME_C_OBJS) $(GAME_CXX_OBJS) $(DC_C_OBJS) $(DC_CXX_OBJS) $(SHZ_S_OBJS)
+# The .s objects carry no -MMD (gcc does not run cpp on a lowercase .s), so
+# filter their would-be .d out rather than -include a file that never appears.
+DEPS := $(filter %.c.d %.cpp.d,$(OBJS:.o=.d))
 
 # =============================================================================
 # Per-object flag variables (target-specific; defaults below, overrides after)
@@ -1363,6 +1385,14 @@ $(DC_CXX_OBJS): TU_OPT  = $(DC_OPT) -fno-strict-aliasing -fwrapv -fsigned-char
 # the $(DC_C_OBJS) rules above, which also match these objects.
 SHZ_OBJS := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(SHZ_C)))
 $(SHZ_OBJS): TU_LANG = -std=gnu11 -w
+
+# -DNDEBUG, scoped to sh4zam ONLY — not to dc/src, not to the decomp tree.
+# sh4zam's memory and inline-asm routines carry assert()s on alignment and on FP
+# mode that are ON by default, and <https://sh4zam.com/tips.html> §"Non-Debug
+# Builds" says to build with NDEBUG. Ours would sit inside the vertex loop.
+# Scoped rather than global because the decomp tree's own asserts are not ours
+# to switch off in the same edit.
+$(SHZ_OBJS): TU_DEFS = -DNDEBUG
 
 # KOS owns main(). Rename the game's two entry points, same as the PC build.
 #
@@ -1658,6 +1688,13 @@ $(OBJDIR)/%.c.o: $(ROOT)/%.c
 $(OBJDIR)/%.cpp.o: $(ROOT)/%.cpp
 	@echo "  CXX $*.cpp"
 	$(COMPILE)
+
+# sh4zam's two .s files. Lowercase .s means gcc assembles WITHOUT running cpp,
+# so $(PRELUDE)/$(DEFINES)/-MMD would all be dead weight or errors here; only
+# $(GC_CFLAGS) and the KOS arch flags kos-cc injects matter.
+$(OBJDIR)/%.s.o: $(ROOT)/%.s
+	@echo "  AS  $*.s"
+	$(Q)mkdir -p $(@D) && $(KCC) $(GC_CFLAGS) -c $< -o $@
 
 # --- Link --------------------------------------------------------------------
 # Response file: 3900 objects is ~250 KB of command line. Under ARG_MAX on

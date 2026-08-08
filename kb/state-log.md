@@ -1,5 +1,125 @@
 # Session log — what was observed running, in order
 
+## ⭐ 2026-08-08 (session 10) — G-A LANDED, AND THE DENOMINATOR EVERY sh4zam
+## PROPOSAL WAS RANKED AGAINST IS NOW MEASURED RATHER THAN QUOTED
+
+Two things happened. One is mechanical and shipped; the other retires a number
+this project has been quoting since 2026-08-06.
+
+### G-A — sh4zam could not link, now it can. Byte-neutral so far.
+
+`dc/Makefile` globbed `source/*.c`, top level only, so **five out-of-line
+symbols had no definition** and anything calling `shz_fft`, `shz_sq_memcpy32`,
+`shz_memcpy128`, `shz_memset8` or the `shz_xmtrx_load_apply_store_*` forms
+could not have linked. Nothing did, which is why nothing broke.
+
+Fixed by naming `source/sh4/shz_complex_sh4.c` in the glob, adding `SHZ_S` for
+the two `.s` files, and adding a `$(OBJDIR)/%.s.o: $(ROOT)/%.s` rule.
+`source/sw/` stays out — `shz_xmtrx_sw.c` defines a conflicting `xmtrx_state_`,
+so a *recursive* glob here is a build break, not a slowdown. `-DNDEBUG` is
+scoped to `$(SHZ_OBJS)` only (sh4zam's alignment/FP-mode asserts are on by
+default and would sit in the vertex loop).
+
+Mechanical notes worth keeping: lowercase `.s` means gcc runs **no cpp**, so
+that rule carries no `-MMD`, no prelude and no `$(DEFINES)`, and `DEPS` filters
+the would-be `.d` out rather than `-include`ing a file that never appears.
+
+**Verified, not assumed.** All five symbols are `T` in the objects, and a
+throwaway TU calling every one of them links clean under `kos-cc -DNDEBUG`.
+⚠️ **`sh-elf-nm` on `AnimalCrossing.elf` finds ZERO of them** — nothing in `dc/`
+calls them yet, so `--gc-sections` drops every one. **G-A buys capability, not
+speed.** `.text` = 2,882,948 B on the town build line; do NOT read the 300 B
+against this log's earlier 2,883,248 as a saving, the two were never built
+back-to-back.
+
+### 🔴 THE RE-MEASUREMENT. "34.4 ms of a 45.6 ms frame, 75 %" IS DEAD.
+
+`G_TRIN_INDEPEND` had not been measured since G3 shipped. Everything in
+`kb/research-sh4zam-gap.md` §1 was ranked against a **pre-G3, silent** build.
+
+Run `run-g1`, town, steady state, 430 `[EMU64H]` windows, averaged over the
+last 60. `[EMU64H]` **doubled** (rule 9); `[PHASE]` **not**.
+
+| | per logic tick (as printed) | **per presented frame** |
+|---|---:|---:|
+| `tot` | 16.41 ms | **32.82 ms** |
+| `TRIN_INDEPEND` | 11.20 / 127 calls | **22.40 ms / 254 calls** |
+| `gap` | 2.64 ms | 5.28 ms |
+| `draw` / `skip` | — | 30.39 / 2.57 ms |
+| `cull` / `xform` | — | 0.70 / 8.38 ms |
+| `us/v` | — | 3.05 |
+
+**Self-check `tot×2` vs `draw+skip`: 32.82 vs 32.97, −0.4 %.** The instrument
+agrees with itself. `[EMU64H] armed, period=1`, no `DISABLED`, `[EMU64C] cum
+reinst=0` — so G1 did not lose slots 59/60 to G3.
+
+**The new statement: `TRIN_INDEPEND` is 22.40 ms of a 30.39 ms draw — 73.7 %.**
+The *share* barely moved. The *absolute* fell by a third, and the frame is far
+faster than the 49.9 ms this log records two entries up, because that figure
+predates session 9's fourth-iteration levers (`DC_ARAM_WINDOW` 1 MB,
+`DC_AUDIO_VOICES=12`, `DC_AUDIO_DISC_FRAMES=8`, `DC_AUDIO_MAX_FRAMES=6`).
+`fps_p50` **25.9** against the logged 23.2, `deepest_scene 18`, scene edges
+`0 → 3 → 4 → 18 → 9`, `aram LOST 0`, `dropped/unsup 0/0`, `tex rejects 0`.
+
+**Inside TRIN: `cull 0.70 + xform 8.38 = 9.08` attributed, and 13.31 ms is
+NOT — 43.8 % of the entire draw.** That is `dl_G_TRIN`'s index expansion plus
+our own `GX*` setters, still never separated, and still the largest single
+block in the project. It is what G-B aims at.
+
+**This re-ranks the sh4zam list**, against a 30.39 ms draw:
+
+| gap | addressable | note |
+|---|---:|---|
+| **G-B** | **13.31 ms** | the unattributed block |
+| §0a / G-D | inside `xform` 8.38 ms | and only a fraction of it is the six FTRV-able FIPRs |
+| **G-F** | **0.70 ms** (2.3 % of draw) | ⚠️ the doc ranked it on a **pre-G3 2.0 ms**. Cheap, no longer valuable |
+
+⚠️ **G3 ADDED cull calls, it did not replace them.** `cu_trin_indep` skips
+emu64's handler only on the `return` path; punt *and visible* both fall through
+to `GXEnd` → the late cull. `[EMU64C]` per frame: `trin 254, cull 138, vis 59,
+punt 57`, so the scalar cull runs 254× from G3 **plus** ~116× on the late path,
+and **only the second set is inside the `cull=` bracket**. `dc_emu64_cull.cpp`
+contains zero `dc_time_us` reads. The `vcull` collapse 9,915 → 1,002 was a drop
+in the late cull's *yield*, not its call count — and "visible" is its most
+expensive answer, since it has no early-out.
+
+### Two caveats on the run, both real
+
+1. **No `-DDC_AUTOWALK`, so the camera never moves.** All 60 windows are
+   byte-identical (`v=2745 vsrc=2745 vcull=186`). Excellent signal-to-noise,
+   **one static town view**, not a walk. Anything that varies with what is
+   on screen needs a walking run before it is believed.
+2. **`vmemo` hit rate here is 54.40 %** (2,642,897 / 4,858,650 over 59 windows),
+   not the 48.2-48.9 % in `kb/perf-dc.md:481`. Different scene composition.
+   ⚠️ `[PHASE] vmemo=` is **cumulative**, unlike every other field on that line —
+   it must be differenced between windows, which is why a single line reads
+   wrong.
+
+### Corrections this session forced
+
+- **`kb/RESUME.md` carries two disagreeing build lines.** §0i (`:217-223`) is
+  authoritative; the §42 line (`:51-56`) and the §2 prefix (`:661-664`) are both
+  stale at `DC_ARAM_WINDOW=524288` with no audio knobs. Two builds were thrown
+  away here before this was noticed.
+- **`DC_ARAM_WINDOW=1048576` is redundant** — exactly the header default
+  (`dc_platform.h:168-169`). Dropping it is byte-identical.
+- **`dc/Makefile:1467`'s `DC_EMU64_HIST` doc-string is wrong about its own
+  denominator.** It calls the value a period "in presented frames"; the gate is
+  `tick % N` over two per-**logic-tick** counters (`dc_emu64_hist.c:259`,
+  `dc_vi.c:470,798`). At `N=1` it is moot, which is what every real run has used.
+- **`chan_eval`'s four FIPRs are NOT FTRV-shaped**, contrary to §0a. `:864` and
+  `:3119` are self-dots; `:887`/`:890`'s constant operand `nrm` is **per-vertex**;
+  `:899`'s is per-**light**. Converting them needs an XMTRX reload per vertex.
+  Only the six at `:3108-3110` / `:3116-3118` have a batch-constant operand.
+- **emu64's vertex cache is 128 entries, not 32** (`emu64.hpp:33`, `VTX_COUNT`;
+  indices are 5-bit *or* 7-bit). `dc_pvr.c:2226-2229` and `kb/perf-dc.md:471`
+  both say 32. `dc_emu64_cull.cpp:249` already sizes `mark[4]` = 128 bits, i.e.
+  the cull agrees with the header and the comments do not.
+- **Matched screenshot frames are impossible today.** No seed override exists
+  anywhere in the tree — `sqrand(osGetCount())` (`sys_math.c:6-8`), wall-clock
+  (`dc_os.c:189`). `shot_diff.py:42-45` says so itself. Step 4's "own screenshot
+  pair" needs a same-build noise floor first, or a counting oracle instead.
+
 ## ⭐ 2026-08-08 (session 9, fourth iteration) — THE PUMP COULD NOT KEEP UP
 ## BELOW 14 FPS, AND THE CONSOLE IS NOT THE EMULATOR
 

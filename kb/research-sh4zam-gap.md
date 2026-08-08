@@ -75,10 +75,22 @@ And the rule for what to do instead, <https://dreamcast.wiki/SH4_FTRV_Optimizati
 
 **`dc/src/dc_pvr.c:3108-3118` matches both preconditions exactly, twice**: three
 dots of the vertex against constant `mv` rows, then three of the normal against
-constant `nm` rows. That is two FTRVs, not six stalling FIPRs. `chan_eval`'s
-four per-light FIPRs (`:864`, `:887`, `:890`, `:899`) are the same shape —
-they are structurally identical to the pl_mpeg audio loop the wiki page was
-written about.
+constant `nm` rows. That is two FTRVs, not six stalling FIPRs. ✅ **Verified
+2026-08-08**: `mv[0..2]` and `nm[0..2]` are consecutive rows of one matrix each,
+both bound once per batch (`:3012`, `:3014`), and each group of three shares one
+variable vector. Two FTRVs, fourth output slot free in both.
+
+⚠️ ~~`chan_eval`'s four per-light FIPRs (`:864`, `:887`, `:890`, `:899`) are the
+same shape.~~ **FALSE — checked 2026-08-08, and this page got it wrong.** None
+of the four converts to a batch-resident FTRV: `:864` and `:3119` are
+**self-dots** (both operands vary); `:887`/`:890`'s "constant" operand is `nrm`,
+which is **per-vertex**; `:899`'s is `lights[li].dir`, constant across vertices
+but indexed **per light**, against a variable operand that is per-vertex-per-
+light. Making any of them FTRV needs an **XMTRX reload per vertex** — eight
+`fmov` pairs — which is the opposite of the win. The FIPR-*stall* argument still
+applies to them; the FTRV *conversion* does not. Active lights are 1-3 in
+practice, hard-capped at 8 (`emu64.c:3317` writes `(1 << num_lights) - 1`;
+`dc_pvr.c:850` already exits at the last set bit).
 
 **Being FIPR is not the same as being fast.** Ranking anything on "it is already
 `fipr()`" is invalid until an A/B says otherwise.
@@ -96,7 +108,39 @@ needs XMTRX" conclusion correctly *for a single-pass loop* and stopped there.
 Ranked by (expected gain × confidence) ÷ cost. ⚠️ Read §3 first — the
 denominator these are ranked against is stale.
 
-### G-A 🔴 The build cannot link most of sh4zam. Prerequisite for everything.
+### G-A ✅ DONE 2026-08-08 — the build could not link most of sh4zam
+
+**Landed.** `dc/Makefile`: the glob now names `source/sh4/shz_complex_sh4.c`
+alongside `source/*.c`, `SHZ_S` carries the two `.s` files, a new
+`$(OBJDIR)/%.s.o: $(ROOT)/%.s` rule assembles them (lowercase `.s` ⇒ gcc runs
+**no** cpp, so no `-MMD`, no prelude, no `$(DEFINES)` — `DEPS` filters the
+would-be `.d` out), and `$(SHZ_OBJS): TU_DEFS = -DNDEBUG` scopes the assert kill
+to sh4zam only. `source/sw/` is still not globbed, now on purpose.
+
+**Verified, not assumed.** The five previously-undefined out-of-line symbols are
+present as `T` in the objects:
+
+```
+shz_complex_sh4.c.o : _shz_fft_dc
+shz_mem_sh4.s.o     : _shz_memset8_sh4_  _shz_memcpy128_sh4_  _shz_sq_memcpy32_sh4_
+shz_xmtrx_sh4.s.o   : _shz_xmtrx_load_apply_store_{4x4,3x4,3x3}_sh4
+```
+
+and a throwaway TU calling `shz_sq_memcpy32`, `shz_memcpy128`, `shz_memset8`,
+`shz_fft` and `shz_xmtrx_load_apply_store_4x4` **links clean** against them
+(`kos-cc`, `-DNDEBUG`). Before this change that TU could not link at all.
+
+⚠️ **The shipping image is unchanged so far**: `sh-elf-nm` on
+`AnimalCrossing.elf` finds **zero** of those symbols — nothing in `dc/` calls
+them yet, so `--gc-sections` drops every one. G-A buys capability, not speed.
+`.text` for the town build line is **2,882,948 B**. ⚠️ Do not read the 300 B
+against `kb/state-log.md`'s 2,883,248 as a saving — that figure is from a
+different session's tree and the two were never built back-to-back.
+
+Trap for anyone extending this: a *recursive* wildcard here is a build break,
+not a slowdown — see below.
+
+<details><summary>the original finding</summary>
 
 `dc/Makefile:1173` globs `source/*.c` — top level only. Upstream's
 `CMakeLists.txt` gives the real Dreamcast source set, **seven files**:
@@ -275,7 +319,35 @@ exactly 32 bytes. Falco's own example uses `SHZ_MEMORY_BARRIER_SOFT()` between
 GCC from reordering our memory accesses in a way which causes us to access the
 transformed position before it's ready, which would cause a pipeline stall."*
 
-### G-F 🟡 Four frustum planes in one FTRV — replaces the scalar AABB cull
+### G-F 🟢 DEMOTED 2026-08-08 — four frustum planes in one FTRV
+
+⚠️ **Re-costed and demoted before anyone wrote code.** The late-path cull is
+**0.70 ms of a 30.39 ms draw — 2.3 %** (§3), not the 2.0 ms this section was
+ranked on, and G3's own 254 calls/frame are **not timed at all**. Read §3's
+G3-added-calls paragraph before touching it.
+
+Two further facts the DMS shape below does not survive contact with:
+
+- **There are no stored frustum planes.** The six "planes" are literally the six
+  comparison lines at `dc_gx.c:591-596`; each corner is pushed through MV *then*
+  P. Nothing folds P·MV at cull time (`dc_pvr.c:3011-3033` does, but only for
+  *surviving* batches, downstream). An FTRV form must pay the 48-mul fold itself
+  **per call**, unless it caches planes per matrix change.
+- **A cheaper shape exists that needs no FTRV at all.** Gribb-Hartmann planes
+  extracted from a folded MVP (cached per matrix change) plus the positive-vertex
+  test is **6 dots total**, against today's fixed 8 corners × 7 dots = 168 muls
+  and 168 adds with no early-out. That is the experiment to run first; the FTRV
+  is a second-order win on top of it.
+- ⚠️ `dc_gx.c:566-569` records that the function is scalar **on purpose** so it
+  needs no `dc_mtx_xmtrx_invalidate()`. An XMTRX form makes that invalidate
+  mandatory. (Its cited precedent `dc_pvr.c:2812` is stale — now `:3045`.)
+- ⚠️ Ordering: `dirty_check()` and `setup_1tri_2tri_1quad()` must run **before**
+  the cull call (`dc_emu64_cull.cpp:358-359`), because `dc_gx_aabb_is_offscreen`
+  reads `g_gx.projection_mtx` and `g_gx.current_mtx` live.
+
+<details><summary>the original proposal</summary>
+
+#### Four frustum planes in one FTRV — replaces the scalar AABB cull
 
 `dc/src/dc_gx.c:584-590` is ~200 scalar multiplies per batch, ~2.0 ms/frame,
 deliberately scalar (`:566-569`), reached from both the late path (`:603-660`)
@@ -309,6 +381,8 @@ DCA3 (GTA3 DC) does the same — 6 plane dots become 2 FIPRs + one FTRV.
 `kb/RESUME.md:411-420` already names our AABB cull the live sh4zam experiment;
 this is the shape it should take. ⚠️ Its 2.0 ms cost is **pre-G3**; G3 moved
 `vcull` 9,915 → 1,002 (`kb/state-log.md:246-262`). Re-measure before costing.
+
+</details>
 
 ### G-G 🟢 WXYZ permutation — W at cycle 4 instead of 7
 
@@ -407,15 +481,54 @@ that jaudio's hot path contains an FFT-shaped transform at all.** Read
 
 ---
 
-## 3. ⚠️ The measurement problem that blocks all of this
+## 3. ✅ ANSWERED 2026-08-08 — the measurement that blocked all of this
 
-**`G_TRIN_INDEPEND` has not been re-measured since G3 shipped.** The famous
-*34.4 ms of a 45.6 ms frame, 75 %* is from a **pre-G3, silent** build
-(`kb/perf-dc.md:14-27`). G3 landed (−19.9 ms), audio landed (+4.3 ms). Current:
-`draw=49.9 ms`, `fps_p50 23.2` (`kb/state-log.md:251`).
+**Run, not quoted.** Town, steady state, 430 `[EMU64H]` windows, averaged over
+the last 60. `[EMU64H]` **doubled** (rule 1 below); `[PHASE]` **not**.
 
-**Any proposal in §1 costed against "TRIN is 75 % of the frame" is costed
-against a frame that no longer exists.** Re-run `DC_EMU64_HIST` first.
+| | per logic tick (as printed) | **per presented frame** |
+|---|---:|---:|
+| `tot` | 16.41 ms | **32.82 ms** |
+| `TRIN_INDEPEND` | 11.20 / 127 calls | **22.40 ms / 254 calls** |
+| `gap` | 2.64 ms | 5.28 ms |
+| `draw` / `skip` | — | 30.39 / 2.57 ms |
+| `cull` / `xform` | — | 0.70 / 8.38 ms |
+| `us/v` | — | 3.05 |
+
+**Self-check `tot×2` vs `draw+skip`: 32.82 vs 32.97, −0.4 %.** `armed,
+period=1`, no `DISABLED`, `[EMU64C] cum reinst=0`.
+
+⭐ **`TRIN_INDEPEND` is 22.40 ms of a 30.39 ms draw — 73.7 %.** The old
+*34.4 of 45.6, 75 %* is retired: the share barely moved, the absolute fell by a
+third, and the frame is far faster than the `draw=49.9` this page used to cite,
+because that predates session 9's fourth-iteration levers. `fps_p50` **25.9**.
+
+**Inside TRIN: `cull 0.70 + xform 8.38 = 9.08` attributed, `13.31 ms` NOT —
+43.8 % of the entire draw.**
+
+### The ranking, re-costed against 30.39 ms
+
+| gap | addressable | verdict |
+|---|---:|---|
+| **G-B** | **13.31 ms** | unchanged as the top lever, and now with a number |
+| §0a / G-D | inside `xform` 8.38 ms | and only part of that is the six FTRV-able FIPRs |
+| **G-F** | **0.70 ms**, 2.3 % of draw | ⚠️ **DEMOTED.** It was ranked on a pre-G3 2.0 ms. Cheap experiment, low value |
+
+⚠️ **G3 ADDED cull calls, it did not replace them** — `cu_trin_indep` skips
+emu64's handler only on the `return` path, so punt *and visible* both fall
+through to `GXEnd` → the late cull. Per frame: `trin 254, cull 138, vis 59,
+punt 57`. The scalar cull runs **254× from G3 plus ~116× on the late path, and
+only the second set is inside the `cull=` bracket** — `dc_emu64_cull.cpp` has
+zero `dc_time_us` reads. The `vcull` collapse 9,915 → 1,002 was a drop in the
+late cull's *yield*, not its call count, and "visible" is its most expensive
+answer because it has no early-out. **Any G-F costing needs a new bracket first.**
+
+⚠️ **Two caveats on the run.** (1) No `-DDC_AUTOWALK` — the camera never moves
+and all 60 windows are byte-identical (`v=2745 vsrc=2745 vcull=186`). Great
+signal-to-noise, **one static town view**, not a walk. (2) `vmemo` here is
+**54.40 %** (2,642,897/4,858,650), not `kb/perf-dc.md:481`'s 48.2-48.9 % —
+and `[PHASE] vmemo=` is **cumulative**, unlike everything else on that line, so
+it must be differenced between windows.
 
 Corollaries that survive regardless:
 
@@ -604,21 +717,41 @@ unexplored direction found.
 
 ## 5. Next actions, in order
 
-1. **G-A** — add the three `source/sh4/*` files (NOT `source/sw/`), wire the
-   assembler rule, add `-DNDEBUG`. Prerequisite for everything. Mechanical.
-2. **Re-run `DC_EMU64_HIST`** on the current default build. Without it §1 is
-   unranked (§3). Consider porting Xash's PRFC1 profiler at the same time.
-3. **G-F, the AABB cull** — cheapest real experiment, already blessed by
-   `kb/RESUME.md:411-420`, and now with a concrete implementation to copy.
-   Needs a fresh cost first.
-4. **§0a — A/B the six back-to-back FIPRs at `dc_pvr.c:3108-3118` against two
-   FTRVs.** Requires G-D (pass split) because XMTRX is occupied. This is the
-   entry that overturns a "settled" record, so it needs its own screenshot pair.
-5. **G-B** — transform-once-per-unique-vertex. Design first; measure the memo
-   cache's 48 % hit rate against what a structural fix would deliver.
-6. **G-C** — the `dc_gx_backend_submit` rewrite. After 5, since they touch the
-   same code and pattern C makes 5 easier.
+✅ **1. G-A — DONE 2026-08-08.** §1 G-A carries the change and the verification.
+✅ **2. Re-run `DC_EMU64_HIST` — DONE 2026-08-08.** §3 carries the numbers.
+   ⚠️ Xash's PRFC1 profiler was **not** ported and is still the open instrument
+   for the hardware-vs-Flycast question.
+
+The remaining order, **revised by §3's re-cost**:
+
+3. **G-B** — transform-once-per-unique-vertex, aimed at the **13.31 ms**
+   unattributed block (43.8 % of draw). Promoted above G-F, which the re-cost
+   demoted to 0.70 ms. Design before coding, and read §1 G-B's three
+   mutation hazards: `set_position` is **not** a pure read of `vertices[]`
+   (`emu64.c:2694-2708` flips `MTX_NONSHARED`, `:2712-2717` multiplies a normal
+   with no idempotence latch, `:2724-2781` submits a round-tripped position).
+   The distinct-vertex walk it needs **already exists** at
+   `dc_emu64_cull.cpp:283-338` / `:369-390`.
+4. **§0a + G-D** — the six FIPRs at `dc_pvr.c:3108-3118` against two FTRVs,
+   inside `xform`'s 8.38 ms. Needs the pass split because XMTRX holds `comb`
+   from `:3041` to `:3376`. ⚠️ A 32-vertex block must materialise `eye[32][3]`
+   and `nrm[32][3]` — **768 B currently never stored at all** — plus
+   `ClipVtx blk[32]`, `slot[32]` and a memo-hit bitmask: ~1796 B against today's
+   112 B, into a 16 KB direct-mapped operand cache. And the loop indexes
+   **primitives, not vertices** (`:3064`), so 32 vertices is 8 quads but 10⅔
+   triangles. ⚠️ This overturns a "settled" record, and **matched screenshot
+   frames are impossible** (no seed override exists; `shot_diff.py:42-45`), so
+   it needs a same-build noise floor or a counting oracle instead.
+5. **G-C** — the `dc_gx_backend_submit` rewrite. After 4; same code.
+6. **G-F** — now a cheap 0.70 ms experiment, not a valuable one. If it is run,
+   run the Gribb-Hartmann + positive-vertex form first and **add a bracket to
+   `dc_emu64_cull.cpp` before costing anything** (§3).
 7. **G-I** — read `kb/audio-cpu-cost.md` before writing anything.
+
+⚠️ **None of this is a hardware verdict.** Every number above is Flycast, which
+models **no instruction cache**, against 2,882,948 B of `.text` on an 8 KB
+direct-mapped icache. §3 corollary 5 (Xash's PRFC1 profiler on a burn) remains
+the only instrument that could answer why the console is slower.
 
 **Screenshot rule applies to all of it**: `tools/dcqa/run_report.py` is the
 floor and cannot see colour. Judge any renderer change on a matched screenshot

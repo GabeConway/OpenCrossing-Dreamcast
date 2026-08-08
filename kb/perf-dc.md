@@ -481,7 +481,24 @@ about six points of hit rate. The table has been 128 slots since 2026-08-04.
 **MEASURED HIT RATE: 48.2-48.9 %** (the 42.5 % above was the 32-slot table).
 `vmemo=hit/total` is in the `[PHASE]` line.
 
-⚠️ **OPEN: whether that is at the ceiling.** Two derivations disagree, entirely
+⭐ **[2026-08-08] 54.40 % on a static town view** (2,642,897 / 4,858,650 over 59
+windows, run `run-g1`). Not a contradiction — a different scene composition —
+but do not quote 48 % as *the* rate. ⚠️ **`[PHASE] vmemo=` is CUMULATIVE**,
+unlike every other field on that line, so it must be **differenced between two
+windows**; reading one line gives the whole run's average and looks wrong.
+
+⚠️ **And the "32" premise below is wrong at the source too**: emu64's vertex
+array is **`Vertex vertices[128]`** (`emu64.hpp:33`, `VTX_COUNT`), not 32 —
+indices are 5-bit *or* 7-bit, and `dc_emu64_cull.cpp:249` already sizes its
+`mark[4]` bitset to 128 bits. `dc_pvr.c:2226-2229` and this file's §"471" both
+still say 32.
+
+⚠️ **OPEN: whether that is at the ceiling — and it is now CHEAP to settle.**
+`dc_emu64_cull.cpp:249`'s `mark[4]` already holds exactly the distinct set for
+every TRIN batch; one `__builtin_popcount` over it against `n_faces * 3` gives
+distinct-refs-per-batch directly. Nothing in the tree counts it today.
+
+Two derivations disagree, entirely
 on one input — total staged vertex references per frame. Using the older 6,951
 (the figure in `dc_gx.c:870`'s comment, now **stale**) against ~3,601 loaded
 vertices gives 1.93 refs/vertex and a **48.2 % ceiling**, i.e. the memo is done.
