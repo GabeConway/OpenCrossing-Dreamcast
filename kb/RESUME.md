@@ -1,5 +1,60 @@
 # RESUME — pick the session back up here
 
+## 🔴 SESSION 11 (2026-08-08) — THE HARDWARE GAP NOW HAS AN INSTRUMENT, AND IT
+## IS WAITING ON A BURN. READ THIS BEFORE §0h, WHICH IT ANSWERS HALF OF.
+
+**Nothing in this session makes the game faster.** It builds the thing that
+makes steps 2-5 of the hardware plan falsifiable, plus one free finding.
+
+### What to do next, in order
+
+0. 🔴 **BURN `~/Downloads/AC-DC-20260808f-pmcr.cdi`** (740,090,153 B, padded)
+   and read the table off the TV. It is the shipping config plus
+   `DC_PMCR=1 DC_PMCR_HUD=1 DC_CONSOLE_MUTE=1`, with no `DC_SCIF_FAST`, no
+   `DC_AUTOSTART` and no probes. **It is a measurement image, not a play
+   image**: the HUD covers the top-left and the console is off.
+   **What to photograph:** the town, standing still, after the table has
+   filled in (~12 s — the rows say `--` until their event has had a window).
+   **The three numbers that matter:** `cyc` (does `ms` ≈ `wall`? then the CPU
+   never idles and the frame is compute-bound), `istall` (icache stall cycles
+   — the hypothesis), `dstall`.
+1. Then, and only then, step 2 of the plan: section ordering, and re-A/B the
+   `-O3` hot list against `istall` rather than against Flycast FPS.
+
+### P1 — `dc/src/dc_pmcr.c`, and the four things to know
+
+1. **PRFC1 only** — KOS owns PRFC0 (`perf_cntr_timer_ns`). Same split Xash3D
+   DC uses. Two counters, one spoken for ⇒ **one event at a time**, so the
+   event **ROTATES**: 8 events, one per 30-frame window, full table ~12 s.
+   ⚠️ Ratios BETWEEN two modes come from two different windows; ratios
+   WITHIN one (audio vs draw) share a window and are exact.
+2. **Per PRESENTED frame.** Same block as `[PERF]`/`[PHASE]`. Do not double it.
+3. ⚠️ **FLYCAST IMPLEMENTS NO PMCR — every event reads 0, including elapsed
+   cycles.** The instrument says so itself now rather than looking unarmed. An
+   emulator run can validate the plumbing and nothing else.
+4. ⚠️ **`DC_CONSOLE_MUTE=1` is not optional on a measuring burn.** KOS
+   busy-waits on the SCIF FIFO with or without a cable, and a perf build puts
+   ~10 lines into every 30-frame window — the log would be measuring itself.
+   `-DDC_PMCR_HUD` is the channel instead. It silences crash dumps too.
+
+### 🔴 THE FREE FINDING — THE INNER LOOP DOES NOT FIT IN THE ICACHE
+
+`tools/dcopt/icache_map.py` (host-side, seconds, no burn). Against an **8 KB
+direct-mapped** icache:
+
+| hot set | bytes | vs icache |
+|---|---:|---:|
+| the town frame's hot symbols | 97,504 | **11.9x** |
+| **the 12-symbol innermost draw loop** | 11,648 | **1.4x** |
+
+⭐ `dc_gx_backend_submit` shares cache lines with six of the `GX*` setters it
+calls per vertex. **This sizes the pressure; only `istall` on a burn prices
+it.**
+
+⚠️ **The plan's `--symbol-ordering-file` is an LLD flag and we use GNU ld.**
+2.45.1 has **`--section-ordering-file FILE`**, which does the same job because
+`-ffunction-sections` is already on.
+
 ## ⭐⭐⭐ SESSION 9 (2026-08-08) — THE MUSIC PLAYS, G3 LANDED, AND BOTH ARE
 ## DEFAULTS NOW. START HERE; SESSIONS 7-8's QUEUE IS LARGELY SPENT.
 

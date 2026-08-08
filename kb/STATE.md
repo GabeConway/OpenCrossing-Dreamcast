@@ -1,5 +1,26 @@
 # Session state — resume here
 
+## 🔴 2026-08-08 (session 11) — THE HARDWARE GAP HAS AN INSTRUMENT NOW, AND IT
+## IS BLOCKED ON A BURN
+
+**The whole FPS picture below is Flycast's, and Flycast has a perfect
+instruction cache.** Two things landed to change that, neither of them a speed
+change:
+
+1. **P1, `dc/src/dc_pmcr.c`** (`DC_PMCR=1`) — SH7750 performance counters on
+   PRFC1, rotating through 8 events (elapsed cycles, **icache/dcache
+   pipeline-freeze cycles**, miss counts, fill cycles, instructions issued),
+   split into `[PHASE]`'s own `draw`/`skip`/`vi` plus `audio` and `xform`.
+   `DC_PMCR_HUD=1` puts it on the TV; `DC_CONSOLE_MUTE=1` goes with it.
+   ⚠️ **Flycast returns 0 for every event.** Burn-only.
+   Staged: `~/Downloads/AC-DC-20260808f-pmcr.cdi`.
+2. 🔴 **`tools/dcopt/icache_map.py` — the hot set is 11.9x the 8 KB
+   direct-mapped icache, and the 12-symbol INNER DRAW LOOP alone is 1.4x.**
+   `dc_gx_backend_submit` shares cache lines with six `GX*` setters it calls
+   per vertex. This sizes the pressure; only `istall` on a burn prices it.
+
+⚠️ `--symbol-ordering-file` is LLD; GNU ld wants **`--section-ordering-file`**.
+
 ## ⭐⭐⭐ 2026-08-08 (session 9) — THE MUSIC PLAYS, G3 SHIPPED, AND THE GOOD
 ## CONFIG IS THE DEFAULT CONFIG
 

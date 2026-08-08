@@ -1224,9 +1224,40 @@ static void dc_scif_fast_init(void) {
 static void dc_scif_fast_init(void) { }
 #endif
 
+/* ==========================================================================
+ * DC_CONSOLE_MUTE=1 — SHUT THE CONSOLE OFF ENTIRELY. FOR BURNS.
+ * ==========================================================================
+ * On real hardware KOS busy-waits on the SCIF TX FIFO whether or not a cable
+ * is attached, so at 57,600 baud every logged byte is ~174 us of dead frame
+ * (kb/traps.md: 86,357 B of per-asset logging = 15.0 s of dead boot). A perf
+ * build is the worst case for this: [PERF], [PHASE], [EMU64], [EMU64C], five
+ * [DC/PVR] lines, [DC/TEX], [DC/ARAM] and every [STUTTER] all land in the
+ * SAME 30-frame window — several hundred bytes, i.e. tens of milliseconds
+ * of stall, charged to the frames being measured.
+ *
+ * ⚠️ THAT MAKES A LOGGING BURN MEASURE THE LOGGING. Any hardware run whose
+ * numbers matter should set this and read the result off the screen
+ * (-DDC_PMCR_HUD) instead.
+ *
+ * dbgio_disable() is the whole mechanism: it drops KOS's console device, so
+ * every path — our DC_LOG/DC_LOGE, the printf/vprintf overrides in
+ * dc_misc.c, the game's own OSReport, and anything KOS itself prints — stops
+ * blocking on the FIFO, with no per-call-site change and nothing to miss.
+ * The formatting cost remains and is microseconds.
+ *
+ * ⚠️ IT ALSO SILENCES CRASH DUMPS. That is the trade: a burn is either
+ * instrumented or debuggable, not both. Leave it off for a triage burn. */
+#if !defined(DC_HOST_STUB) && defined(DC_CONSOLE_MUTE) && DC_CONSOLE_MUTE > 0
+#include <kos/dbgio.h>
+static void dc_console_mute_init(void) { dbgio_disable(); }
+#else
+static void dc_console_mute_init(void) { }
+#endif
+
 int main(int argc, char* argv[]) {
     /* 0. Console speed, before anything can print. */
     dc_scif_fast_init();
+    dc_console_mute_init();
 
     /* 1. The ledger goes first: it measures .text/.data/.bss from the linker
      *    symbols and publishes pc_image_base/_end, which emu64's seg2k0

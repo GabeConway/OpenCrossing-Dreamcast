@@ -1,5 +1,116 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐ 2026-08-08 (session 11) — P1: THE INSTRUMENT FOR THE HARDWARE GAP IS
+## BUILT, AND THE FREE HOST-SIDE CHECK ALREADY SAYS THE ICACHE CANNOT HOLD THE
+## INNER LOOP
+
+Nothing here makes the game faster. Everything here makes the hardware gap
+falsifiable, which it has not been for the whole life of the project.
+
+### P1 — `dc/src/dc_pmcr.c`, the SH7750 performance counters
+
+`DC_PMCR=1`. PRFC1 only, because KOS owns PRFC0 as `perf_cntr_timer_ns`'s
+clock — the same split Xash3D DC uses and for the same stated reason. The
+SH-4 has two counters and one is spoken for, so **exactly one event is
+countable and the event ROTATES**: one per 30-frame report window, eight
+events, a full table in ~12 s.
+
+Events: elapsed cycles, **pipeline-freeze-by-icache-miss**,
+pipeline-freeze-by-dcache-miss, icache misses, operand-cache misses, icache
+fill cycles, operand-cache fill cycles, instructions issued. Buckets: `draw`
+/ `skip` / `vi` (the same decomposition `[PHASE]` uses, bracketed at the same
+two sites in `dc_vi.c`, so the two lines read together), plus `audio`
+(`dc_audio_pump`) and `xform` (`dc_gx_backend_submit`) as sub-buckets.
+
+**Per PRESENTED frame** — reported from the same 30-frame block as `[PERF]`,
+and handed that block's own wall clock rather than reading a second one. Do
+not double it (measurement rule 9).
+
+It prices itself: `dc_pmcr_init()` times 1,000 counter reads, so `rd=` and
+`rdns=` on every line bound the instrument's own cost. `bad=` is the tripwire
+for a delta that went backwards, which is the only way the mode rotation
+(which clears the counter) could corrupt a window. **Ran: `bad=0` throughout.**
+
+### ⚠️ FLYCAST IMPLEMENTS NO PERFORMANCE COUNTERS AT ALL
+
+Two full runs: **every event reads 0, including `PMCR_ELAPSED_TIME_MODE`.**
+Not "small", not "approximate" — zero. So Flycast cannot validate even the
+arithmetic, and a later reader must not mistake a zero row for a build that
+never armed. The instrument diagnoses itself now:
+
+```
+[PMCR] ⚠️ elapsed-cycle count is ZERO over a whole window. PRFC1 is not
+counting: that is EXPECTED under Flycast (it models no PMCR) and means this
+run cannot answer anything about the hardware. Burn it.
+```
+
+What Flycast DID validate: the plumbing runs, the rotation advances through
+all eight events, `bad=0`, `ASSET MISSING 0`, the run reaches the town at
+19.5-20.6 FPS, and **the HUD renders legibly** — screenshot-verified, not
+assumed (`/tmp/shots-pmcr/frame-0062.png`, 10 rows over the town).
+
+### The HUD, and why the report cannot go over the console on a burn
+
+`DC_PMCR_HUD=1` draws the table straight into the scanned-out framebuffer:
+address read from **FB_R_SOF1 every frame**, never `vram_s` (that is the base
+of VRAM and is not the displayed surface once `pvr_init()` has run —
+`dc_pvr.c:3842` paid for that already). One buffer, not two: SOF1 is the
+scanout register, so it always names the surface currently on screen, and each
+surface is repainted while it is showing.
+
+⚠️ **`DC_CONSOLE_MUTE=1` is the other half and it is not optional for a burn.**
+KOS busy-waits on the SCIF TX FIFO whether or not a cable is attached. A perf
+build emits `[PERF]`, `[PHASE]`, `[EMU64]`, `[EMU64C]`, five `[DC/PVR]` lines,
+`[DC/TEX]`, `[DC/ARAM]` and every `[STUTTER]` **into the same 30-frame window**
+— hundreds of bytes, tens of milliseconds of stall, charged to the frames being
+measured. `dbgio_disable()` at the top of `main()` removes all of it in one
+call, including the game's own `OSReport` and anything KOS prints, with no
+per-call-site change and nothing to miss. **Verified:** the muted image booted,
+ran 240 s without crashing, and printed **0** `[PERF]`/`[PHASE]`/`[DC/PVR]`
+lines against 21 total console lines (KOS's own boot banner).
+⚠️ It silences crash dumps too — that is the trade, and a triage burn should
+leave it off. `-DDC_PMCR_LOG=1` puts the `[PMCR]` line back on the console for
+emulator runs.
+
+### 🔴 THE FREE HOST-SIDE FINDING: THE HOT SET IS 11.9x THE INSTRUCTION CACHE
+
+`tools/dcopt/icache_map.py`, run against this tree's ELF. The SH7750 icache is
+**8 KB, direct-mapped, 32-byte lines** — 256 lines, index = address bits
+[12:5].
+
+| hot set | bytes | vs 8 KB icache |
+|---|---:|---:|
+| the town frame (emu64 dispatch + `dl_G_*` + our `GX*`/`dc_gx_`/`dc_pvr_` + G3's cull + `Nas_*`) | **97,504** | **11.9x** |
+| **the innermost draw loop only** — 12 symbols: `dl_G_TRIN*`, `emu64_taskstart_r`, `dc_gx_flush_vertices`, `dc_gx_backend_submit`, the `GXPosition/Color/TexCoord/Normal` setters, `cu_trin_*`, `set_position` | **11,648** | **1.4x** |
+
+⭐ **Even the twelve functions of the inner loop do not fit in the instruction
+cache**, and `dc_gx_backend_submit` — the single biggest addressable block in
+the frame — shares cache lines with six of the `GX*` attribute setters it calls
+per vertex (lines 91, 94, 98, 99, 100, 101). Every FPS number this project has
+ever produced came from a machine where that costs exactly nothing.
+
+⚠️ **This sizes the pressure; it does not price it.** The tool has no call
+profile, so a collision between two functions that never share a frame costs
+nothing, and capacity pressure is not the same as a measured stall. The number
+that settles it is `istall` from P1 on a burn. But the direction is no longer a
+guess: at 1.4x on twelve functions, the inner loop *cannot* be resident.
+
+### The ordering flag, corrected before anyone spends a session on it
+
+The plan said `--symbol-ordering-file`. **That is an LLD flag and sh-elf uses
+GNU ld.** GNU ld 2.45.1 in our SDK image has **`--section-ordering-file FILE`**
+instead, which does the same job because `-ffunction-sections` is already on
+(`GC_CFLAGS`). Same lever, different spelling; `--sort-section name|alignment`
+is also there and is not what this wants.
+
+### What is staged
+
+`~/Downloads/AC-DC-20260808f-pmcr.cdi` (740,090,153 B, padded, burnable):
+shipping config + `DC_PMCR=1 DC_PMCR_HUD=1 DC_CONSOLE_MUTE=1`, no
+`DC_SCIF_FAST`, no `DC_AUTOSTART`, no probes. **It is a measurement image, not
+a play image** — the HUD covers the top-left of the screen and the console is
+dead.
+
 ## ⭐ 2026-08-08 (session 10) — G-A LANDED, AND THE DENOMINATOR EVERY sh4zam
 ## PROPOSAL WAS RANKED AGAINST IS NOW MEASURED RATHER THAN QUOTED
 

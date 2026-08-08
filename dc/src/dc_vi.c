@@ -9,6 +9,9 @@
  */
 #include "dc_platform.h"
 #include "dc_pvr.h"     /* dc_pvr_report(): the renderer half of the PERF line */
+#include "dc_pmcr.h"    /* P1: the SH-4 PMCR profiler. All no-op macros when
+                         * DC_PMCR is unset, so this include is unconditional
+                         * and every call site below reads the same either way. */
 
 /* ==========================================================================
  * DC_AUDIO_HEAPLOG — the falsifier for "audiomemory can be shrunk further"
@@ -296,6 +299,15 @@ void VIWaitForRetrace(void) {
     u64 vi_enter, t_before_swap, t_after_swap;
     double frame_ms = 0.0;
 
+    /* P1's tick boundary, deliberately the FIRST thing in the function and
+     * ahead of [PHASE]'s: the two brackets must describe the same interval or
+     * the pair cannot be read together, and whichever runs second pays the
+     * other's cost. This one goes first because it is the cheaper read on a
+     * build that has both, and because [PHASE] is the established instrument
+     * whose numbers are already in the kb — it keeps its meaning, and P1's
+     * `draw=` carries the ~3 register reads of drift instead. */
+    DC_PMCR_TICK_ENTER(g_pc_frameskip_active);
+
 #ifdef DC_PERF_PHASE
     /* FIRST statement in the function: everything between the previous exit and
      * here is the game's own work for the tick that just finished, and
@@ -346,7 +358,9 @@ void VIWaitForRetrace(void) {
      * logic-only ticks too, or the ring drains and the stream underruns exactly
      * when the game is already struggling. Budgeted internally (DC_AUDIO=0
      * removes it entirely). */
+    DC_PMCR_ENTER(DC_PMCR_SLOT_AUDIO);
     dc_audio_pump();
+    DC_PMCR_EXIT(DC_PMCR_SLOT_AUDIO);
 
 #ifdef DC_AUDIO_HEAPLOG
     /* ONE SHOT. See the block at the top of this file for what the numbers
@@ -432,6 +446,11 @@ void VIWaitForRetrace(void) {
             s_ph_last_exit = ph_out;
         }
 #endif
+        /* Same placement as [PHASE] above, on purpose: `vi=` means the same
+         * interval in both lines. The frameskip path has its own exit and it
+         * needs its own re-stamp, or this path's tail would be billed to the
+         * NEXT tick's draw= bucket. */
+        DC_PMCR_TICK_EXIT();
         /* ⚠️ THE DISPATCH-TABLE INSTRUMENTS ARM HERE TOO, AND THIS IS THE ARM
          * THAT ACTUALLY CATCHES ANYTHING. Measured 2026-08-04: G1's first real
          * run came back with every opcode bucket EMPTY and 100 % of the time in
@@ -493,6 +512,13 @@ void VIWaitForRetrace(void) {
         dc_dynamic_fps_update(t_after_swap - frame_start_us);
 
     dc_pace_frame();
+
+    /* AFTER the pace, and that is the whole reason it is here rather than
+     * next to the swap: dc_pace_frame() waits out the vblank(s), so by this
+     * point KOS has flipped and FB_R_SOF1 names the surface the TV is showing.
+     * Painting before the flip would put the text on the buffer that is about
+     * to be replaced. No-op unless -DDC_PMCR_HUD. */
+    DC_PMCR_HUD_DRAW();
 
     dc_gx_frame_timing_snapshot();
 
@@ -734,6 +760,13 @@ void VIWaitForRetrace(void) {
                 s_gxs_posn = s_gxs_drops = 0;
             }
 #endif
+            /* P1. Handed the window's OWN wall clock rather than reading one:
+             * [PMCR] and [PERF] must describe the same 30 frames, and a second
+             * clock read here would silently describe a slightly different
+             * window every time. `fps_count` rather than a literal 30 for the
+             * same reason — it is what this block actually counted. */
+            DC_PMCR_REPORT((unsigned int)fps_count, (double)(now - fps_start));
+
             dc_pvr_report();
             fps_start = now;
             fps_count = 0;
@@ -827,6 +860,10 @@ void VIWaitForRetrace(void) {
         s_ph_last_exit = ph_out;
     }
 #endif
+    /* The presented path's twin of the frameskip re-stamp above. Last
+     * statement in the function, so `vi=` covers everything this function did
+     * and `draw=` covers only the game's own work. */
+    DC_PMCR_TICK_EXIT();
 }
 
 u32  VIGetRetraceCount(void) { return retrace_count; }

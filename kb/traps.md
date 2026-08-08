@@ -1,5 +1,54 @@
 # Traps already paid for — do not re-discover these
 
+## ⚠️ FLYCAST IMPLEMENTS NO PERFORMANCE COUNTERS — ALL ZERO, INCLUDING ELAPSED CYCLES (2026-08-08)
+
+Measured, twice, over full runs: `perf_cntr_start(PRFC1, ...)` +
+`perf_cntr_count(PRFC1)` returns **0 for every one of the eight PMCR events**
+under Flycast, `PMCR_ELAPSED_TIME_MODE` included. Not skewed — zero.
+
+Two consequences:
+
+- **A PMCR run in the emulator validates plumbing and nothing else.** It can
+  show the rotation advancing, `bad=0`, and that the game still reaches the
+  town. It cannot check a single number.
+- ⚠️ **A zero row is indistinguishable from "the build never armed"** to
+  anyone reading the log later, which is exactly the failure mode that left G1
+  unrun for two sessions. `dc_pmcr.c` therefore diagnoses itself: a zero
+  elapsed-cycle window prints an explicit "PRFC1 is not counting … Burn it."
+  Any new instrument whose null result looks like a build mistake owes the
+  reader the same line.
+
+Same family as the disc-timing entry below and the icache: **the emulator is
+missing a whole hardware mechanism, and its silence about it is not evidence.**
+
+## ⚠️ ON HARDWARE THE CONSOLE MEASURES ITSELF — mute it on a measuring burn (2026-08-08)
+
+KOS busy-waits on the SCIF TX FIFO **whether or not a cable is attached**, so
+every logged byte is ~174 us of dead frame at the default 57,600 baud. That
+was already written up for boot-path logging; the per-frame case is worse and
+was not:
+
+`[PERF]`, `[PHASE]`, `[EMU64]`, `[EMU64C]`, five `[DC/PVR]` lines, `[DC/TEX]`,
+`[DC/ARAM]` and every `[STUTTER]` all fire in **the same 30-frame window** —
+several hundred bytes, i.e. tens of milliseconds of stall, charged to the
+frames being reported. A logging burn measures the logging.
+
+**`DC_CONSOLE_MUTE=1`** (`dc_main.c`, `dbgio_disable()` at the top of `main`)
+removes all of it in one call: our `DC_LOG`/`DC_LOGE`, the `printf`/`vprintf`
+overrides, the game's `OSReport`, and anything KOS prints. Measured: 21 console
+lines over a 240 s run, **0** `[PERF]`/`[PHASE]`/`[DC/PVR]`.
+⚠️ It silences crash dumps too — a triage burn must leave it off. Put the
+numbers on the TV instead (`-DDC_PMCR_HUD`).
+
+## ⚠️ `--symbol-ordering-file` IS AN LLD FLAG. GNU ld wants `--section-ordering-file` (2026-08-08)
+
+sh-elf uses GNU ld (2.45.1 in the SDK image). It has
+**`--section-ordering-file FILE`** and `--sort-section name|alignment`; it does
+**not** have LLD's `--symbol-ordering-file`, and passing it is a hard error.
+The lever itself is real and free — `-ffunction-sections` is already in
+`GC_CFLAGS` — only the spelling was wrong. Check `sh-elf-ld --help` before
+costing any layout work against a flag name from another toolchain.
+
 ## ⚠️ FLYCAST MODELS NO DISC TIMING. Never refute an I/O-timing hypothesis in it (2026-08-08)
 
 `harness/dc/run-flycast.sh` passes `config:FastGDRomLoad=yes`, and Flycast

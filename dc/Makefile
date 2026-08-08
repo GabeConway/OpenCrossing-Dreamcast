@@ -1016,6 +1016,62 @@ ifneq ($(DC_PVR_BATCH_LOG),)
 DEFINES += -DDC_PVR_BATCH_LOG=$(DC_PVR_BATCH_LOG)
 endif
 
+# =============================================================================
+# P1 — the SH7750 performance counters (dc/src/dc_pmcr.c)
+# =============================================================================
+# DC_PMCR=1 — bracket the frame with PRFC1 and rotate it through 8 hardware
+# events (elapsed cycles, icache/dcache pipeline-freeze cycles, icache/operand
+# miss counts, fill cycles, instructions issued). Absent by default; the file
+# compiles to nothing without it and every call site is a no-op macro from
+# dc/include/dc_pmcr.h, so a shipping image is byte-identical.
+#
+# ⚠️ THIS IS THE ONLY INSTRUMENT THAT CAN ANSWER "WHY IS HARDWARE SLOWER THAN
+# FLYCAST". Flycast models no instruction cache, so it cannot: expect a Flycast
+# run to print zeros or nonsense here, and that IS the expected result, not a
+# bug. The measurement is a burn.
+#
+# It uses PRFC1 only. PRFC0 is KOS's own perf_cntr_timer_ns() clock and
+# perf_cntr_start(PRFC0, ...) would silently take it over.
+ifneq ($(DC_PMCR),)
+DEFINES += -DDC_PMCR=$(DC_PMCR)
+endif
+
+# DC_PMCR_DWELL=<N> — report windows (30 presented frames each) per event
+# before rotating. Default 1: a full 8-event rotation is ~12 s at 20 FPS.
+# Raise it when the scene is noisy and each event needs a longer average.
+ifneq ($(DC_PMCR_DWELL),)
+DEFINES += -DDC_PMCR_DWELL=$(DC_PMCR_DWELL)
+endif
+
+# DC_PMCR_HUD=1 — draw the rotating table onto the TV, straight into the
+# scanned-out framebuffer, instead of relying on the console.
+#
+# ⚠️ THIS IS WHAT MAKES A BURN READABLE. DC_SCIF_FAST loses the console on real
+# hardware, and at KOS's default 57,600 baud the console is boot time even with
+# no cable attached (kb/traps.md) — a burn that reports over SCIF perturbs the
+# frame it is reporting on. Needs DC_PMCR; costs a screenful of uncached VRAM
+# writes per presented frame, which lands in the instrument's own `vi=` bucket.
+ifneq ($(DC_PMCR_HUD),)
+DEFINES += -DDC_PMCR_HUD=$(DC_PMCR_HUD)
+endif
+
+# DC_CONSOLE_MUTE=1 — dbgio_disable() at boot: no console output at all.
+# FOR BURNS. On hardware the SCIF console is charged to the guest as frame
+# time whether or not a cable is attached, and a perf build emits ~10 lines
+# per 30-frame window — tens of milliseconds of stall inside the very window
+# being measured. Pair it with DC_PMCR_HUD=1, which puts the numbers on the
+# TV instead. ⚠️ It silences crash dumps too; leave it off for a triage burn.
+ifneq ($(DC_CONSOLE_MUTE),)
+DEFINES += -DDC_CONSOLE_MUTE=$(DC_CONSOLE_MUTE)
+endif
+
+# DC_PMCR_LOG=1 — force the [PMCR] console line back on in a HUD build (an
+# emulator run wants both channels). Default: the HUD suppresses it, because
+# a burn that logs measures the log. DC_PMCR_LOG=0 suppresses it always.
+ifneq ($(DC_PMCR_LOG),)
+DEFINES += -DDC_PMCR_LOG=$(DC_PMCR_LOG)
+endif
+
 # DC_SCIF_FAST=1 — raise the console from KOS's 57,600 baud to 1,562,500
 # (~5.8 KB/s -> ~150 KB/s). EMULATOR RUNS ONLY: a real coder's cable will not
 # sync at 1.5 Mbps and a hardware build with this set loses its console, crash

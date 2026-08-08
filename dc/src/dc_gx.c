@@ -27,6 +27,7 @@
  */
 #include "dc_gx_internal.h"
 #include "dc_pvr.h"        /* dc_pvr_tex_get(): detects an evicted handle */
+#include "dc_pmcr.h"       /* P1 brackets. No-ops unless DC_PMCR is set.  */
 #include "dc_mem_ledger.h"
 #include <dolphin/gx/GXEnum.h>
 
@@ -723,19 +724,28 @@ void dc_gx_flush_vertices(void) {
     }
 
     /* ---- THE SEAM ---- */
+    /* P1's `xform` bracket wraps the same call [PHASE]'s `xform=` times, so
+     * the two are the same interval measured in two units — cycles/misses on
+     * one line, microseconds on the other. ⚠️ This is the ONE bracket that
+     * fires per BATCH rather than per tick, so it is where the instrument's
+     * own cost concentrates; that is what `rd=` on the [PMCR] line is for. */
 #ifdef DC_PERF_PHASE
     {
         u64 ts = dc_time_us();
         int lit = (g_gx.num_chans > 0) &&
                   (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
+        DC_PMCR_ENTER(DC_PMCR_SLOT_XFORM);
         dc_gx_backend_submit(g_gx.current_primitive, g_gx.vertex_buffer, count);
+        DC_PMCR_EXIT(DC_PMCR_SLOT_XFORM);
         s_submit_time_acc += dc_time_us() - ts;
         s_phase_verts += (unsigned int)count;
         s_phase_src_verts += DC_PH_SRC;
         if (lit) { s_phase_batches_lit++; s_phase_verts_lit += (unsigned int)count; }
     }
 #else
+    DC_PMCR_ENTER(DC_PMCR_SLOT_XFORM);
     dc_gx_backend_submit(g_gx.current_primitive, g_gx.vertex_buffer, count);
+    DC_PMCR_EXIT(DC_PMCR_SLOT_XFORM);
 #endif
 
     g_gx.dirty = 0;
