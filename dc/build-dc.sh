@@ -187,6 +187,10 @@ ENVARGS=(
 [ -n "${DC_AUDIO_VOICES+x}" ]   && ENVARGS+=(-e DC_AUDIO_VOICES="$DC_AUDIO_VOICES")
 [ -n "${DC_AUDIO_MIXRATE+x}" ]  && ENVARGS+=(-e DC_AUDIO_MIXRATE="$DC_AUDIO_MIXRATE")
 [ -n "${DC_AUDIO_SUBDELAY+x}" ] && ENVARGS+=(-e DC_AUDIO_SUBDELAY="$DC_AUDIO_SUBDELAY")
+[ -n "${DC_AUDIO_DISC_FRAMES+x}" ] && \
+    ENVARGS+=(-e DC_AUDIO_DISC_FRAMES="$DC_AUDIO_DISC_FRAMES")
+[ -n "${DC_AUDIO_MAX_FRAMES+x}" ] && \
+    ENVARGS+=(-e DC_AUDIO_MAX_FRAMES="$DC_AUDIO_MAX_FRAMES")
 # R1's kill switch, forward-only: dc/Makefile has `DC_BGTEX_DEMAND ?= 1`, and
 # make treats an environment variable as already-defined — so a plain
 # `-e DC_BGTEX_DEMAND=` would blank the default and expand

@@ -938,6 +938,27 @@ ifneq ($(DC_AUDIO_SUBDELAY),)
 DEFINES += -DDC_AUDIO_SUBDELAY=$(DC_AUDIO_SUBDELAY)
 endif
 
+# DC_AUDIO_DISC_FRAMES — how many DAC frames one dc_audio_disc_yield() may
+# synthesise while a disc read is blocking (default 4, dc/src/dc_audio.c).
+# ⚠️ It is NOT the pump's DC_AUDIO_MAX_FRAMES and must not be confused with it:
+# the pump is a per-tick producer keeping level, this is CATCHING UP inside a
+# stall and has to be allowed to outrun consumption. Bounded by the ring
+# filling up, so raising it cannot overshoot -- it only decides how much of a
+# long read gets converted into buffered audio. Costs nothing when no read is
+# in flight.
+ifneq ($(DC_AUDIO_DISC_FRAMES),)
+DEFINES += -DDC_AUDIO_DISC_FRAMES=$(DC_AUDIO_DISC_FRAMES)
+endif
+
+# DC_AUDIO_MAX_FRAMES — DAC frames one PUMP may synthesise (default 6). The
+# ceiling on audio production is this x 17.49 ms x 2 ticks per presented frame,
+# so it is the constant that decides the FRAME RATE below which sound cannot
+# keep up at all: 2 gave 70 ms/frame (~14 FPS), 6 gives 210 ms (~4.8 FPS).
+# Bounded above by the ring filling, so it cannot overshoot.
+ifneq ($(DC_AUDIO_MAX_FRAMES),)
+DEFINES += -DDC_AUDIO_MAX_FRAMES=$(DC_AUDIO_MAX_FRAMES)
+endif
+
 ifneq ($(DC_ARAM_AUDIO_DROP),)
 DEFINES += -DDC_ARAM_AUDIO_DROP=$(DC_ARAM_AUDIO_DROP)
 endif

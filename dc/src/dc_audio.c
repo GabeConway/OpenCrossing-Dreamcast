@@ -131,8 +131,35 @@ static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
  * bounds a pump at ~40 ms; it only ever binds on the FIRST pump after the gate
  * arms, when the ring is empty and the headroom stop would otherwise ask for
  * three frames (~59 ms) in one call and drop a visible frame on scene entry. */
+/* ⚠️ RAISED 2 -> 6 ON 2026-08-08, AND THE OLD VALUE WAS A LATENT FPS TRAP.
+ *
+ * Human, on hardware: "title screen because of the low fps it sounds choppy."
+ * That is this constant, and the arithmetic is exact. One DAC frame is 17.49 ms
+ * of audio; the pump runs once per LOGIC tick and there are 2 ticks per
+ * presented frame, so the ceiling on production is
+ *
+ *     DC_AUDIO_MAX_FRAMES x 17.49 ms x 2  per presented frame
+ *
+ * At 2 that is 70 ms of audio per frame, i.e. **the audio cannot keep up below
+ * ~14 FPS however cheap synthesis becomes** — the ring drains, the SPU repeats,
+ * and it reads as "the audio is choppy when the frame rate dips" because that
+ * is precisely what it is. The comment this replaces said the cap "binds only
+ * on the first pump after an arm"; that was true of a 30 FPS scene and false of
+ * every scene that struggles, which are the ones that needed it.
+ *
+ * WHY RAISING IT IS SAFE: the loop's real bound is the ring filling up
+ * (`have >= RING - HEADROOM`), which is a hard stop this cap sits in front of.
+ * Raising it cannot overshoot into more audio than the ring holds; it only
+ * stops the producer being throttled below what the consumer is taking. What it
+ * DOES cost is spikier ticks when the ring is genuinely behind — 6 frames at a
+ * heavy-voice ~11 ms each is a long tick — but a long tick that keeps the music
+ * intact beats a short one that drops it, and the ring target means it can only
+ * happen while catching up.
+ *
+ * 6 x 17.49 x 2 = 210 ms of audio per presented frame ⇒ level down to ~4.8 FPS.
+ */
 #ifndef DC_AUDIO_MAX_FRAMES
-#define DC_AUDIO_MAX_FRAMES 2
+#define DC_AUDIO_MAX_FRAMES 6
 #endif
 /* L1/L2 — the two jaudio spec overrides. 0 means "leave the shipped value
  * alone", so an unset build is byte-identical in behaviour. The whole argument
