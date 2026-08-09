@@ -133,6 +133,14 @@ static unsigned int s_tris_out;
 static unsigned int s_tris_clipped;
 static unsigned int s_tris_dropped;
 static unsigned int s_prim_unsupported;
+#if defined(DC_PVR_SHADE_ALPHA8) && !defined(DC_PVR_NO_LIGHTING) && \
+    !defined(DC_PVR_NO_SHADEFAST)
+/* Vertices whose alpha lane took the byte-copy shortcut in shade_vertex().
+ * The falsification counter for S3: a 0 here on a lit town run means the
+ * predicate stopped matching (an emu64 or dc_gx.c recording change) and any
+ * timing movement is NOT this. */
+static unsigned int s_shade_a8;
+#endif
 #ifndef DC_PVR_NO_TEX1ALPHA
 /* Batches that took the second-texture alpha fold. Reported next to the other
  * renderer counters so the feature says how often it fires rather than being
@@ -559,6 +567,20 @@ static inline unsigned int pack_argb(float r, float g, float b, float a) {
     ib = (int)(b * 255.0f + 0.5f); if (ib < 0) ib = 0; if (ib > 255) ib = 255;
     ia = (int)(a * 255.0f + 0.5f); if (ia < 0) ia = 0; if (ia > 255) ia = 255;
     return ((unsigned int)ia << 24) | ((unsigned int)ir << 16) |
+           ((unsigned int)ig << 8) | (unsigned int)ib;
+}
+
+/* pack_argb with the alpha byte handed in already quantised, for the case
+ * where the alpha channel is a straight copy of the vertex's own alpha byte.
+ * See shade_vertex()'s DC_PVR_SHADE_ALPHA8 block for why that is exact
+ * rather than an approximation. */
+static inline unsigned int pack_rgb_a8(float r, float g, float b,
+                                       unsigned int a8) {
+    int ir, ig, ib;
+    ir = (int)(r * 255.0f + 0.5f); if (ir < 0) ir = 0; if (ir > 255) ir = 255;
+    ig = (int)(g * 255.0f + 0.5f); if (ig < 0) ig = 0; if (ig > 255) ig = 255;
+    ib = (int)(b * 255.0f + 0.5f); if (ib < 0) ib = 0; if (ib > 255) ib = 255;
+    return (a8 << 24) | ((unsigned int)ir << 16) |
            ((unsigned int)ig << 8) | (unsigned int)ib;
 }
 
@@ -1642,12 +1664,11 @@ static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
                ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
 #endif
 
+#ifdef DC_PVR_NO_SHADEFAST
     rgba[0] = v->color0[0] * (1.0f / 255.0f);
     rgba[1] = v->color0[1] * (1.0f / 255.0f);
     rgba[2] = v->color0[2] * (1.0f / 255.0f);
     rgba[3] = v->color0[3] * (1.0f / 255.0f);
-
-#ifdef DC_PVR_NO_SHADEFAST
     return pack_argb(chan_component(0, 0, rgba, eye, nrm, 0),
                      chan_component(0, 0, rgba, eye, nrm, 1),
                      chan_component(0, 0, rgba, eye, nrm, 2),
@@ -1655,7 +1676,105 @@ static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
 #else
     {
         float out[4];
+        /* --- S2: BUILD ONLY THE rgba LANES THAT ARE ACTUALLY READ ----------
+         *
+         * `chan_eval` reads `vtx_rgba[comp]` in exactly two places — the
+         * material fetch and the ambient fetch — and each is guarded by its
+         * channel control's own source being GX_SRC_VTX. In the town, emu64
+         * programs the colour half with amb_src = mat_src = GX_SRC_REG
+         * (emu64.c:3317), so `rgba[0..2]` were three byte loads, three
+         * int->float converts and three multiplies producing values NOTHING
+         * READ, on every lit vertex in the frame.
+         *
+         * The unread lanes are still WRITTEN, with 0.0f. That is deliberate:
+         * leaving them uninitialised would make a future drift between this
+         * predicate and chan_eval's guards read stack garbage — a much worse
+         * failure than a wrong colour, and one that would not reproduce. A
+         * store of zero is one instruction against the five it replaces.
+         *
+         * ⚠️ MEASURED 2026-08-08 AND DEFAULTED **OFF**. It is opt-in via
+         * -DDC_PVR_SHADE_LAZYRGBA. Together with the alpha-byte shortcut below
+         * it took `[VTXSPLIT] shade=` 2.09 -> 1.94 ms — and put MORE than that
+         * back into the per-primitive loop: `xform - sum` went 0.44 -> 0.71 ms
+         * and `us/v` did not move (2.65 -> 2.64).
+         *
+         * THE REASON IS THE PREDICATE'S PLACEMENT, NOT THE IDEA. `need_rgb`
+         * and `a8` are three g_gx loads and three branches evaluated PER
+         * VERTEX to save three int->float converts — that moves work rather
+         * than removing it. They are per-BATCH constants: every writer of
+         * chan_ctrl_* calls dc_gx_flush_if_begin_complete() first
+         * (dc_gx.c:1879,1911,1935,1947,2065), so the state provably cannot
+         * change inside one dc_gx_backend_submit(). Hoisting them next to
+         * `need_light` is the version worth measuring, and it is the reason
+         * this code is kept rather than deleted.
+         *
+         * (Not the icache: Flycast models none. This is added instructions.) */
+        int need_rgb, need_a;
+#ifndef DC_PVR_SHADE_LAZYRGBA
+        need_rgb = 1;
+        need_a = 1;
+#else
+        need_rgb = (g_gx.chan_ctrl_mat_src[0] == GX_SRC_VTX) ||
+                   (g_gx.chan_ctrl_amb_src[0] == GX_SRC_VTX);
+        need_a   = (g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX) ||
+                   (g_gx.chan_ctrl_amb_src[1] == GX_SRC_VTX);
+#endif
+
+        /* --- S3: THE ALPHA LANE IS A BYTE COPY, AND IT IS EXACT ------------
+         *
+         * When the alpha half is DISABLED and its material source is the
+         * vertex — which is exactly what emu64 programs for every lit draw
+         * (`GXSetChanCtrl(GX_ALPHA0, GX_FALSE, GX_SRC_REG, GX_SRC_VTX, ...)`,
+         * emu64.c:3325) — chan_eval takes its early return and produces
+         *
+         *     out[3] = mat[3] = vtx_rgba[3] = v->color0[3] * (1/255)
+         *
+         * which pack_argb then turns back into `(int)(x*255 + 0.5)`, i.e. into
+         * v->color0[3] again. The round-trip error is ~1e-5 against the 0.5
+         * that would change the byte — the same argument this file already
+         * makes for the whole-vertex pass-through above; it simply was never
+         * applied to the alpha lane of the LIT path.
+         *
+         * So: emit the byte, and skip the second chan_eval call, its three
+         * g_gx loads, the rgba[3] convert, and pack_argb's fourth lane.
+         *
+         * The predicate is a RUNTIME test of the same two fields chan_eval
+         * would branch on, so it fails closed: any batch that does not match
+         * takes the full path unchanged.
+         *
+         * ⚠️ ALSO DEFAULTED **OFF**, for the same reason as the block above —
+         * opt-in via -DDC_PVR_SHADE_ALPHA8. The shortcut itself is exact and
+         * it fires constantly (`shade_a8 verts=12,543,600` on a 600 s town
+         * run), so what failed to pay was the PER-VERTEX predicate, not the
+         * saving. Hoist the predicate per batch and re-measure.
+         *
+         * Counter: `shade_a8=` in dc_pvr_report(). */
+        int a8;
+#ifndef DC_PVR_SHADE_ALPHA8
+        a8 = 0;
+#else
+        a8 = (!g_gx.chan_ctrl_enable[1] &&
+              g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX);
+        if (a8) need_a = 0;
+#endif
+
+        if (need_rgb) {
+            rgba[0] = v->color0[0] * (1.0f / 255.0f);
+            rgba[1] = v->color0[1] * (1.0f / 255.0f);
+            rgba[2] = v->color0[2] * (1.0f / 255.0f);
+        } else {
+            rgba[0] = rgba[1] = rgba[2] = 0.0f;
+        }
+        rgba[3] = need_a ? (v->color0[3] * (1.0f / 255.0f)) : 0.0f;
+
         chan_eval(0, 0, 0, 2, rgba, eye, nrm, out);   /* the colour half */
+#ifdef DC_PVR_SHADE_ALPHA8
+        if (a8) {
+            s_shade_a8++;
+            return pack_rgb_a8(out[0], out[1], out[2],
+                               (unsigned int)v->color0[3]);
+        }
+#endif
         chan_eval(0, 1, 3, 3, rgba, eye, nrm, out);   /* the alpha half  */
         return pack_argb(out[0], out[1], out[2], out[3]);
     }
@@ -2237,23 +2356,139 @@ static inline void vs_charge(VsMark* m, int bucket) {
 #define VS_SAMPLE_END    ((void)0)
 #endif
 
-static void emit_projected(const ClipVtx* c, unsigned int flags) {
-    pvr_vertex_t pv;
-    float inv_w = 1.0f / c->w;
-
-    pv.flags = flags;
-    pv.x = s_vp_cx + s_vp_hw * (c->x * inv_w);
-    pv.y = s_vp_cy - s_vp_hh * (c->y * inv_w);
-    pv.z = inv_w;
-    pv.u = c->u;
-    pv.v = c->v;
-    pv.argb = c->argb;
-#ifdef DC_PVR_TEVP3
-    pv.oargb = c->oargb;
-#else
-    pv.oargb = 0;
+/* ==========================================================================
+ * G-C — Direct Rendering: build the vertex IN the store queue
+ * ==========================================================================
+ * MEASURED, 2026-08-08 (G5 / [VTXSPLIT]): `emit` is 2.15 ms of an 8.9 ms
+ * `xform`, the largest of the seven stages, and the frame is memory-bound —
+ * emit+shade+memo are 75 % of it while ALL the floating-point is 0.81 ms
+ * (kb/research-sh4zam-gap.md §3).
+ *
+ * WHAT WAS COSTING. Every TA word went stack -> SQ:
+ *   1. eight field stores into a stack `pvr_vertex_t pv`
+ *   2. submit_prim() -> pvr_prim() -> sq_fast_cpy(), which READS those 32 bytes
+ *      back as four 64-bit `fmov`s and writes them to the SQ, then `pref`s
+ * i.e. a build pass, a read-back and a second store pass per corner, plus two
+ * calls and an `fschg` pair.
+ *
+ * WHAT THIS DOES. `pvr_dr_target()` hands back the store-queue address itself,
+ * so the same eight stores land directly in the SQ and `pvr_dr_commit()` is the
+ * `pref`. The read-back, the second store pass and both calls disappear. The
+ * arithmetic is untouched — same divide, same viewport map, same bytes.
+ *
+ * WHY THIS IS SAFE TO MIX WITH pvr_prim(), verified in the KOS 2.3 source in
+ * the SDK image rather than assumed:
+ *   - `pvr_dr_addr` is a plain global, statically initialised to MEM_AREA_SQ_BASE
+ *     (kos/.../pvr/pvr_globals.c:21). `pvr_dr_init()` is a deprecated no-op in
+ *     KOS 2.3 (pvr_legacy.h:282) — there is nothing to initialise and nothing
+ *     this file has to call first.
+ *   - `pvr_dr_target()` is `pvr_dr_addr ^= 32` and `pvr_dr_commit(a)` is
+ *     `sq_flush(a)`, i.e. one `pref` (pvr.h:1001,1008).
+ *   - ⭐ `sq_flush()` CLOBBERS "memory" — `__asm__ __volatile__("pref @%0" :
+ *     : "r"(src) : "memory")` (arch/sq.h:112-118). This is the load-bearing
+ *     one and it is the reason the eight plain stores below are ordered before
+ *     the `pref` at all: an `asm volatile` without that clobber orders only
+ *     against other volatile asm, and GCC would have been free to sink the
+ *     stores past it and hand the TA the PREVIOUS primitive's 32 bytes. The
+ *     old path never had the exposure because `sq_fast_cpy` did its stores
+ *     inside the asm. If a future KOS ever drops the clobber, put a
+ *     `__asm__ __volatile__("" ::: "memory")` in front of the commit — zero
+ *     instructions, and it makes the guarantee local instead of borrowed.
+ *   - `pvr_list_begin()` only takes the `sq_lock` arm when NOT in DMA mode.
+ *     This build sets `p.dma_enabled = 0` (search `dma_enabled` below)
+ *     — that is the precondition, not an accident.
+ *   - The store queues need QACR0/QACR1, which stop working the moment the MMU
+ *     is on (kb/research-mmu-hardware-tax.md). MMU paging is DEAD
+ *     (kb/research-mmu-paging.md), so this is a dependency on a decision that
+ *     is already made, but it is a dependency and it is now written down.
+ *   - `pvr_list_begin()` has ALREADY done `sq_lock((void *)PVR_TA_INPUT)` for
+ *     the open list (pvr_scene.c:198) and `pvr_list_finish()` does the
+ *     `sq_unlock` (:230). QACR is therefore set up for the TA across exactly
+ *     the window in which this function can run, and DR and `pvr_prim()` share
+ *     it. `pvr_prim()` always targets SQ0; DR alternates SQ0/SQ1.
+ *
+ * ⚠️ THE PUNCH-THROUGH ROUTE KEEPS THE OLD PATH, AND THE REASON IS TEMPORAL,
+ * NOT RESOURCE. A PT batch is not submitted here at all — it is memcpy'd into
+ * s_pt_buf and replayed after the general list closes (see :11-47 and
+ * dc_gx_backend_frame_end). The store queue exists and is locked at both
+ * moments; what does not exist is permission to write list 4 yet. This
+ * function runs while the GENERAL list is open, and a PT record must be HELD
+ * until list 4 can legally be opened, so it has to go to RAM rather than to a
+ * queue currently pointed at a different list. The replay loop itself could
+ * legitimately use DR — 96-ish records a frame, so it is not worth it — but
+ * the PRODUCER here could not.
+ *
+ * ⚠️ THE SQ IS WRITE-ONLY. Nothing may read a field back after storing it,
+ * which is why the values are kept in locals and DC_PVR_BATCH_LOG reads those
+ * rather than the emitted record.
+ *
+ * ⚠️ All 32 bytes are written every time. The SQ holds the PREVIOUS
+ * primitive's words until overwritten, so a skipped field would emit stale
+ * geometry, not a zero.
+ *
+ * Kill switch: -DDC_PVR_NO_DR. `dr` then folds to a compile-time 0 and the
+ * whole DR arm is dead code the compiler removes, so the killed build is
+ * byte-identical to the pre-G-C one AT ANY OPTIMISATION LEVEL THE `perf` AND
+ * `size` PROFILES USE. Under DC_OPT_PROFILE=o0 it is not: `int dr = 0` and the
+ * empty then-block survive as a live `mov #0 / tst / bt`. That profile exists
+ * to bisect miscompiles, not to size .text, so the difference is stated rather
+ * than engineered away. Counter: `dr=` in dc_pvr_report(). */
+#ifndef DC_PVR_NO_DR
+static unsigned int s_dr_verts;     /* vertices written straight into the SQ */
 #endif
-    submit_prim(&pv, sizeof(pv));
+
+static void emit_projected(const ClipVtx* c, unsigned int flags) {
+    float inv_w = 1.0f / c->w;
+    float px = s_vp_cx + s_vp_hw * (c->x * inv_w);
+    float py = s_vp_cy - s_vp_hh * (c->y * inv_w);
+#ifdef DC_PVR_TEVP3
+    unsigned int oargb = c->oargb;
+#else
+    unsigned int oargb = 0;
+#endif
+    int dr = 0;
+
+#ifndef DC_PVR_NO_DR
+    dr = 1;
+#ifndef DC_PVR_NO_PUNCHTHRU
+    if (s_pt_route) dr = 0;
+#endif
+#endif
+
+    if (dr) {
+#ifndef DC_PVR_NO_DR
+        pvr_vertex_t* dv = (pvr_vertex_t*)pvr_dr_target();
+        dv->flags = flags;
+        dv->x = px;
+        dv->y = py;
+        dv->z = inv_w;
+        dv->u = c->u;
+        dv->v = c->v;
+        dv->argb = c->argb;
+        dv->oargb = oargb;
+        pvr_dr_commit(dv);
+        s_dr_verts++;
+#endif
+    } else {
+        /* The attribute RESTATES the type's own alignment; it does not add
+         * one. `pvr_vertex_t` carries `alignas(32)` on its first member
+         * (pvr.h:421), so this variable was always 32-aligned and the old code
+         * was not getting away with anything — which also means the attribute
+         * cannot move the stack frame and cannot threaten the kill switch's
+         * byte-identity. It is here because the alignment is load-bearing and
+         * invisible: sq_fast_cpy() reads the source as four 64-bit `fmov`s,
+         * which fault on a 4-aligned address. */
+        pvr_vertex_t pv __attribute__((aligned(32)));
+        pv.flags = flags;
+        pv.x = px;
+        pv.y = py;
+        pv.z = inv_w;
+        pv.u = c->u;
+        pv.v = c->v;
+        pv.argb = c->argb;
+        pv.oargb = oargb;
+        submit_prim(&pv, sizeof(pv));
+    }
 #ifndef DC_PVR_NO_PUNCHTHRU
     if (s_pt_route) s_pt_verts++;
 #endif
@@ -2261,28 +2496,29 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
 #ifdef DC_PVR_BATCH_LOG
     /* Accumulate what the TA was actually handed, not what we think it was.
      * "Submitted" and "on screen" are different claims and the draw-call
-     * counter cannot tell them apart. */
+     * counter cannot tell them apart. Reads the LOCALS, never the emitted
+     * record: under DR that record lives in the write-only store queue. */
     if (s_batch_log_now) {
         if (!s_bl_n) {
-            s_bl_x0 = s_bl_x1 = pv.x;
-            s_bl_y0 = s_bl_y1 = pv.y;
-            s_bl_z0 = s_bl_z1 = pv.z;
-            s_bl_u0 = s_bl_u1 = pv.u;
-            s_bl_v0 = s_bl_v1 = pv.v;
+            s_bl_x0 = s_bl_x1 = px;
+            s_bl_y0 = s_bl_y1 = py;
+            s_bl_z0 = s_bl_z1 = inv_w;
+            s_bl_u0 = s_bl_u1 = c->u;
+            s_bl_v0 = s_bl_v1 = c->v;
         } else {
-            if (pv.x < s_bl_x0) s_bl_x0 = pv.x;
-            if (pv.x > s_bl_x1) s_bl_x1 = pv.x;
-            if (pv.y < s_bl_y0) s_bl_y0 = pv.y;
-            if (pv.y > s_bl_y1) s_bl_y1 = pv.y;
-            if (pv.z < s_bl_z0) s_bl_z0 = pv.z;
-            if (pv.z > s_bl_z1) s_bl_z1 = pv.z;
-            if (pv.u < s_bl_u0) s_bl_u0 = pv.u;
-            if (pv.u > s_bl_u1) s_bl_u1 = pv.u;
-            if (pv.v < s_bl_v0) s_bl_v0 = pv.v;
-            if (pv.v > s_bl_v1) s_bl_v1 = pv.v;
+            if (px < s_bl_x0) s_bl_x0 = px;
+            if (px > s_bl_x1) s_bl_x1 = px;
+            if (py < s_bl_y0) s_bl_y0 = py;
+            if (py > s_bl_y1) s_bl_y1 = py;
+            if (inv_w < s_bl_z0) s_bl_z0 = inv_w;
+            if (inv_w > s_bl_z1) s_bl_z1 = inv_w;
+            if (c->u < s_bl_u0) s_bl_u0 = c->u;
+            if (c->u > s_bl_u1) s_bl_u1 = c->u;
+            if (c->v < s_bl_v0) s_bl_v0 = c->v;
+            if (c->v > s_bl_v1) s_bl_v1 = c->v;
         }
         s_bl_n++;
-        s_bl_argb = pv.argb;
+        s_bl_argb = c->argb;
     }
 #endif
 }
@@ -2361,6 +2597,55 @@ static inline unsigned int vmemo_hash(const DCGXVertex* v) {
     return h & (VMEMO_SLOTS - 1);
 }
 
+/* THE COMPARE, AS 8 LOADS PER SIDE AND ONE BRANCH
+ * ==========================================================================
+ * The field-by-field form below (kept as the kill switch) is 12 compares and
+ * 12 DEPENDENT CONDITIONAL BRANCHES — `&&` is a sequence point, so each one
+ * is a T-bit test the SH-4 cannot fold or reorder. Estimated at 50-65 of the
+ * memo's measured 122 cycles per vertex, which makes it the largest single
+ * block in the stage.
+ *
+ * THE LIVE BYTES ARE 30, NOT 28. DCGXVertex is position[3] (0-11) +
+ * texcoord[2] (12-19) + color0[4] (20-23) + normal[3] (24-29), in a 32-byte
+ * shell whose last two bytes are never written by anything
+ * (dc_gx_internal.h:116-128). So the exact compare is SEVEN uint32 words plus
+ * ONE uint16 — a plain 32-byte memcmp would read the two dead bytes, and a
+ * 7-word compare would silently drop `normal[2]` and mis-light any two corners
+ * that differ only in it.
+ *
+ * OR-then-test rather than compare-then-branch: the eight XORs are
+ * independent, so they pipeline, and there is exactly one branch at the end.
+ *
+ * ⚠️ TWO FLOAT-SEMANTIC DELTAS, both harmless, both stated rather than
+ * discovered later:
+ *   NaN vs the same NaN bits — `==` says different (miss), bitwise says same
+ *     (hit). Identical bits go through FTRV/FIPR to identical outputs, so this
+ *     is one FEWER recompute for the same emitted bytes.
+ *   +0.0 vs -0.0 — `==` says same (hit), bitwise says different (miss). One
+ *     lost hit; the vertex is recomputed and emits the same bytes.
+ * Neither can change a pixel. Both change `vmemo=` by a rounding, which is
+ * why the falsification below is the SPLIT and not the hit rate.
+ *
+ * Kill switch: -DDC_PVR_NO_VMEMO_WORDCMP restores the 12-field form verbatim.
+ * Also disabled automatically under -DDC_GX_FAT_VERTEX, whose 40-byte layout
+ * these offsets do not describe. */
+#if !defined(DC_PVR_NO_VMEMO_WORDCMP) && !defined(DC_GX_FAT_VERTEX)
+/* A hard error rather than a silent wrong answer if the struct ever moves. */
+typedef char dc_vmemo_layout_check[(sizeof(DCGXVertex) == 32) ? 1 : -1];
+
+static inline int vmemo_same(const DCGXVertex* a, const DCGXVertex* b) {
+    const unsigned int* wa = (const unsigned int*)(const void*)a;
+    const unsigned int* wb = (const unsigned int*)(const void*)b;
+    /* bytes 28-29: normal[2]. Bytes 30-31 are the dead tail and are NOT read. */
+    const unsigned short* ha = (const unsigned short*)(const void*)&a->normal[2];
+    const unsigned short* hb = (const unsigned short*)(const void*)&b->normal[2];
+    unsigned int d = (wa[0] ^ wb[0]) | (wa[1] ^ wb[1]) | (wa[2] ^ wb[2]) |
+                     (wa[3] ^ wb[3]) | (wa[4] ^ wb[4]) | (wa[5] ^ wb[5]) |
+                     (wa[6] ^ wb[6]) |
+                     (unsigned int)((unsigned int)*ha ^ (unsigned int)*hb);
+    return d == 0u;
+}
+#else
 static inline int vmemo_same(const DCGXVertex* a, const DCGXVertex* b) {
     return a->position[0] == b->position[0] &&
            a->position[1] == b->position[1] &&
@@ -2372,6 +2657,7 @@ static inline int vmemo_same(const DCGXVertex* a, const DCGXVertex* b) {
            a->normal[0] == b->normal[0] && a->normal[1] == b->normal[1] &&
            a->normal[2] == b->normal[2];
 }
+#endif
 #endif /* !DC_PVR_NO_VTXMEMO */
 
 static void lerp_vtx(ClipVtx* out, const ClipVtx* a, const ClipVtx* b, float t) {
@@ -3588,6 +3874,18 @@ void dc_pvr_report(void) {
                 line, sum, s_vs_prims, s_vs_samples, s_vs_hits, s_vs_drops,
                 (unsigned int)(DC_PVR_VTXSPLIT));
     }
+#endif
+#ifndef DC_PVR_NO_DR
+    /* G-C's falsification counter. `dr=` must be within a rounding of
+     * tris out*3 minus the punch-through verts; a 0 here on a run that drew
+     * anything means the DR arm never ran and any timing change is something
+     * else. See emit_projected(). */
+    DC_LOGE("[DC/PVR] dr verts=%u of %u emitted (pt takes the rest)\n",
+            s_dr_verts, s_tris_out * 3u);
+#endif
+#if defined(DC_PVR_SHADE_ALPHA8) && !defined(DC_PVR_NO_LIGHTING) && \
+    !defined(DC_PVR_NO_SHADEFAST)
+    DC_LOGE("[DC/PVR] shade_a8 verts=%u\n", s_shade_a8);
 #endif
 #ifndef DC_PVR_NO_TEX1ALPHA
     DC_LOGE("[DC/PVR] tex1alpha batches=%u of %u\n", s_tex1_batches, s_batches);

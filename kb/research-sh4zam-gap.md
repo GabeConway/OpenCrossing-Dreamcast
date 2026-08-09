@@ -203,10 +203,49 @@ solely to short-circuit repeated source vertices, and its measured hit rate is
 same problem. Doing it structurally — transform the unique set once, index into
 it — beats caching it, and deletes the hash and the 12-field compare too.
 
+### G-C ✅ DONE 2026-08-08 — `emit` 2.20 → 1.45 ms, −34 %
+
+**SHIPPED AND ON BY DEFAULT.** Not pattern C (stage-then-blast) as this section
+recommends below, but **pattern A (fused DR)**: `emit_projected()` writes the
+eight TA words straight into `pvr_dr_target()` and `pref`s them with
+`pvr_dr_commit()`. That deletes the stack `pvr_vertex_t` build pass, the
+read-back `sq_fast_cpy` did of it, and two calls per corner — touches 2 and 4
+of the table below, which is what pattern C was proposed to achieve, without
+changing what `g_gx.vertex_buffer[]` is.
+
+| | baseline | G-C |
+|---|---:|---:|
+| `[VTXSPLIT] emit` | 2.20 ms | **1.45 ms** |
+| per emitted vertex | 0.801 µs | **0.513 µs** (−36 %) |
+| `us/v` | 3.24 | **2.89** |
+| `draw` | 30.7 ms | 29.3 ms |
+
+Counter `[DC/PVR] dr verts=30,386,676 of 37,204,221` = **81.7 %**, exactly the
+non-punch-through share: the PT producer keeps the stack path because a PT
+record must be **held** until list 4 can legally be opened, and DR writes a
+queue currently pointed at the general list. Kill switch `-DDC_PVR_NO_DR`.
+
+The four KOS 2.3 facts it rests on were read out of the SDK image, not assumed
+— `pvr_dr_addr` is a global statically initialised to `MEM_AREA_SQ_BASE`
+(`pvr_globals.c:21`), `pvr_dr_init()` is a deprecated no-op, `pvr_list_begin()`
+already `sq_lock`s the TA (`pvr_scene.c:198`), and **`sq_flush()` clobbers
+`"memory"`** (`arch/sq.h:112-118`), which is the one that makes the eight plain
+stores ordered before the `pref` at all. `dc/src/` now depends on QACR, hence
+on the MMU staying off — noted in `kb/research-mmu-hardware-tax.md:67`.
+
+The section below is kept as the analysis that led here.
+
 ### G-C 🔴 Stop calling `pvr_prim`. A vertex is touched 4-5×.
 
 Every TA word funnels through `pvr_prim()` (`dc/src/dc_pvr.c:544-549`). No
 `pvr_dr_*`, no `sq_*`, no `QACR` anywhere in `dc/`.
+
+> ⚠️ **STALE AS OF 2026-08-08 — `emit_projected()` NOW USES `pvr_dr_*`.** The
+> vertex is built directly in the store queue; the punch-through producer still
+> takes the old stack path, and the poly header still goes through `pvr_prim`.
+> Kill switch `-DDC_PVR_NO_DR`. The sentence above is kept because the rest of
+> this section is written against it. **`dc/src/` now depends on QACR, and so on
+> the MMU staying off** — see `kb/research-mmu-hardware-tax.md:67`.
 
 | touch | file:line |
 |---|---|
@@ -522,14 +561,41 @@ because that predates session 9's fourth-iteration levers. `fps_p50` **25.9**.
 | **xf** | **0.23** | 3 % | ⭐ **the position FTRV** |
 | sum / xform | 7.87 / 8.9 | 88 % | the 1.0 ms residual is per-primitive loop overhead |
 
+> ### 🔴 CORRECTION 2026-08-08 — THE PER-VERTEX CYCLE FIGURES BELOW ARE HALVED
+>
+> **`VS_MARK(VS_SHADE)` and every mark after `VS_MEMO` sit DOWNSTREAM of the
+> memo-hit `continue`** (`dc_pvr.c`, the k-loop). A memo hit is charged to
+> `memo` and to nothing else. So `xf`, `lit`, `tex`, `shade` and `post`
+> accumulate over memo **MISSES**, not over all `v` vertices — and dividing
+> them by `v` understates every one of them by the hit rate.
+>
+> With `samp=558095 memohit=835733` → 1,674,285 sampled corners, **49.9 % hit**:
+>
+> | stage | charged on | as published | **actual** |
+> |---|---|---:|---:|
+> | `memo` | every vertex (2745) | 122 cyc | 122 cyc ✔ |
+> | `shade` | misses only (~1375) | 148 cyc | **~295 cyc** |
+> | `lit` | lit ∧ miss (~1309) | 44 cyc | **~89 cyc** |
+>
+> **The paragraph immediately below is therefore wrong about WHY, and right
+> about WHAT.** `lit` at 89 cycles is *not* "about what six FIPRs should cost";
+> there is roughly 2x of headroom in that block. But it is still **0.58 ms of a
+> 30 ms frame**, so the demotion stands — **on absolute milliseconds, not on
+> the cycle argument.** Do not re-promote §0a on the strength of the 89 either:
+> a perfect rewrite of the whole stage is still worth under 0.3 ms.
+>
+> `memo`'s 122 is unaffected — it is the one stage charged on every vertex.
+
 ⭐⭐ **§0a AND G-D ARE AIMED AT 0.58 ms OF A 30 ms FRAME — 1.9 %, and a
-perfect FTRV rewrite takes maybe half of it.** `lit` is 222 ns over 2,613 lit
+perfect FTRV rewrite takes maybe half of it.** ~~`lit` is 222 ns over 2,613 lit
 vertices = **44 cycles**, which is about what six FIPRs, an FSRRA and a
-normalize *should* cost. The block is not slow. **§0a is hereby DEMOTED from
-#2 to the bottom of the list**, on a measurement rather than an argument —
-and the 2026-08-06 correction it "reopened" was closer to right than the
-reopening was. The position FTRV is **0.23 ms**: every matrix-unit idea in
-this document is chasing ~0.8 ms combined.
+normalize *should* cost.~~ (See the correction above: the divisor is misses,
+not lit vertices, and the real figure is ~89.) The block is not the frame's
+problem. **§0a is hereby DEMOTED from #2 to the bottom of the list**, on a
+measurement rather than an argument — and the 2026-08-06 correction it
+"reopened" was closer to right than the reopening was. The position FTRV is
+**0.23 ms**: every matrix-unit idea in this document is chasing ~0.8 ms
+combined.
 
 ⭐⭐⭐ **THE FRAME IS MEMORY-BOUND, NOT FPU-BOUND.** `memo` costs **122 cycles
 per vertex** for a hash and a 12-field compare — that is not arithmetic, that

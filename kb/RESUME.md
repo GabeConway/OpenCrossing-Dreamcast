@@ -1,5 +1,65 @@
 # RESUME — pick the session back up here
 
+## ⭐⭐⭐ SESSION 12 (2026-08-08) — THE MEMORY-BOUND READING PAID. `us/v` IS
+## 3.24 → 2.65, AND THE THREE WINS ARE ON BY DEFAULT. START HERE.
+
+Session 11b said the frame is memory-bound and ranked the queue by it. This
+session spent the top of that queue. Three measured runs, **one change each**,
+same build line (town, `DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`, static camera,
+600 s):
+
+```
+                     memo    xf   lit   tex shade  post  emit |  sum  xform  us/v  draw   FPS
+baseline (all off)   1.74  0.23  0.62  0.62  2.13  0.57  2.20 | 8.11   8.9   3.24  30.7  25.2-26.5
++ G-C (pvr_dr_*)     1.77  0.23  0.64  0.63  2.19  0.58  1.45 | 7.49   8.2   2.89  29.3  26.6-27.4
++ align + wordcmp    1.26  0.22  0.61  0.61  2.09  0.53  1.43 | 6.76   7.2   2.65  27.7  27.7-28.0
+```
+
+**`us/v` −18.2 %, `xform` −1.7 ms, `draw` −3.0 ms, ~+2.5 FPS.** All three are
+**ON by default**; `kb/state-log.md` carries the evidence and the counters.
+
+### What shipped
+
+1. **G-C — `emit` 2.20 → 1.45 ms (−34 %).** `emit_projected()` writes the eight
+   TA words straight into `pvr_dr_target()` and `pref`s with `pvr_dr_commit()`.
+   Counter `[DC/PVR] dr verts=` reads **81.7 %** of emitted vertices — exactly
+   the non-punch-through share. Kill: `-DDC_PVR_NO_DR`.
+2. **`DCGXVertex` → `aligned(32)`.** It was 32 bytes at `aligned(8)` landing on
+   `&31 == 8`, so **every vertex straddled two operand-cache lines**, split
+   across pos/tex/color | normal. Kill: `-DDC_GX_NO_VTXALIGN`.
+3. **`vmemo_same()` branch-free** — 12 dependent branches → 8 XOR-OR loads per
+   side and one branch. `memo` 1.77 → 1.26 (−29 %). ⭐ **Hit rate 51.0 → 51.5 %:
+   the cost of asking changed, the answer did not.** Kill:
+   `-DDC_PVR_NO_VMEMO_WORDCMP`.
+
+### What did NOT pay, and why it is worth knowing
+
+`shade`'s lazy-`rgba` and alpha-byte shortcuts are **written, correct, and
+DEFAULTED OFF** (`-DDC_PVR_SHADE_LAZYRGBA`, `-DDC_PVR_SHADE_ALPHA8`). They took
+`shade=` 2.09 → 1.94, and put more than that back: **`xform − sum` went 0.44 →
+0.71 ms** and `us/v` did not move. The predicates are evaluated **per vertex**
+to save three converts — that moves work rather than removing it. They are
+per-BATCH constants (every `chan_ctrl_*` writer calls
+`dc_gx_flush_if_begin_complete()` first). **Hoist them next to `need_light` and
+re-measure — that is the first thing to try next session.**
+
+### 🔴 TWO CORRECTIONS THIS SESSION FORCED — MEASUREMENT RULE 10
+
+**RULE 10: `[VTXSPLIT]`'s `xf`/`lit`/`tex`/`shade`/`post` are charged on memo
+MISSES, not on `v`.** Their `VS_MARK`s are downstream of the memo-hit
+`continue`. At a 49.9 % hit rate, dividing by `v` halves every one of them:
+`shade` is **~295** cycles/vertex not 148, `lit` is **~89** not 44. `memo`,
+charged on every vertex, is unaffected at 122. This retires
+`kb/research-sh4zam-gap.md` §3's "44 cycles ≈ six FIPRs, so the block was never
+slow" — **the §0a/G-D demotion still stands, but on absolute milliseconds
+(0.58 ms of 30), not on that argument.**
+
+**`GX_AF_SPOT` is unreachable in the whole tree.** `emu64.c:3316` gates it on
+`G_LIGHTING_POSITIONAL` (0x400000), which has three references — a name table
+and its two readers — and nothing ever sets it. `chan_eval`'s spot branch and
+its per-light FDIV are dead weight. The town runs **exactly 2 lights** (sun +
+moon, unconditional, `m_kankyo.c:1282-1290`), not 8.
+
 ## 🔴🔴 SESSION 11b (2026-08-08) — `xform` IS SPLIT, AND THE FRAME IS
 ## MEMORY-BOUND. THE sh4zam QUEUE IS RE-RANKED. READ THIS BEFORE §1 BELOW.
 
@@ -670,7 +730,7 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
 
 </details>
 
-## 0b. THE MEASUREMENT RULES. Now NINE — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, **9 on 2026-08-06**.
+## 0b. THE MEASUREMENT RULES. Now TEN — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, 9 on 2026-08-06, **10 on 2026-08-08**.
 
 1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
    any visual comparison.
@@ -718,6 +778,18 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
    instrument that samples per logic tick and a phase counter that samples per
    presented frame have **different denominators**, and any new counter must say
    which one it is. `kb/traps.md`.
+10. 🔴 **STATE THE DENOMINATOR *WITHIN* AN INSTRUMENT TOO — `[VTXSPLIT]`'s
+    SEVEN BUCKETS DO NOT SHARE ONE.** `memo` is charged on every vertex;
+    `xf`, `lit`, `tex`, `shade` and `post` are charged only on memo **MISSES**,
+    because their `VS_MARK`s sit downstream of the memo-hit `continue` in the
+    k-loop; `emit` is charged per PRIMITIVE. So a per-vertex cycle figure for
+    the middle five must divide by `v × (1 − hit_rate)`, not by `v`. At the
+    measured 49.9 % hit that is a factor of two, and **two documents published
+    the halved figures** — `shade` is ~295 cycles/vertex, not 148; `lit` is
+    ~89, not 44 (2026-08-08, `kb/state-log.md`). The ms-per-frame figures the
+    buckets print are correct as printed; only the per-vertex derivation was
+    wrong. Generalisation of rule 9: **a bucket inside a sampler can have a
+    different denominator from the sampler.**
 
 ## 1. Where the port is
 

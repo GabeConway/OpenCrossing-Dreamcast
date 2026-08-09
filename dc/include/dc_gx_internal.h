@@ -111,8 +111,54 @@ void dc_gx_mark_dirty(unsigned int flag);
  * CAVEAT, recorded so nobody banks it twice: this saving is real .bss today,
  * but GLdc (M2, stage A) will bring its own vertex and command buffers, which
  * are ADDITIVE HEAP that no bucket currently reserves. This change does not
- * pay for those. */
+ * pay for those.
+ *
+ * ==========================================================================
+ * ⭐ THE ALIGNMENT IS NOT COSMETIC — IT IS ONE CACHE LINE PER VERTEX
+ * ==========================================================================
+ * MEASURED FROM THE SHIPPED MAP, 2026-08-08, on the build in dc/build:
+ *
+ *     g_gx                                   = 0x8c993070  (map:188257)
+ *     offsetof(DCGXState, vertex_buffer)     = 24   (5 ints, then aligned(8))
+ *     &vertex_buffer[0]                      = 0x8c993088,  & 31 == 8
+ *
+ * The SH-4's operand cache has 32-BYTE LINES. A 32-byte vertex starting 8
+ * bytes into a line spans bytes 8..39 — i.e. **every single vertex straddled
+ * TWO cache lines**, split exactly across the field boundary that matters:
+ *
+ *     line A:  position[3] + texcoord[2] + color0[4]     (bytes 0..23)
+ *     line B:  normal[3]                                 (bytes 24..29)
+ *
+ * So the vertex memo's hash (position + color0) touched line A, its 12-field
+ * compare additionally touched line B — on BOTH sides — and the lighting path
+ * touched B again. Two line fills per vertex where the struct is exactly one
+ * line wide.
+ *
+ * aligned(32) raises DCGXState's own alignment to 32, which moves
+ * vertex_buffer to offset 32 and pins every vertex to exactly one line. It
+ * costs 8 bytes of padding in a 71,784-byte struct and changes no field
+ * offset within the vertex, so it cannot change a single emitted byte —
+ * it can only change how many lines are filled to produce them.
+ *
+ * ⚠️ THIS IS WHY IT WAS WORTH DOING AT ALL: the frame is MEMORY-bound, not
+ * FPU-bound (kb/research-sh4zam-gap.md §3 — emit+shade+memo are 75 % of
+ * `xform` while all the floating point is 0.81 ms of 30). A change that halves
+ * the line fills on the one struct every stage reads is aimed at the actual
+ * constraint. ⚠️ And Flycast models NO cache at all, so whatever it reports
+ * for this is a FLOOR, not the hardware answer.
+ *
+ * Kill switch: -DDC_GX_NO_VTXALIGN restores aligned(8). */
 #define DC_GX_NRM_SCALE 32767.0f
+
+/* ⚠️ NOT under -DDC_GX_FAT_VERTEX. That layout is 40 bytes, and aligning a
+ * 40-byte struct to 32 rounds sizeof UP to 64 — which would add
+ * DC_GX_MAX_VERTS * 24 = 48,960 B of .bss to buy a cache property the fat
+ * layout cannot have anyway (40 never divides 32). The fat build keeps 8. */
+#if defined(DC_GX_NO_VTXALIGN) || defined(DC_GX_FAT_VERTEX)
+#define DC_GX_VTX_ALIGN 8
+#else
+#define DC_GX_VTX_ALIGN 32
+#endif
 typedef struct {
     float position[3];      /*  0 */
     float texcoord[2];      /* 12 */
@@ -125,7 +171,7 @@ typedef struct {
     unsigned short _pad;    /* 34 */
     float _reserved;        /* 36 -> 40 */
 #endif
-} __attribute__((aligned(8))) DCGXVertex;   /* 32 B lean, 40 B fat */
+} __attribute__((aligned(DC_GX_VTX_ALIGN))) DCGXVertex;  /* 32 B lean, 40 B fat */
 
 typedef struct {
     int color_a, color_b, color_c, color_d;
@@ -218,6 +264,34 @@ typedef struct {
     int chan_ctrl_light_mask[4];
     int chan_ctrl_diff_fn[4];
     int chan_ctrl_attn_fn[4];
+    /* ⭐ FIELD ORDER IS A CACHE DECISION, NOT A STYLE ONE.
+     *
+     * `chan_eval()` (dc_pvr.c) reads exactly TWO of these five groups per light
+     * per vertex: `pos[0..2]` and `color[0..2]` — 24 live bytes of a 64-byte
+     * struct. `dir`, `a*` and `k*` are 40 bytes read ONLY on the GX_AF_SPOT
+     * path, and GX_AF_SPOT is unreachable in this game: emu64.c:3316 gates it
+     * on G_LIGHTING_POSITIONAL (0x400000), which has exactly three references
+     * in the whole tree — a name table and its two readers — and no display
+     * list or runtime call ever sets it.
+     *
+     * The declaration order used to be pos, dir, color, ... which put the two
+     * hot groups 24 bytes apart with 12 cold bytes wedged between them:
+     * `pos[0]` at +0 and `color[2]` at +32 are 32 bytes apart, so a light
+     * spanned TWO 32-byte cache lines no matter how it was aligned. Ordering
+     * pos before color puts the whole hot set in bytes 0..23 — one line.
+     *
+     * aligned(32) then pins that line: 64 is a multiple of 32, so EVERY light
+     * gets the same intra-line phase rather than depending on where the linker
+     * happens to drop g_gx (measured: it landed at offset 70636, i.e. 28 bytes
+     * into a line, so light 0's `pos[0]` was the LAST WORD of a line whose
+     * other 28 bytes were useless).
+     *
+     * Every access in the tree is by field name, so this cannot change a
+     * value: dc_gx.c:2054-2079 compares and assigns field by field, and its
+     * only memcpy/memcmp are `color`-to-`color`. Verified before reordering.
+     *
+     * Kill switch: -DDC_GX_LIGHT_LAYOUT_LEGACY restores the old order. */
+#ifdef DC_GX_LIGHT_LAYOUT_LEGACY
     struct {
         float pos[3];
         float dir[3];
@@ -225,6 +299,16 @@ typedef struct {
         float a0, a1, a2;
         float k0, k1, k2;
     } lights[8];
+#else
+    struct {
+        float pos[3];       /*  0 — hot  */
+        float color[4];     /* 12 — hot (only [0..2] read; [3] is the alpha
+                             *      channel's own light colour)             */
+        float dir[3];       /* 28 — cold: GX_AF_SPOT only, never taken      */
+        float a0, a1, a2;   /* 40 — cold                                    */
+        float k0, k1, k2;   /* 52 — cold                                    */
+    } __attribute__((aligned(32))) lights[8];
+#endif
 
     /* Raster state */
     int blend_mode, blend_src, blend_dst, blend_logic_op;

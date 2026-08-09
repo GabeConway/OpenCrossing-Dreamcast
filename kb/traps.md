@@ -1114,3 +1114,51 @@ boot. **Verification builds go in a detached worktree at committed HEAD**, and
 ⚠️ **that worktree must live under `$HOME`** — colima cannot bind-mount
 `/private/tmp`, and a build from there fails with
 `bash: /work/dc/build-dc-docker.sh: No such file or directory`.
+
+## The store queues have exactly one owner, and it is the open list
+
+`emit_projected()` writes TA vertices through `pvr_dr_target()` /
+`pvr_dr_commit()` (G-C, 2026-08-08). Four properties make that legal, and all
+four are someone else's code, so they are worth restating before anyone
+touches the submit path:
+
+1. **`pvr_list_begin()` is what sets QACR.** It calls
+   `sq_lock((void *)PVR_TA_INPUT)`, and `pvr_list_finish()` calls
+   `sq_unlock()` (`pvr_scene.c:198`, `:230`). So DR is only valid *between*
+   those two calls — which is exactly the window `emit_projected()` can run in,
+   because `dc_gx_backend_submit()` opens the list before any vertex work.
+2. **Only on the non-DMA arm.** `pvr_list_begin` takes the `sq_lock` path only
+   when the list is not in DMA mode. This build sets `p.dma_enabled = 0`; flip
+   that and the QACR setup silently disappears.
+3. **`sq_flush()` clobbers `"memory"`** (`arch/sq.h:112-118`). This is
+   load-bearing and invisible: the eight field stores are ordinary stores
+   through a pointer derived from an integer global, and an `asm volatile`
+   *without* a memory clobber orders only against other volatile asm. Lose that
+   clobber and GCC may sink the stores past the `pref`, handing the TA the
+   PREVIOUS primitive's 32 bytes — garbage geometry, no crash, no warning.
+4. **QACR dies if the MMU is ever turned on** (`kb/research-mmu-hardware-tax.md`).
+   MMU paging is already dead, but `dc/src/` now *depends* on that, where
+   before it merely agreed with it.
+
+⚠️ **Do not "simplify" the punch-through producer to use DR.** A PT record is
+built while the GENERAL list is open and must be held until list 4 can legally
+be opened; the queue at that moment points at a different list. The replay loop
+in `dc_gx_backend_frame_end()` could use DR (it runs with list 4 open) — it is
+~96 records a frame and not worth it.
+
+## A per-vertex predicate is not a saving, however exact it is
+
+Session 12 replaced three int→float converts in `shade_vertex()` with a
+predicate that skips them. Exact, fires on essentially every lit vertex
+(`shade_a8 verts=12,543,600`) — and it **cost more than it saved**: `shade=`
+fell 0.15 ms while `xform − sum` rose 0.27 ms and `us/v` did not move.
+
+The predicate read three `g_gx` fields and branched, **per vertex**, to avoid
+three converts per vertex. That moves work; it does not remove it. All three
+fields are per-BATCH constants — every writer of `chan_ctrl_*` calls
+`dc_gx_flush_if_begin_complete()` first (`dc_gx.c:1879,1911,1935,1947,2065`),
+so the state provably cannot change inside one `dc_gx_backend_submit()`.
+
+**Rule: hoist the test to the loop level where its inputs actually change.** And
+note this was NOT an icache effect — Flycast models no icache — so "it must be
+the cache" was not available as an excuse. It was simply more instructions.

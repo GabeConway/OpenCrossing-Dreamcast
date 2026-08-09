@@ -67,6 +67,12 @@ submission path is covered. [M] Cost: 2 of 64 UTLB entries permanently gone, and
 2 UTLB data-array writes per `sq_lock()`. Our `dc/src/` uses no SQ or PVR DMA
 yet, so nothing is affected today. [M]
 
+> ⚠️ **NO LONGER TRUE, 2026-08-08.** G-C made `dc_pvr.c`'s `emit_projected()`
+> write vertices straight into the store queue via `pvr_dr_target()` /
+> `pvr_dr_commit()`. `dc/src/` now has a **hard dependency on QACR0/QACR1**, and
+> therefore on the MMU staying off — which is what the rest of this page already
+> concludes anyway. The kill switch is `-DDC_PVR_NO_DR`. [M]
+
 **But the silicon adds two hazards that KOS cannot paper over**, both in
 §4.7.4–4.7.6 pp. 124–125: [S]
 

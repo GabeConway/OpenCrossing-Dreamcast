@@ -1,5 +1,37 @@
 # Session state — resume here
 
+## ⭐⭐⭐ 2026-08-08 (session 12) — THE QUEUE BELOW WAS SPENT. `us/v` 3.24 → 2.65
+
+Three changes, one measured run each, **all ON by default**:
+
+| stage | 11b | now | what |
+|---|---:|---:|---|
+| `emit` | 2.20 | **1.43** | **G-C** — `pvr_dr_*` writes the TA vertex in the store queue. −34 % |
+| `memo` | 1.74 | **1.26** | `DCGXVertex` `aligned(32)` + branch-free `vmemo_same()`. −29 % |
+| `shade` | 2.13 | 2.09 | ⚠️ untouched — its patch measured NEGATIVE, see below |
+| sum / `xform` | 8.11 / 8.9 | **6.76 / 7.2** | |
+| `us/v` / `draw` | 3.24 / 30.7 | **2.65 / 27.7** | **−18.2 % / −3.0 ms**, ~+2.5 FPS |
+
+**The two memory changes were the whole win, which is the memory-bound reading
+being right twice.** The vertex was 32 bytes at `aligned(8)` on `&31 == 8` —
+every vertex straddled two cache lines. `vmemo_same()` was 12 dependent
+branches. Hit rate 51.0 → 51.5 %: **the cost of asking changed, not the answer.**
+
+⚠️ **`shade`'s lazy-`rgba` + alpha-byte patch is written, exact, and DEFAULTED
+OFF** (`-DDC_PVR_SHADE_LAZYRGBA`, `-DDC_PVR_SHADE_ALPHA8`). It took `shade=`
+2.09 → 1.94 and put **more** back into loop overhead (`xform − sum` 0.44 →
+0.71); `us/v` did not move. **The predicates are per-VERTEX and should be
+per-BATCH** — hoisting them next to `need_light` is the first thing to try next
+session.
+
+🔴 **MEASUREMENT RULE 10 was paid for here**: `[VTXSPLIT]`'s buckets do not
+share a denominator — the middle five are charged on memo MISSES. `shade` is
+~295 cycles/vertex, not 148; `lit` is ~89, not 44. See `kb/RESUME.md` §0b.
+
+**Queue now: hoist shade's predicates per batch → G-B (13.31 ms, still the
+largest single block in the project) → the memo fingerprint key (−1.0-1.2 ms,
+needs a `VERIFY` gate) → §0a/G-D/G-F last.**
+
 ## 🔴🔴 2026-08-08 (session 11b) — `xform` IS SPLIT. THE FRAME IS MEMORY-BOUND,
 ## AND THE sh4zam QUEUE IS RE-RANKED AROUND IT
 

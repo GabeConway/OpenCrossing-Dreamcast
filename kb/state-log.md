@@ -1,5 +1,89 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-08 (session 12) — G-C SHIPPED, AND THE MEMORY-BOUND READING
+## PAID: `us/v` 3.24 → 2.65, THREE MEASURED RUNS, ONE CHANGE EACH
+
+Session 11b said the frame is memory-bound and ranked the queue by it. This
+session spent the queue. **Every number below is a run, not an estimate**, all
+on the same build line (town, `DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`, static
+camera, 600 s), and each row differs from the row above it by **one change**.
+
+```
+                     memo    xf   lit   tex shade  post  emit |  sum  xform  us/v  draw   FPS
+baseline (all off)   1.74  0.23  0.62  0.62  2.13  0.57  2.20 | 8.11   8.9   3.24  30.7  25.2-26.5
++ G-C (pvr_dr_*)     1.77  0.23  0.64  0.63  2.19  0.58  1.45 | 7.49   8.2   2.89  29.3  26.6-27.4
++ align + wordcmp    1.26  0.22  0.61  0.61  2.09  0.53  1.43 | 6.76   7.2   2.65  27.7  27.7-28.0
+```
+
+**`us/v` −18.2 %. `xform` −1.7 ms. `draw` −3.0 ms. ~+2.5 FPS.**
+
+⚠️ **The three runs drew DIFFERENT TOWNS** (`v=2745 / 2826 / 2739`) — the town
+is reseeded from `sqrand(osGetCount())` every boot (`sys_math.c:7`), so matched
+frames are impossible and `us/v` is the instrument precisely because it
+normalises. Where a per-vertex figure is quoted below it is computed against
+that run's own `v`.
+
+### What each change was, and what proves it was that change
+
+**G-C — `emit` 2.20 → 1.45 ms, −34 %** (normalised: 0.801 → 0.513 µs/vertex,
+**−36 %**, i.e. it did 3 % more vertices in 34 % less time).
+`emit_projected()` now writes the eight TA words straight into
+`pvr_dr_target()` and `pref`s via `pvr_dr_commit()`, deleting the stack
+`pvr_vertex_t` build pass, `sq_fast_cpy`'s read-back of it, and two calls per
+corner. Counter `[DC/PVR] dr verts=30,386,676 of 37,204,221` = **81.7 %**,
+which is exactly the non-punch-through share — PT keeps the old path because a
+PT record must be *held* until list 4 can legally be opened. Kill switch
+`-DDC_PVR_NO_DR`.
+
+**`DCGXVertex` → `aligned(32)` + the branch-free memo compare — `memo` 1.77 →
+1.26 ms, −29 %**, against the −0.48 ms predicted for the compare alone.
+- The vertex was 32 bytes at `aligned(8)`, landing at `0x8c993088` (`&31 == 8`),
+  so **every vertex straddled two 32-byte operand-cache lines**, split across
+  the field boundary that matters: pos+texcoord+color in one, `normal` in the
+  next. Both memo sides and the lighting path paid it.
+- `vmemo_same()` was 12 compares and **12 dependent conditional branches**;
+  it is now 8 XOR-OR loads per side and one branch. The live bytes are **30**,
+  not 28 — `normal[2]` is live — so it is 7 × `uint32` **plus** a `uint16`.
+- ⭐ **The check that matters: the hit rate did not move** — 51.0 % → 51.5 %.
+  The compare changed the *cost of asking*, not the *answer*, so the two
+  float-semantic deltas (NaN bits, ±0.0) cost nothing real.
+Kill switches `-DDC_GX_NO_VTXALIGN`, `-DDC_PVR_NO_VMEMO_WORDCMP`.
+
+### The kill switches, and an honest note about the `.text` gate
+
+All four revert flags **compile and link together**:
+`-DDC_PVR_NO_DR -DDC_GX_NO_VTXALIGN -DDC_PVR_NO_VMEMO_WORDCMP
+-DDC_GX_LIGHT_LAYOUT_LEGACY` → `.text = 2,882,980`.
+
+⚠️ **That is 32 B ABOVE the 2,882,948 the gate quotes, and I did not prove
+where the 32 B went.** It is not a live feature — every switch is off — so the
+suspect is the restructure of `emit_projected()` itself: the DR arm needed the
+projected values in locals (`px`, `py`, `oargb`) before the branch, where the
+old code stored them straight into `pv`'s fields, and that is enough to change
+scheduling. **The claim "the killed build is byte-identical" is therefore NOT
+made.** The check that would settle it — build pre-session HEAD with this exact
+flag set and diff — was attempted and blocked, and is left as the first small
+task next session. What IS established: the switches exist, they compile, and
+they put `.text` back to within 0.001 %.
+
+### Two corrections this session forced
+
+1. 🔴 **`[VTXSPLIT]`'s per-vertex cycle figures were HALVED for five of seven
+   stages.** `VS_MARK` for `xf`/`lit`/`tex`/`shade`/`post` is downstream of the
+   memo-hit `continue`, so those stages are charged over memo **MISSES**, not
+   over `v`. At 49.9 % hit: `shade` is **~295** cycles/vertex, not 148; `lit`
+   is **~89**, not 44. `memo` — charged on every vertex — is unaffected at 122.
+   **`kb/research-sh4zam-gap.md` §3's "44 cycles, about what six FIPRs should
+   cost, so the block was never slow" is retired.** The demotion of §0a/G-D
+   survives, but on absolute milliseconds (0.58 ms of 30) rather than on that
+   argument.
+2. **`GX_AF_SPOT` is unreachable in the entire tree.** `emu64.c:3316` gates it
+   on `G_LIGHTING_POSITIONAL` (0x400000), which has exactly three references —
+   a name table and its two readers — and no display list or runtime call ever
+   sets it. So `chan_eval`'s spot branch, including its per-light FDIV, is dead
+   weight. The town runs **exactly 2 lights** (sun + moon, unconditional,
+   `m_kankyo.c:1282-1290`), not 8.
+
 ## 🔴🔴 2026-08-08 (session 11b) — G5 SPLIT `xform`, AND THE FRAME IS
 ## MEMORY-BOUND. EVERY sh4zam MATRIX IDEA IS AIMED AT 0.8 ms OF A 30 ms FRAME.
 

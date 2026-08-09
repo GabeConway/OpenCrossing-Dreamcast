@@ -71,7 +71,15 @@ gyroids. ⭐ **Since 2026-08-08 the BGM plays** (the audio command queue is
 drained every tick, not only when synthesis runs) **and G3 culls at
 `G_TRIN_INDEPEND` entry**: town frame **49.9 ms with sound on**, against 45.6 ms
 for the old silent build. Both are ON by default — `kb/RESUME.md` §0c-§0e.
-Read `kb/RESUME.md` first — in particular the **nine** measurement rules.
+
+⭐⭐⭐ **2026-08-08, session 12 — the frame is MEMORY-BOUND and acting on that
+paid: `us/v` 3.24 → 2.65 (−18.2 %), `draw` 30.7 → 27.7 ms, ~+2.5 FPS.** Three
+changes, one measured run each, all ON by default: **G-C** writes TA vertices
+straight into the store queue with `pvr_dr_*` (`emit` −34 %), **`DCGXVertex` is
+`aligned(32)`** (it was 32 bytes at `aligned(8)`, so every vertex straddled two
+cache lines), and **`vmemo_same()` is branch-free** (`memo` −29 % with the hit
+rate unmoved). `kb/RESUME.md` §12.
+Read `kb/RESUME.md` first — in particular the **ten** measurement rules.
 Four were paid for recently: `MEMLEDGER FIT … OK` does not mean the image
 boots; an average cost per command is not the cost of any command; **in a
 stubbed image, an asset class's resident cost is what the KEEP LIST kept, not
@@ -129,7 +137,9 @@ already produced two wrong numbers.
 | `kb/issues.md` | known game-side bugs and leads (armhf-era, still accurate) |
 | `kb/station-bugs.md` | the two train-station bugs traced 2026-08-02: black floor (solved) and roof clip-through — **now reproducible for the first time**, since `DC_AUTOWALK` can walk a character under it |
 | `dc/src/dc_emu64_cull.cpp` | **G3, SHIPPED 2026-08-08 and ON by default** (`DC_EMU64_CULL ?= 1`) — the AABB cull at `G_TRIN_INDEPEND` entry. **−19.9 ms of a 69.8 ms town frame**, `fps_p50` 19.5 → 23.2, late-cull `vcull` 9,915 → 1,002. Gate `-DDC_EMU64_CULL_VERIFY` passed `falsecull=0 gfxp_bad=0 reinst=0`. ⚠️ It installs into the same dispatch table as G1/G2 — read the ordering trap in `kb/traps.md` before touching any of the three |
-| `dc/src/dc_pvr.c` G5 | **`-DDC_PVR_VTXSPLIT=<N>` — the split of `[PHASE] xform=`** into seven sampled stages. **RAN 2026-08-08: emit 2.15, shade 2.03, memo 1.68, tex 0.62, lit 0.58, post 0.57, xf 0.23 ms per frame; sum 7.87 of 8.9.** ⭐ The frame is **memory-bound** — the two FP stages are 0.81 ms, so every sh4zam matrix idea is aimed at 2.7 % of the frame. `kb/research-sh4zam-gap.md` §3 is re-ranked around this |
+| `dc/src/dc_pvr.c` G5 | **`-DDC_PVR_VTXSPLIT=<N>` — the split of `[PHASE] xform=`** into seven sampled stages. **RAN 2026-08-08: emit 2.15, shade 2.03, memo 1.68, tex 0.62, lit 0.58, post 0.57, xf 0.23 ms per frame; sum 7.87 of 8.9.** ⭐ The frame is **memory-bound** — the two FP stages are 0.81 ms, so every sh4zam matrix idea is aimed at 2.7 % of the frame. `kb/research-sh4zam-gap.md` §3 is re-ranked around this. ⚠️ **Its seven buckets DO NOT SHARE A DENOMINATOR** — `memo` is per vertex, `emit` is per primitive, and the middle five are per memo **MISS** (measurement rule 10). ✅ **The split has since been spent: session 12 took `emit` −34 % and `memo` −29 %; the post-change split is `kb/RESUME.md` §12** |
+| `dc/src/dc_pvr.c` G-C | **SHIPPED 2026-08-08, ON by default** (`-DDC_PVR_NO_DR` kills it) — `emit_projected()` writes the eight TA words straight into `pvr_dr_target()` and `pref`s with `pvr_dr_commit()`, instead of building a stack `pvr_vertex_t` for `pvr_prim`/`sq_fast_cpy` to read back. **`emit` 2.20 → 1.45 ms, −34 %.** Counter `[DC/PVR] dr verts=` = 81.7 %, exactly the non-PT share. ⚠️ Punch-through keeps the old path (a PT record is held until list 4 opens), and `dc/src/` now depends on QACR ⇒ on the **MMU staying off** |
+| `dc/include/dc_gx_internal.h` | ⭐ **Two 2026-08-08 cache-layout fixes, both ON by default.** `DCGXVertex` is now `aligned(32)` — it was 32 bytes at `aligned(8)` landing on `&31 == 8`, so **every vertex straddled two operand-cache lines**, split across pos/tex/color \| normal (`-DDC_GX_NO_VTXALIGN` reverts; auto-off under `DC_GX_FAT_VERTEX`, whose 40 B would round to 64). And `lights[]` is reordered `pos, color, dir, a*, k*` + `aligned(32)` so the only two groups read per light per vertex share one line (`-DDC_GX_LIGHT_LAYOUT_LEGACY` reverts) |
 | `dc/src/dc_pmcr.c` | **P1, THE HARDWARE INSTRUMENT, built 2026-08-08 and OFF by default** (`DC_PMCR=1`). SH7750 performance counters on **PRFC1** (KOS owns PRFC0), rotating through 8 events — elapsed cycles, **icache/dcache pipeline-freeze cycles**, icache/operand miss counts, fill cycles, instructions issued — bracketed into `[PHASE]`'s own draw/skip/vi split plus `audio` and `xform`. Per PRESENTED frame. `DC_PMCR_HUD=1` draws the table on the TV; **`DC_CONSOLE_MUTE=1` goes with it** — read `kb/traps.md` first. ⚠️ **Flycast reports ZERO for every event**: this can only be read on a burn |
 | `tools/dcopt/icache_map.py` | the free host-side half of the icache question: hot-symbol bytes vs the 8 KB direct-mapped cache, and which hot functions share a line. **Measured 11.9x pressure for the frame and 1.4x for the 12-symbol inner loop.** Sizes the pressure; only `dc_pmcr.c` on hardware prices it |
 | `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram (`DC_EMU64_HIST=<N>`). Thunks swapped into emu64's dispatch table at runtime; `src/` untouched. **Run 2026-08-05 and again 2026-08-06**, and it is the only thing allowed to price an opcode. ⚠️ **Its output is per LOGIC TICK — double it** (measurement rule 9) |
