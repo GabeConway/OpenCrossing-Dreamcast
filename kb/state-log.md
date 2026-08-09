@@ -44,8 +44,23 @@ a NEIGHBOUR was charged to `ef_doyon01_00` as an interior pointer.
 
 ⭐ **`dc_texpool.c`'s own header had already stated the premise and the code did
 not implement it.** Fixed: a row with `kept == 0` is one byte, so anything past
-its base is `unmapped`. **Every `interior=` figure printed before the fix is
-void; T1 is neither cleared nor killed until the re-run lands.**
+its base is `unmapped`. Every `interior=` figure printed before the fix is void.
+
+### ✅ AND THE RE-RUN CLEARS T1
+
+`smoke-texprobe3-20260809-142619`, **deepest scene 9**, 17,609 frames:
+
+```
+[DC/TEXPOOL] VERDICT interior=0 mutated=0 oversize=0 aliased=0
+[DC/TEXPOOL] binds=2074009 mapped=560487 interior=0 unmapped=1513522 distinct=127
+```
+
+**All four killers zero over 2.07 M binds with the town exercised.** A synthetic
+identity key is a legal substitute for the content hash ⇒ **T1 needs ONE
+~24,576 B staging buffer, not an N-slot pool.** The remaining risk is not
+correctness but **seeks**: ~306 per run = 6-30 s of mid-scene hitching on CD-R
+unless it uses `dc_keep_sweep()`'s read-ahead window — which **R1 still does not
+use either**, so the shared helper is the first piece of work, not the loader.
 
 ⚠️ **A SHORT RUN IS NOT A CHEAP RUN, IT IS A DIFFERENT RUN.** The 300 s pass
 returned a clean all-four-zero verdict purely because it never entered the town

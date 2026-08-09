@@ -715,8 +715,9 @@ result is a lesson about instruments rather than about T1:
 
 | run | scenes reached | verdict |
 |---|---|---|
-| 300 s | `0 → 3 → 4` (**never reached the town**) | `interior=0 mutated=0 oversize=0 aliased=0` over 726,570 binds |
-| 700 s | `0 → 3 → 4 → 18 → 9` | 🔴 `interior=4318` over 2,187,050 binds |
+| 300 s | `0 → 3 → 4` (**never reached the town**) | `interior=0 …` over 726,570 binds — clean for the wrong reason |
+| 700 s | `0 → 3 → 4 → 18 → 9` | 🔴 `interior=4318` over 2,187,050 binds — **a probe bug** |
+| 700 s, probe fixed | `0 → 3 → 4 → 18 → 9` | ✅ **`interior=0 mutated=0 oversize=0 aliased=0`** over **2,074,009 binds / 127 distinct textures** |
 
 🔴 **AND THE 4,318 ARE A PROBE ARTIFACT, NOT A PROPERTY OF THE GAME.** Every one
 named a single symbol — `ef_doyon01_00`, at +68/+324/+480. That symbol is **not
@@ -733,6 +734,32 @@ size anyway.** Fixed 2026-08-09: a row with `kept == 0` is one byte long, so
 anything past its base is `unmapped`, not `interior`. **Every `interior=`
 figure printed before that fix is void, and the design is neither cleared nor
 killed until the re-run lands.**
+
+### ✅ VERDICT 2026-08-09: T1 IS CLEARED TO BUILD
+
+`smoke-texprobe3-20260809-142619`, **deepest scene 9**, 17,609 frames:
+
+```
+[DC/TEXPOOL] VERDICT interior=0 mutated=0 oversize=0 aliased=0 (all four must be 0)
+[DC/TEXPOOL] binds=2074009 mapped=560487 interior=0 unmapped=1513522 distinct=127
+```
+
+**All four killers zero over 2.07 M binds with the town exercised.** So, as
+specified: no bind lands inside a mapped array, no mapped array's content
+changes between binds, the decoder never reads past a row, and no two rows share
+an address. **A synthetic identity key is a legal substitute for the content
+hash, and T1 needs ONE ~24,576 B staging buffer rather than an N-slot pool.**
+
+⚠️ `unmapped=1513522` (73 %) is expected and must not be "fixed" — those are
+textures reached through a pointer rather than a static display-list operand
+(`FONT_nes_tex_font1` is the type case). It bounds what a static operand scan
+can account for; it is not a hole.
+
+⚠️ **Still unproven, and it is the PLAYABILITY risk rather than the correctness
+one: the seeks.** T1 issues ~306 per run = **6-30 s on CD-R**, as mid-scene
+hitches. `dc_keep_sweep()` already implements the read-ahead window that
+collapses ~306 seeks to ~40, **and R1 still does not use it either.** Build the
+shared helper first; do not ship T1 without it.
 
 ⚠️ **TWO PROCESS LESSONS, both already in this kb in other words:**
 1. **A short run is not a cheap run, it is a DIFFERENT run.** The 300 s pass

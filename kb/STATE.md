@@ -219,9 +219,13 @@ rather than optional.**
    / 2,132,352 B** loadable — content that renders as nothing today. ⚠️ **The
    kb's "5,685 / 2,782,080 B" was ~30 % high**; the figures here are measured
    (`[DC/TEXPOOL] map=6092 resident=1381/885984 stubbed=4711/2132352`).
-   ⚠️ **Its falsifier RAN and the probe itself was broken** — `interior=4318`
-   was the probe charging a stubbed row's NEIGHBOURS to it. Fixed; **T1 is
-   neither cleared nor killed until the re-run lands.** `kb/levers.md` L10.
+   ✅ **ITS FALSIFIER IS NOW PASSED, WITH THE TOWN EXERCISED**:
+   `interior=0 mutated=0 oversize=0 aliased=0` over **2,074,009 binds / 127
+   distinct textures**, deepest scene 9 (`smoke-texprobe3-20260809-142619`).
+   The design is cleared as specified — one ~24,576 B staging buffer, no N-slot
+   pool. ⚠️ An earlier run read `interior=4318` and that was a **probe bug**
+   (it charged a stubbed row's neighbours to it); fixed, and every `interior=`
+   printed before the fix is void. `kb/levers.md` L10.
    ⚠️ **The seek risk is the playability risk**: ~306 seeks = 6-30 s of
    hitching on CD-R unless it uses `dc_keep_sweep()`'s read-ahead window, which
    R1 also still does not use.
