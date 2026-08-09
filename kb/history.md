@@ -74,7 +74,7 @@
   - **Performance detail** (was in status blockquote): v0.3.0 on RG-34XX
     SP — ~56 fps average, median ~60, 78% of samples ≥55, ~100% game
     speed, low-40s dips during heaviest acre streaming (full data
-    kb/perf.md).
+    kb/perf-dc.md).
   - **Verbose save-management how-to** (now three lines in README):
     back up = copy `.gci` out of `save/card_a/` before updating; delete
     town = remove `.gci`, game creates fresh save on boot like a new
@@ -98,8 +98,8 @@
   Process notes: first local armhf build via colima (needed
   `tonistiigi/binfmt --install arm` once; CI builds now user-approval
   only to save Actions minutes); smoke harness can exercise the
-  auto-detect path (kb/build-test.md); device log stdout tail is lost on
-  unclean unmount — see kb/device.md "Reading device logs".
+  auto-detect path (BUILDING-DC.md); device log stdout tail is lost on
+  unclean unmount — see kb/research-dreamcast.md "Reading device logs".
 
 ## Standing decisions
 
@@ -135,7 +135,7 @@
   answerable from log.txt; README FAQ + kb entries added. Also found this way:
   a user-visible refusal message with no logging is indistinguishable from a
   silent failure — prefer logging *decision branches*, not just errors.
-- **2026-07-29** — kb/build-test.md corrected: it claimed game code was capped
+- **2026-07-29** — BUILDING-DC.md corrected: it claimed game code was capped
   at -O1 (it carries no -O at all) and pointed at a `build_pc.sh` that does not
   exist. Tier-1 native macOS build confirmed dead on Apple Silicon (32-bit
   guard, pc/CMakeLists.txt:41) — armhf Docker is the only compile check here.
@@ -151,13 +151,13 @@ here.*
   armhf history above was quoted into `PLAN.md` §3.2 ("the optimizations cause
   problems and we cant use them without the port being broken"). It became a
   fixed input to every RAM and perf plan the project then wrote: `kb/levers.md`
-  was restricted to layout-class levers, `kb/research-size-reduction.md` was
+  was restricted to layout-class levers, `kb/levers.md` was
   commissioned to close a 14.45 MB gap without touching codegen, and PLAN's
   CPU budget dropped the 2–3× term it had been leaning on.
 - **⭐ 2026-08-06 — the `-O0` directive is REVERSED by user decision**, on
   advice from the KOS/sh4zam maintainer: GCC's SH-4 output at `-O0` is not
   "unoptimized" but pathological, and no Dreamcast port ships that way.
-  `src/` now builds at **`-Os` with a 14-TU `-O3` hot list**
+  `src/` now builds at **`-Os` with an 18-TU `-O3` hot list**
   (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os` everywhere; `o0` = a
   byte-identical revert), `dc/src` moved `-O2` → `-O3`, lists live in
   `dc/opt-lists.mk` and the guard set `OPT_GUARDS` in `dc/Makefile`.
@@ -174,7 +174,7 @@ here.*
   entry above — one armhf session, never reproduced on SH-4, never isolated
   from a simultaneous NEON/CPU-tuning change, and most likely caused by a
   *link* bug (the decomp's missing `JUTRomFont::spFontHeader_` definition,
-  which upstream had to add for exactly this reason). `kb/design-shelf-flags.md`
+  which upstream had to add for exactly this reason). `kb/traps.md`
   §9 had called `-O2` "achievable, and probably mandatory" from measurements
   and was overruled by that anecdote. ⚠️ `spFontHeader_` is **still undefined
   in this tree, deliberately**, so an optimized build that references it fails

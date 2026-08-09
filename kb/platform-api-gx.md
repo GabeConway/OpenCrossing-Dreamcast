@@ -142,7 +142,7 @@ This distinction carries to DC unchanged.
 | symbol | signature | pc/ file | DC disposition | notes |
 |---|---|---|---|---|
 | `GXSetNumTevStages` | `void GXSetNumTevStages(u8 nStages)` | pc_gx.c | rewrite-for-KOS |  |
-| `GXSetTevOp` | `void GXSetTevOp(u32 stage, u32 mode)` | pc_gx.c | rewrite-for-KOS | One of 101 harvested TEV configurations (kb/renderer.md). Max 3 stages (PC_GX_MAX_TEV_STAGES). This is the surface tev-map.md must classify. |
+| `GXSetTevOp` | `void GXSetTevOp(u32 stage, u32 mode)` | pc_gx.c | rewrite-for-KOS | One of 101 harvested TEV configurations (kb/tev-map-table.md). Max 3 stages (PC_GX_MAX_TEV_STAGES). This is the surface tev-map.md must classify. |
 | `GXSetTevColorIn` | `void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d)` | pc_gx.c | rewrite-for-KOS |  |
 | `GXSetTevAlphaIn` | `void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d)` | pc_gx.c | rewrite-for-KOS |  |
 | `GXSetTevColorOp` | `void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg)` | pc_gx.c | rewrite-for-KOS |  |

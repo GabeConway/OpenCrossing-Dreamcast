@@ -327,7 +327,7 @@ DC_OPT ?= -O3
 #   -fno-store-merging
 #       On at -O2. It fuses adjacent narrow stores into one wide store, and
 #       SH-4 traps ANY misaligned mov.w/mov.l — there is no -mno-unaligned-
-#       access on this target (kb/design-shelf-flags.md §7). It was measured
+#       access on this target (kb/traps.md). It was measured
 #       not to fire on GCC 9.3 and has NEVER been re-measured on our GCC 15.2,
 #       so this is insurance against an untested class, not a known bug.
 ifeq ($(DECOMP_OPT),-O0)
@@ -1359,7 +1359,7 @@ GAME_C       := $(call shrinkify,$(GAME_C))
 GAME_CXX     := $(call shrinkify,$(GAME_CXX))
 C11_SRC      := $(call shrinkify,$(C11_SRC))
 CXXFROMC_SRC := $(call shrinkify,$(CXXFROMC_SRC))
-# PC_REUSE_C too — S6 rewrites pc/src/pc_assets.c (kb/ram-plan.md P6). This MUST
+# PC_REUSE_C too — S6 rewrites pc/src/pc_assets.c (kb/levers.md P6). This MUST
 # stay above the $(PC_REUSE_OBJS) definition below, or the gnu11 override would
 # still name the vendored path and the swapped copy would be built as gnu89.
 PC_REUSE_C   := $(call shrinkify,$(PC_REUSE_C))

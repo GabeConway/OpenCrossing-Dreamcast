@@ -66,13 +66,13 @@ S4  audiomemory 0x90000->0x76000                                -106,496
     `break`s on heap exhaustion and drops voices with no error.
 
 S6  s_assets[] name strings DELETED                             -598,424
-    `pc/src/pc_assets.c` (kb/ram-plan.md P6).  This one is .rodata, not .bss.
+    `pc/src/pc_assets.c` (kb/levers.md P6).  This one is .rodata, not .bss.
     The 14,495 "assets/<name>.bin" literals (540,668 B once 4-aligned) and the
     `const char* path` slot that points at them (14,495 x 4 = 57,980 B) are
     both removed; the table's five live fields are untouched.  The strings had
     exactly one consumer — pc_load_asset()'s `.bin` fopen fallback — and that
     fallback is unreachable on Dreamcast.  Full argument at the rule.
-    NOTE: kb/levers.md L3 and kb/ram-plan.md P6 say -821,569.  MEASURED WRONG
+    NOTE: kb/levers.md L3 and kb/levers.md P6 say -821,569.  MEASURED WRONG
     by 223,145 B; 821,569 was pc_assets.c's whole .rodata contribution, which
     includes the 347,880 B s_assets table that is live and stays.
 
@@ -165,7 +165,7 @@ S12 villager models out of a 16-slot pool (R3)                  +115,296 .bss
     make_stub_data.py's own flag. The rewritten TUs carry an #error for the
     mismatch, in both directions.
 
-S7  data_bgd collision split (kb/ram-plan.md P7)                -246,064
+S7  data_bgd collision split (kb/levers.md P7)                -246,064
     `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
     of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
     1 KB acre collision map per row.  It is read in exactly ONE place in the
@@ -416,7 +416,7 @@ RULES = [
         (1, r"^#define GRAPH_STACK_SIZE 0x2000$",  "#define GRAPH_STACK_SIZE 0x10"),
     ]),
 
-    # -- S6: s_assets[] name strings (kb/ram-plan.md P6) ----------------------
+    # -- S6: s_assets[] name strings (kb/levers.md P6) ----------------------
     # SWAP.  pc/src/pc_assets.c is compiled directly (dc/Makefile PC_REUSE_C),
     # so -I cannot reach it, and both the PCAsset typedef and s_assets are
     # file-local (`static const`) — there is no second TU that could disagree
@@ -460,7 +460,7 @@ RULES = [
     #   14,495 table rows; the 1,870 left are the per-TU _pc_load_src_* call
     #   sites in src/, a different and much smaller pool).
     #
-    # kb/levers.md L3 and kb/ram-plan.md P6 both claim -821,569 B.  That is
+    # kb/levers.md L3 and kb/levers.md P6 both claim -821,569 B.  That is
     # WRONG by 223,145 B: 821,569 was derived from pc_assets.c's TOTAL .rodata
     # contribution (888,853 B), which is the string pool PLUS the 347,880 B
     # s_assets table itself — and the table is live and stays.
@@ -471,7 +471,7 @@ RULES = [
          r"^typedef struct \{ const char\* path; void\* dest; unsigned int size; "
          r"unsigned int rom_off; int rom_src; int swap; \} PCAsset;$",
          "/* " + "-" * 68 + "\n"
-         " * DC_SRC_SHRINK S6 (kb/ram-plan.md P6): the `path` field and its\n"
+         " * DC_SRC_SHRINK S6 (kb/levers.md P6): the `path` field and its\n"
          " * 14,495 \"assets/<name>.bin\" string literals are DELETED — 540,668 B\n"
          " * of .rodata string pool plus 57,980 B of pointer slots.\n"
          " *\n"
@@ -527,7 +527,7 @@ RULES = [
 ]
 
 # ---------------------------------------------------------------------------
-# S7 — the data_bgd collision split (kb/ram-plan.md P7).
+# S7 — the data_bgd collision split (kb/levers.md P7).
 # ---------------------------------------------------------------------------
 # Unlike S1-S6 this rule cannot be spelled as a literal, because the
 # replacement text IS the re-encoded data.  It is generated from the vendored
@@ -612,7 +612,7 @@ RULES = [
 #     _graph_proc still resolves exactly once;
 #   * DC_SRC_SHRINK=0 puts .data back to 2,638,872 exactly.
 #
-# kb/levers.md L3 and kb/ram-plan.md P7 both claimed -236,544 and called it
+# kb/levers.md L3 and kb/levers.md P7 both claimed -236,544 and called it
 # ".bss". It is .data, and the real figure is 9,520 B BETTER — the first row in
 # that plan to beat its estimate rather than miss it. Plain dedup of identical
 # collision maps, which is what "-236,544" most plausibly meant, was measured at
@@ -630,7 +630,7 @@ S7_ENTRIES = 295            # data_bgd_number; asserted below
 # every positional initialiser in bg_data.c keeps its slot.
 S7_TWIN = """\
 /* --------------------------------------------------------------------
- * DC_SRC_SHRINK S7 (kb/ram-plan.md P7): mFM_bg_data_c::collision[16][16]
+ * DC_SRC_SHRINK S7 (kb/levers.md P7): mFM_bg_data_c::collision[16][16]
  * — 1,024 B x 295 acres = 302,080 B of .data — is replaced by a pointer
  * into a shared run-length stream.  Its one reader, mFM_BgUtDataSet(),
  * expands it at the single call site in m_field_make.c.  The vendored

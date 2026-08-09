@@ -86,7 +86,7 @@ extern "C" {
 #define DC_SCREEN_HEIGHT  DC_GC_HEIGHT
 
 /* --- Memory map ------------------------------------------------------------
- * kb/mem-budget.md §4 is the authority. The numbers here MUST agree with
+ * kb/mem-budget-m1-sh4.md is the authority. The numbers here MUST agree with
  * dc/include/dc_mem_budget.h; dc_mem_ledger.c static-asserts the total.
  *
  * The arena (§3.1 option A, the recommended one): OSPhysicalToCached(p) maps to

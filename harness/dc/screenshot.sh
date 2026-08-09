@@ -17,7 +17,7 @@
 # READ THIS BEFORE ASKING WHY THERE IS NO PNG
 #
 # Host-side screen capture is BLOCKED on this machine and this script will
-# never try it (kb/design-harness.md §4, verified):
+# never try it (harness/dc/README.md, verified):
 #   * `screencapture -x -t png out.png` -> "could not create image from
 #     display" (Screen Recording TCC permission not granted to the terminal).
 #   * `osascript` + System Events -> HANGS on the Accessibility TCC prompt.

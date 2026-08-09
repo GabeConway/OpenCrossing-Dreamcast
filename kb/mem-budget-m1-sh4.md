@@ -6,13 +6,13 @@ dead ends, why `--gc-sections` is mandatory, the optimization table that policy
 rejected (**and 2026-08-06 adopted — see the banner**), and the boot attempt
 that proved the silence is image size alone.
 **This is the part of the old ledger that is still true**; it supersedes the
-armhf extrapolations in `kb/mem-budget-armhf-working-set.md` and
-`kb/mem-budget-armhf-binary-size.md` wherever they disagree. Live running numbers are in `kb/STATE.md`.
+armhf extrapolations of the old ledger (deleted 2026-08-09) wherever they
+disagree. Live running numbers are in `kb/STATE.md`.
 
 > ## ⚠️ [STALE 2026-08-06] — §8.6's "REJECTED BY POLICY" is now "ADOPTED"
 >
 > **The `-O0` directive was reversed on 2026-08-06.** `src/` builds at `-Os`
-> with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` =
+> with an 18-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default; `size` =
 > `-Os` everywhere; `o0` = byte-identical revert); `dc/src` moved from `-O2` to
 > `-O3`. Measured on matched town windows of the shipping build:
 >
@@ -121,7 +121,7 @@ part), each tagged GC-sized / N64-era / required:
 directly against the linked image: the entire `src/static/libforest` (emu64)
 tree is 562,374 B of `.bss`, the largest single item being
 `texture_buffer_data`. No 4 MB or 8 MB machine-memory image exists anywhere in
-the binary. This agrees with `kb/research-n64-origin.md`: emu64 is a GBI
+the binary. This agrees with `kb/closed.md`: emu64 is a GBI
 display-list interpreter, not a machine emulator.
 
 ### 8.3 Levers applied this pass (measured individually)
@@ -160,7 +160,7 @@ compared on two linked images; the saving has to be read off the discard list.
 `-Wl,--print-gc-sections` reports **16,164 dropped sections**; summing their
 sizes from each object's section headers gives **395,207 B**
 (`.text` 87,744 · `.rodata` 49,043 · `.data` 6,062 · `.bss` 110,674 · other
-141,684). `kb/research-size-reduction.md` reports 522,150 B over 29,471
+141,684). `kb/levers.md` reports 522,150 B over 29,471
 sections from the link map, which also counts library objects this per-object
 sweep did not reach — take the map figure as authoritative. Either way it is
 already spent, and it is ~0.4–0.5 MB, not megabytes.
@@ -175,7 +175,7 @@ Recorded once so the number is not mistaken for unknown. ~~**User decision
 2026-08-01: decomp game code stays at `-O0`.** Do not propose these.~~
 
 ⚠️ **[2026-08-06] the 2026-08-01 decision was REVERSED.** `src/` ships at `-Os`
-with a 14-TU `-O3` hot list. The four-row table below is a full-asset `-O0`-era
+with an 18-TU `-O3` hot list. The four-row table below is a full-asset `-O0`-era
 link and is kept as history; the shipping numbers are in the banner at the top
 of this file (`.text` 5,506,964 → 2,753,700 B on the town build line). **This
 section was right that the numbers existed and wrong only about what to do with
@@ -240,7 +240,7 @@ Boot is gated on size, and only on size.
 
 ### 8.8 Where the gap stands
 
-Against the 8,035,072 B image budget from `kb/research-size-reduction.md`
+Against the 8,035,072 B image budget from `kb/levers.md`
 (which reserves the ledger's own 7.61 MB of heap plus ~1 MB for KOS):
 
 | | bytes |
@@ -252,7 +252,7 @@ Against the 8,035,072 B image budget from `kb/research-size-reduction.md`
 This pass removed 1,111,040 B of it. ~~The remaining 13.34 MB cannot come from
 codegen (policy)~~, from stripping (0 B), from `--gc-sections` (already spent),
 or from dropping the NES path (~40 KB). It has to come from the ranked plan in
-`kb/research-size-reduction.md` — of which **8.45 MB is demand-loading the
+`kb/levers.md` — of which **8.45 MB is demand-loading the
 `src/data` staged assets**, i.e. the asset pack's runtime loader. That is the
 critical path, and it is the next milestone's work.
 

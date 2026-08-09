@@ -233,7 +233,7 @@ AC needs; its note costs a false to-do entry every run.
   the text blast radius.
 - **Framebuffer probe** (`dc/src/dc_pvr.c`) — `kb/STATE.md` N2.
 - **Asset working-set census** (`dc/src/dc_gx.c`) — `kb/STATE.md` N1, vertex half.
-- **P7 size lever** — `kb/ram-plan.md`.
+- **P7 size lever** — `kb/levers.md`.
 
 ---
 
@@ -288,9 +288,3 @@ town draws); DVD read-ahead (invisible in the emulator, so unvalidatable today,
 and it re-opens the single-threading assumption).
 
 ---
-
-## 7. Index row for `CLAUDE.md` (not applied — paste into §3, "Live state")
-
-```
-| `kb/boot-blockers.md` | **what the running game hits next** — the stub audit, ranked by reach rather than difficulty, with in-flight work marked |
-```

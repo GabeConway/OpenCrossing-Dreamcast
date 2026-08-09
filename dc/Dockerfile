@@ -1,7 +1,7 @@
 # OpenCrossing-Dreamcast SDK image.
 # sh-elf cross toolchain + KallistiOS + GLdc + mkdcdisc, native linux/arm64.
 #
-# Build once (~27 min cold; see kb/design-toolchain.md §6):
+# Build once (~27 min cold; see kb/toolchain.md):
 #   dc/build-dc-image.sh
 #
 # NOTE: this host has no BuildKit. Use the legacy builder:

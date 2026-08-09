@@ -24,7 +24,7 @@
 #   FBHASH <hex>       |  FBTHUMB WxH <base64>   |  MEM k=v ...
 #   OC-DC-HARNESS-END rc=<n>
 #
-# Two guest-side rules that are load-bearing (kb/design-harness.md §3, and
+# Two guest-side rules that are load-bearing (harness/dc/README.md, and
 # measured here 2026-08-01):
 #   1. Raise the SCIF baud before logging. Flycast models SCIF baud faithfully
 #      and KOS busy-waits on the TX FIFO, so at the KOS default of 57600 you get

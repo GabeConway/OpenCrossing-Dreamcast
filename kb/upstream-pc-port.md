@@ -100,7 +100,7 @@ flip the default again without that number.
 **Added 2026-08-06.** This document previously ended by saying upstream
 optimises "with codegen enabled" and this port does not, so their perf work
 does not transfer. **Half of that is now wrong.** `src/` builds at `-Os` with a
-14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, `dc/opt-lists.mk`), and the win
+18-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, `dc/opt-lists.mk`), and the win
 was the largest single result the project has had: `.text` **5,506,964 →
 2,753,700**, town FPS **11.6 → 20.6**, draw **79.1 → 45.4 ms**, µs/vertex
 **4.05 → 3.11** (`kb/state-log.md` 2026-08-06).

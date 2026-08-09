@@ -13,7 +13,7 @@
 # Exit 0 when a dump was found AND symbolised; 1 when no dump was in the log;
 # 2 on a resolution error (no ELF, stale ELF, no Docker).
 #
-# Why this exists in this shape (kb/design-harness.md §6/§8e):
+# Why this exists in this shape (harness/dc/README.md):
 #   * The cask Flycast has ENABLE_GDB_SERVER=OFF -- port 3263 has nothing
 #     listening and the binary contains no RSP strings. There is no debugger.
 #   * There does not need to be one. KOS prints the faulting PC, all 16 GPRs,

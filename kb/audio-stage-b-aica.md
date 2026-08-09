@@ -17,7 +17,7 @@ directive, the modelled cost of stage A exceeded the frame budget at every
 voice count, and therefore the work had to move to hardware voices.
 
 **That directive was reversed on 2026-08-06.** `src/` now builds at `-Os` with
-a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default), with
+a 18-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default), with
 `DC_OPT_PROFILE=o0` retained as a byte-identical revert. `jaudio_NES` is `-Os`.
 **The premise is void, and with it the conclusion that stage B is required.**
 The CPU cost of software synthesis is now an **open question**, not a fixed

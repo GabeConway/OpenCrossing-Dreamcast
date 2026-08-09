@@ -29,7 +29,7 @@ records two shapes, and they are resolved two different ways:
                                         used instead.
 
 That total is the number S4 has to size its asset pool against, and splitting
-it by kind is the measurement kb/research-creative-ram.md T1 needs before
+it by kind is the measurement kb/levers.md L10 T1 needs before
 deciding whether textures belong in the pool at all.
 
 THE INTERIOR-POINTER PROBLEM, AND THE gsSPVertex JOIN

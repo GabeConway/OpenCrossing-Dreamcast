@@ -14,7 +14,7 @@ extern "C" {
 /* Dreamcast: revert to the RETAIL GAMECUBE value. The PC port inflated these
  * because it had gigabytes; a stock DC has 16 MB total, less than the GC's
  * 24 MB MEM1. Sufficiency of the retail numbers is proven by the shipped
- * product. See kb/mem-budget.md §8. */
+ * product. See kb/mem-budget-m1-sh4.md §8. */
 #define TEXTURE_CACHE_LIST_SIZE 256
 #elif defined(TARGET_PC)
 #define TEXTURE_CACHE_LIST_SIZE 1024  /* PC: larger list for more textures */

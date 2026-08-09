@@ -255,7 +255,7 @@ static void dc_dynamic_fps_update(u64 work_us) {
     if (fps_opt < 10.0) fps_opt = 10.0;
     g_pc_fps_target = (int)(fps_opt + 0.5);
 
-    /* Upward probe: the batch measurement is bistable (kb/perf.md — the
+    /* Upward probe: the batch measurement is bistable (kb/perf-dc.md — the
      * device symptom was an outdoor area locked at 30 until a cheap interior
      * visit reset it). Periodically assume headroom and let the EMA
      * re-converge. */

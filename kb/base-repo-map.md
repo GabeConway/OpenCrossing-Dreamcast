@@ -84,7 +84,7 @@ lives at `0x8C000000` — re-derive (PLAN §11.6).
   `pc_gx_texture.c` -O3.
   ⚠️ **DOES NOT TRANSFER — reversed 2026-08-06.** This row was read as a rule
   for the DC port and it should not have been. On Dreamcast `src/` builds at
-  **`-Os` with a 14-TU `-O3` hot list** (`DC_OPT_PROFILE=perf`,
+  **`-Os` with a 18-TU `-O3` hot list** (`DC_OPT_PROFILE=perf`,
   `dc/opt-lists.mk`) and `dc/src` at `-O3`: `.text` **5,506,964 → 2,753,700**,
   town FPS **11.6 → 20.6**, draw **79.1 → 45.4 ms**, µs/vertex **4.05 →
   3.11**. The ARM history above is one unreproduced session that also changed
@@ -107,7 +107,7 @@ lives at `0x8C000000` — re-derive (PLAN §11.6).
 - `-fsigned-char` required (PPC chars signed; ARM GCC defaults unsigned).
   ⚠️ **CORRECTED 2026-08-02:** this used to say SH-4 GCC also defaults to
   unsigned `char`. It does not — confirmed on the GCC 15.2.0 in our SDK image
-  (`kb/toolchain-components.md` §3.1 and §5.1). Passing `-fsigned-char` on
+  (`kb/toolchain.md` §3.1 and §5.1). Passing `-fsigned-char` on
   sh-elf is harmless and stays; the claim about the default was wrong.
 - Endianness: GC data BE → LE handled at asset load (per-asset class), GCI
   bswap, and ~scattered per-site swaps documented in `pc/DOCUMENTATION.md`
@@ -126,7 +126,7 @@ switch env vars exist for every optimization (`PC_NO_*`) — keep the pattern.
 
 ⚠️ **These numbers are armhf and measured at `-O0`; do not scale them to the
 DC port's current state.** "Per-TU -O2 triage" is no longer an open lever
-here — DC spent it wholesale on 2026-08-06 (`-Os` + a 14-TU `-O3` hot list;
+here — DC spent it wholesale on 2026-08-06 (`-Os` + a 18-TU `-O3` hot list;
 town FPS 11.6 → 20.6, draw 79.1 → 45.4 ms). The kill-switch pattern survived
 the change and is the reason it was safe: `DC_OPT_PROFILE=o0` is a
 byte-identical revert.

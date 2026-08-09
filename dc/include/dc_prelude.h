@@ -1,7 +1,7 @@
 /* dc_prelude.h — force-included (-include) into EVERY translation unit of the
  * Dreamcast build, decomp and platform alike.
  *
- * WHY THIS EXISTS (kb/design-shelf-hazards.md §2.3, §2.4)
+ * WHY THIS EXISTS (kb/traps.md, §2.4)
  * ------------------------------------------------------
  * KallistiOS defines object-like macros whose names collide with struct field
  * names in the decomp. The collision is *unavoidable by include ordering*:

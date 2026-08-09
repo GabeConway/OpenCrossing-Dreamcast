@@ -85,7 +85,7 @@ sh-elf-size "$ELF" || true
 # ---------------------------------------------------------------------------
 # 2. CDI
 # ---------------------------------------------------------------------------
-# kb/design-toolchain.md §5.2, VERIFIED measurement:
+# kb/toolchain.md, VERIFIED measurement:
 #   mkdcdisc     -e elf -o out.cdi  ->  740,083,145 B, 15.6 s
 #   mkdcdisc -N  -e elf -o out.cdi  ->    1,783,337 B,  0.021 s
 # a 415x size / 740x time difference.

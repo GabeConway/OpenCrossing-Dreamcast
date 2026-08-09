@@ -2453,7 +2453,7 @@ static inline void vs_charge(VsMark* m, int bucket) {
  *     This build sets `p.dma_enabled = 0` (search `dma_enabled` below)
  *     — that is the precondition, not an accident.
  *   - The store queues need QACR0/QACR1, which stop working the moment the MMU
- *     is on (kb/research-mmu-hardware-tax.md). MMU paging is DEAD
+ *     is on (kb/research-mmu-paging.md). MMU paging is DEAD
  *     (kb/research-mmu-paging.md), so this is a dependency on a decision that
  *     is already made, but it is a dependency and it is now written down.
  *   - `pvr_list_begin()` has ALREADY done `sq_lock((void *)PVR_TA_INPUT)` for

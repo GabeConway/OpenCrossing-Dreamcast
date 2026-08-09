@@ -3,7 +3,7 @@
 ⚠️ **2026-08-06 — every "per-TU `-O2`" lever below is armhf-era and now
 overtaken.** Those entries name per-TU `-O2` as the fix for work-dominated
 stutters in `-O0` decomp code. On the Dreamcast port `src/` is no longer at
-`-O0` at all: it builds at `-Os` with a 14-TU `-O3` hot list
+`-O0` at all: it builds at `-Os` with an 18-TU `-O3` hot list
 (`DC_OPT_PROFILE=perf`, `dc/opt-lists.mk`), which is the whole-tree version of
 that lever, and it is already spent — `.text` 5,506,964 → 2,753,700, town FPS
 11.6 → 20.6. Treat "per-TU `-O2`" in the entries below as **already applied**
@@ -120,14 +120,14 @@ on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
   placement (m_field_info.c:2990-3155) examined and exonerated — loops are
   bounded small. NOT reproducible on 2nd visit (one-time), so instrument
   first: DONE 2026-07-14 — `[PROF]` slow-phase profiler shipped on dev
-  (see kb/perf.md Measuring). Next SD-card log with the hang will carry
+  (see kb/perf-dc.md Measuring). Next SD-card log with the hang will carry
   `[PROF]` lines naming the phase (and actor profile id if it's a ct/mv).
   Then per-TU -O2 (emu64 template) on m_field_info.c / m_field_make.c /
   ac_event_manager.c + actor spawn path — attacks this AND the sustained
   acre-streaming dips regardless of which candidate wins.
 
 - **FPS below 60 in heavy scenes** (updated 2026-07-13 post-P4, v0.3.0):
-  P4 (strip conversion + whole-batch CPU cull, kb/perf.md #14)
+  P4 (strip conversion + whole-batch CPU cull, kb/perf-dc.md #14)
   DEVICE-VERIFIED: avg 56.4 fps, median 59.3, 78% ≥55; worst sustained
   dips 41-44 fps during heaviest acre streaming. **GL is no longer the
   bottleneck** — gl avg 5.4ms, all 75 gameplay stutters work-dominated
@@ -135,7 +135,7 @@ on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
   stable, in order of expected value:
   (a) **per-TU -O2 on loader/decompression + m_field/actor TUs** —
   work-dominated stutters and the 41-44 fps dips are game logic in -O0
-  decomp code (emu64 -O2 template proven safe, kb/perf.md #8);
+  decomp code (emu64 -O2 template proven safe, kb/perf-dc.md #8);
   (b) **iso read-ahead thread** — sync SD reads inside work spikes;
   (c) **CPU pre-transform at accumulation** — matrix loads are 41% of
   batch breaks and merged=0 all session; pre-transform would let GXBegin
@@ -159,13 +159,13 @@ on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
   (dynamic fps working). emu64 -O2 experiment SHIPPED SAFE (train passes,
   crashes=0) and improved home area 36→35-40 fps. PERF-tab toggles don't
   matter because draw dispatch, not scene volume, is the cost.
-  **P1 GX state-set dedup: SHIPPED + DEVICE-VERIFIED 2026-07-13** (kb/perf.md
+  **P1 GX state-set dedup: SHIPPED + DEVICE-VERIFIED 2026-07-13** (kb/perf-dc.md
   #9) — playtest: much better loading, acres load right, smoother, better 1%
   lows, ~30 fps avg walking while acres load. log.txt PERF numbers (draws,
   gl ms vs 491-600/15-26ms baseline) still worth grabbing next SD mount.
   Triage switch PC_NO_STATE_DEDUP=1.
   **P2 — per-program uniform value shadowing: SHIPPED + DEVICE-VERIFIED
-  2026-07-13** (kb/perf.md #10, v0.2.0). Kill switch PC_NO_UNIFORM_SHADOW=1.
+  2026-07-13** (kb/perf-dc.md #10, v0.2.0). Kill switch PC_NO_UNIFORM_SHADOW=1.
   Re-measure (fresh log.txt PERF numbers on the P2 build) before deciding
   on (P3) per-draw glBufferData orphan → one big VBO with offset
   accumulation per frame (fewer/larger draws after P1 may deflate this).
@@ -182,7 +182,7 @@ on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
   50ms, max 148ms) — game logic in -O0 decomp; lever = per-TU -O2
   expansion (loader/decompression/m_field TUs); (b) gl-dominated spikes,
   worst were the 24 mid-session shader compiles — fixed by 101-config
-  seed (kb/perf.md #12).
+  seed (kb/perf-dc.md #12).
 
 - **Log noise: `[PC] toNextLand: l_keepSave not set, aborting`** (2026-07-29,
   cosmetic). `mCD_toNextLand` (pc/src/pc_m_card.c:1242) runs on every play-scene
@@ -356,19 +356,19 @@ on DC and as an unspent armhf lever nowhere else. `kb/state-log.md` 2026-08-06.
   DEVICE-VERIFIED 2026-07-15: clock tracks real time through a full play
   session ("i think the clock is fixed too" — user, >10 min session).
 - ~~Intro train black screen → decomp code must build unoptimized
-  (kb/perf.md).~~ ⚠️ **[STALE 2026-08-06 — the conclusion, not the symptom.]**
+  (kb/perf-dc.md).~~ ⚠️ **[STALE 2026-08-06 — the conclusion, not the symptom.]**
   The symptom was real *on armhf*; "therefore decomp code must build
   unoptimized" was never reproduced on SH-4, and the Dreamcast port reversed
-  it: `src/` builds at `-Os` with a 14-TU `-O3` hot list and its train scene
+  it: `src/` builds at `-Os` with an 18-TU `-O3` hot list and its train scene
   passes (`crashes=0`, screenshot-matched against an `-O0` build). The armhf
   `-O2` attempt shipped together with `-mcpu=cortex-a53 -mfpu=neon-vfpv4`, so
   neither level was ever tested alone, and the likeliest cause is a missing
   `JUTRomFont::spFontHeader_` definition — a link bug, not a codegen one.
   See `kb/state-log.md` 2026-08-06.
 - First-boot menu music stutter → shader seed warmup during splash.
-- No audio → 32-bit PipeWire env in launcher (kb/device.md).
+- No audio → 32-bit PipeWire env in launcher (kb/research-dreamcast.md).
 - Game running at 57% speed under load → fps_target must be dynamic (6);
   fixed targets tie game logic to render rate.
 - Outdoor area locked at 30 fps until a house visit reset it → dynamic-fps
   governor was bistable (batch measurement); fixed with upward probe,
-  kb/perf.md #11. If it recurs, check PC_NO_FPS_PROBE handling first.
+  kb/perf-dc.md #11. If it recurs, check PC_NO_FPS_PROBE handling first.

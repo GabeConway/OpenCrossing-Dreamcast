@@ -42,7 +42,7 @@
 # ASSERT records so this does not come up.
 # ---------------------------------------------------------------------------
 #
-# WHAT THESE NUMBERS ARE AND ARE NOT (kb/design-harness.md §8d)
+# WHAT THESE NUMBERS ARE AND ARE NOT (harness/dc/README.mdd)
 #
 # They are EMULATED time. Flycast models no cache, no bus contention and no
 # store-queue stalls. They are excellent for "did this change make it worse"

@@ -83,8 +83,10 @@ OPT_HOT_SRC := \
 #                        half is not. If an optimized image dies in the display
 #                        list, start here.
 #                        ⚠️ -O2 on this exact TU was device-verified on the
-#                        armhf port (kb/perf.md:38-42, "crashes=0"). -O3 on it
-#                        has never been tried anywhere in this port's history.
+#                        armhf port ("crashes=0"; the armhf kb/perf.md was
+#                        deleted in the 2026-08-09 audit — see git history).
+#                        -O3 on it has never been tried anywhere in this
+#                        port's history.
 #
 # TIER 2 — traced per frame in source, NOT individually measured. All of these
 # share the 7.3 ms, so each is a small bet; they are here because they are

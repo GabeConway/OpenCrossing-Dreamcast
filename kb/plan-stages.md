@@ -3,13 +3,17 @@
 The agreed sequence for closing the RAM gap, with the reasoning behind each
 step so a fresh context does not re-derive it. **The ordering was the user's
 call on 2026-08-01: execute it, do not re-litigate it.** Current status and the
-concrete next moves live in `kb/STATE.md`; the costed solution stack for S3's
-remainder and S4 is `kb/ram-plan.md`; the ranked ledger is `kb/levers.md`.
+concrete next moves live in `kb/STATE.md`; the ranked ledger of what each step
+cost and what is still live is `kb/levers.md`.
+
+⚠️ **S1-S3 are DONE and the gap this plan existed to close is GONE** (`-Os`,
+2026-08-06). S4 is no longer a fit requirement — it is a residency lever. Read
+the sequence for its reasoning, not for its urgency.
 
 > ## ⚠️ [2026-08-06] A LEVER THIS PLAN EXPLICITLY FORBADE WAS TAKEN, AND IT WORKED
 >
 > The `-O0` directive was reversed by the user. `src/` builds at `-Os` with a
-> 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` moved `-O2` → `-O3`.
+> 18-TU `-O3` hot list (`DC_OPT_PROFILE=perf`); `dc/src` moved `-O2` → `-O3`.
 > Measured, matched town windows:
 >
 > | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
@@ -42,7 +46,7 @@ remainder and S4 is `kb/ram-plan.md`; the ranked ledger is `kb/levers.md`.
 re-litigate the ordering; execute it. The reasoning behind each step is below
 so a fresh context does not have to re-derive it.
 
-**`kb/ram-plan.md` (2026-08-01) is the costed solution stack for S3's remainder
+**`kb/levers.md` (2026-08-01) is the costed solution stack for S3's remainder
 + S4** — eight moves with closing arithmetic, gates, and the experiment queue.
 Execute S4 from it.
 
@@ -198,7 +202,7 @@ learned since this step was written, all of which change how it must be built:
    range-checks it) plus ~14 symbols indexed as arrays.
 3. **Textures probably should not be pooled at all.** ~4.6 MB of the 8.5 MB of
    destinations is texture data whose only consumer is the PVR. Pooling it pays
-   for those bytes twice. See `kb/research-creative-ram.md` T1 — this is the
+   for those bytes twice. See `kb/levers.md` T1 — this is the
    highest-value open idea in the project and it should be settled *before* the
    pool is sized.
 4. **The pool may not need to be a separate extent at all.** `research-creative-ram.md`

@@ -1,538 +1,37 @@
-# RESUME — pick the session back up here
+# RESUME — the handoff. A fresh context starts here.
 
-## ⭐⭐⭐ SESSION 13 (2026-08-09) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED,
-## `us/v` 2.68 → 2.51, AND THE SHADE HOIST SESSION 12 ORDERED IS NEUTRAL.
-## START HERE.
+Then `kb/STATE.md` for the numbers and the queue, `kb/state-log.md` for the
+evidence behind any figure, `kb/closed.md` before proposing anything, and
+`kb/traps.md` before touching the build, the harness or an instrument.
 
-Four measured runs, **one build line** (town, `keeplist-town.txt`,
-`DC_ASSET_STUB=1`, `DC_ARAM_WINDOW=1048576`, `DC_ARENA_BYTES=1200000`,
-`DC_AUDIO_SCENES=all`, `DC_AUDIO_DISC_FRAMES=8`, `DC_AUDIO_VOICES=12`,
-`DC_AUTOSTART=1`, `DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`), 600 s each, Flycast:
+Rewritten 2026-08-09 in the kb audit. Everything session-by-session that used to
+live in this file is in `kb/state-log.md`, newest first — this file is what is
+TRUE and what is OPEN, not what happened.
 
-```
-build                        us/v  draw xform  sum  memo shade  lit  tex post emit   xf     v  hit%
-ctrl (neither change)        2.65  29.1   7.5  6.66  1.27  1.99 0.58 0.57 0.58 1.45 0.23  2820  50.5
-shade hoist only             2.68  28.3   7.3  6.65  1.26  1.98 0.61 0.62 0.56 1.40 0.22  2739  50.9
-G-B + hoist                  2.51  29.2   6.9  6.31  1.20  1.82 0.54 0.57 0.55 1.40 0.22  2745  53.7
-G-B + hoist + shortcuts      2.54  28.5   7.0  6.33  1.18  1.89 0.53 0.56 0.57 1.39 0.20  2745  53.7
-G-B, hoist OFF               2.56  27.8   7.0  6.45  1.26  1.91 0.55 0.59 0.55 1.40 0.20  2754  54.1
-```
+---
 
-All five: `ASSET MISSING 0`, `reinst=0`, `dropped=0`. ⚠️ **Every run drew a
-DIFFERENT TOWN** (`v` 2820/2739/2745/2745/2754; the seed is per boot) — **`us/v` is
-the instrument and `draw` is NOT**: `draw` wanders 28.3-29.2 in both directions
-across a change worth −6 % on `us/v`.
+## 1. Where the port is
 
-🔴 **THE FIFTH RUN GAVE THIS SESSION ITS MOST REUSABLE RESULT: THE NOISE FLOOR
-ON `us/v` IS ~±2 %, AND NOBODY HAD MEASURED IT.** The shade hoist reads
-**+1.1 %** against `ctrl` (2.65 → 2.68) and **−2.0 %** against `G-B, hoist OFF`
-(2.56 → 2.51). **The sign flips.** Grouped, the five runs are 2.65 / 2.68
-without G-B and 2.51 / 2.54 / 2.56 with it — the groups separate cleanly, the
-members within a group do not. `us/v` normalises for vertex COUNT but not for
-WHICH vertices, and the lit / textured / punch-through mix moves with the town.
+**It walks the town, with music.** It boots from a burned CD-R on a retail
+Dreamcast with loading **at parity with the emulator** (human verdict, the
+`AC-DC-20260804` burn). In Flycast it reaches the town, walks it, meets Tom Nook
+and is taken to the houses. All 3,936 objects in the link compile and link for
+sh-elf with zero exclusions.
 
-**Consequences, and they are general:**
-- **The hoist is INSIDE THE NOISE and its sign is NOT determined by this data.**
-  Any claim that it helped or hurt is unsupported. It is kept ON because it
-  single-sources a predicate that was written out twice, not because it is fast.
-- **G-B's −6.3 % is ~3x the floor**, and what carries it is the two-GROUP
-  separation, not any single pair.
-- ⚠️ **A change worth less than ~4 % CANNOT be resolved by one A/B pair.**
-  Session 12's wins were 8-18 % and were safe on one run each; that precedent
-  does NOT license a 2 % claim. Run each arm 2-3 times, or report the result as
-  inside the floor — do not quietly pick the favourable pair.
+⚠️ **Parity on I/O is not parity on compute.** The only hardware FPS figure the
+project has ever had is "~11 FPS in the town", and the human verdict on the
+current build is *"on hardware the game runs super stable, fps and audio is
+worse for sure … the emulator runs buttery smooth."* **Every FPS number in this
+kb is Flycast's, and Flycast models no instruction cache, no operand cache and
+no disc seek time.** See §6.
 
-### 🔴 READ THIS BEFORE ANYTHING ELSE: THIS G-B IS NOT THE 13.31 ms BLOCK
+Current numbers: `kb/STATE.md`.
 
-The **13.31 ms** figure is `dl_G_TRIN`'s index expansion **plus our own `GX*`
-attribute setters**, and it is still the largest single block in the project.
-What shipped here is the **vertex-index side channel**: it makes the **memo**
-cheap. **It does not remove one setter and it does not expand one fewer index.**
-The **indexed-submit rewrite is still open, still unstarted, still
-multi-session.** Several kb files conflate the two — do not add to that.
+---
 
-### 1. ⭐ WHAT SHIPPED — G-B, the vertex-index side channel. ON by default
+## 2. The build lines
 
-`dc/src/dc_emu64_cull.cpp`'s AABB index walk already visits indices **in exactly
-the order `set_position3()` will replay them**, so it now records that
-**sequence** and hands it to `dc/src/dc_gx.c` (`dc_gx_vtxid_arm`).
-`GXPosition3f32` consumes it with a cursor and stamps `(epoch << 8) | index`
-into **`DCGXVertex` bytes 30-31, which were dead padding** — `sizeof` stays 32,
-session 12's `aligned(32)` is untouched. `dc/src/dc_pvr.c`'s memo then keys on
-the stamp: **no hash, no 30-byte content compare, and above all no random read
-into `verts[]`** — the operand-cache miss that made `memo` 122 cycles a vertex.
-Kill: **`-DDC_GX_NO_VTXID`**.
-
-- **Gate RAN:** `-DDC_GX_VTXID_VERIFY` content-checks every id hit —
-  **`vidchk=15,538,941 vidbad=0 over=0`**.
-- **The epoch is load-bearing.** `GXBegin` **merges** batches
-  (`pc_gx_merged_batches`): one submit can hold two TRIN commands and emu64
-  **reloads `vertices[]` between them**, so a bare index would hand the second
-  TRIN the first one's transforms. The epoch makes a stale id miss.
-- **Reach is 100 % of what is legal.** Armed only where the batch survives the
-  frustum test AND none of `dc_emu64_cull.cpp`'s three punts fired:
-  `vid=1770/61470` against `vis=1770` per 30-frame window.
-- ⚠️ **The win did not land where it was aimed.** `memo` moved only 1.26 → 1.20.
-  The gain is in `shade`/`lit`/`tex`/`post` (3.77 → 3.48 ms), because those are
-  charged on memo **MISSES** (rule 10) and the **hit rate rose 50.9 → 53.7 %**.
-  The miss-count drop is about three-quarters of it.
-- ⚠️ **Flycast understates this by construction** — what it deletes is a read
-  that misses the operand cache, and Flycast models no cache. **2.51 is a
-  floor.**
-
-### 2. ❌ THE HOIST SESSION 12 ORDERED IS NEUTRAL, AND THE SHORTCUTS ARE DEAD
-
-Session 12 said `LAZYRGBA`/`ALPHA8` lost because their predicates ran per vertex
-and told this session to hoist them next to `need_light`. Done —
-`shade_batch_mode()`, kill `-DDC_PVR_NO_SHADE_HOIST` — and **both halves of the
-prediction failed.** The hoist alone: **2.65 → 2.68**, no better. The shortcuts
-on top of it: **`shade` 1.82 → 1.89, `us/v` 2.51 → 2.54, WORSE**, while the
-shortcut fired **`shade_a8 verts=10,184,262`** times.
-
-⭐ **The mechanism: with the shortcuts off, `need_rgb`/`need_a` were
-compile-time constants and GCC straight-lined the block. Hoisting turns them
-into runtime variables loaded from a bitmask, so `if (need_rgb)` becomes a real
-branch with both arms emitted.** The predicate got cheaper to compute and the
-loop got harder to schedule.
-
-**Rule, generalising `kb/traps.md`'s "a per-vertex predicate is not a saving":
-hoisting a predicate out of a loop buys nothing if it was already a CONSTANT in
-the loop.** Settled-negative in `kb/closed.md`. Do not propose a third variant
-without a new mechanism.
-
-### 3. THE PUNT SPLIT IS MEASURED, AND ONE PUNT RE-OPENS
-
-```
-[EMU64C] trin=6990 cull=3660 vis=1770 punt=1560 pdec=900 ptgen=0 pmix=660
-```
-
-Decal-Z is **900 — 58 % of all punts**; `G_TEXTURE_GEN` is **zero**. ⭐ **The
-three punts exist because CULLING a batch changes semantics. ARMING skips
-nothing** — it needs only the weaker property *"the same index means a
-byte-identical staged vertex within this submit"*. **Decal-Z meets that bar**
-(it recomputes a transient position from the same `emu_vtx->position` through
-the same matrices on every reference); `G_TEXTURE_GEN` and mixed
-`MTX_NONSHARED` do not (both mutate `vertices[]`, per reference and on first
-touch). **Lifting decal-Z for arming only: 1770 → 2670 armed batches, +51 %
-reach. NOT DONE, NOT MEASURED.**
-
-### What to do next, in order
-
-1. ⭐ **The decal-Z arming lift — WRITTEN, GATE PASSED, PERF NOT MEASURED.**
-   `-DDC_GX_VTXID_DECAL`, **default OFF**. Decal batches now arm but are still
-   never frustum-tested and never culled. Gate with it ON:
-   **`vidchk=15,835,845 vidbad=0 over=0`**; reach `vid=1800/61920` →
-   `2670/72810` (**+48 % batches, +18 % refs**), `viddec=900` of `pdec=1020`.
-   ⚠️ Refs only +18 % (decal batches are ~12 refs, not ~35), so the `us/v`
-   effect sits AT the ±2 % floor and needs REPEATED runs (rule 11). Four were in
-   flight at flush — read them before defaulting it ON.
-   ⚠️ `-DDC_EMU64_CULL_VERIFY` cannot certify it (decal batches never cull);
-   `-DDC_GX_VTXID_VERIFY` is the gate.
-2. 🔴 **The full indexed-submit G-B — the 13.31 ms block.** Unstarted.
-3. **The hardware PMCR burn** (§ session 11). Everything above is a floor.
-
-✅ **The fifth run landed and is in the table** — G-B with
-`-DDC_PVR_NO_SHADE_HOIST`, `us/v` 2.56. It is what produced measurement rule 11
-(§0b): the hoist's sign FLIPS between the two baselines, so the ±2 % floor, not
-the hoist, is the finding.
-
-## ⭐⭐⭐ SESSION 12 (2026-08-08) — THE MEMORY-BOUND READING PAID. `us/v` IS
-## 3.24 → 2.65, AND THE THREE WINS ARE ON BY DEFAULT. START HERE.
-
-Session 11b said the frame is memory-bound and ranked the queue by it. This
-session spent the top of that queue. Three measured runs, **one change each**,
-same build line (town, `DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`, static camera,
-600 s):
-
-```
-                     memo    xf   lit   tex shade  post  emit |  sum  xform  us/v  draw   FPS
-baseline (all off)   1.74  0.23  0.62  0.62  2.13  0.57  2.20 | 8.11   8.9   3.24  30.7  25.2-26.5
-+ G-C (pvr_dr_*)     1.77  0.23  0.64  0.63  2.19  0.58  1.45 | 7.49   8.2   2.89  29.3  26.6-27.4
-+ align + wordcmp    1.26  0.22  0.61  0.61  2.09  0.53  1.43 | 6.76   7.2   2.65  27.7  27.7-28.0
-```
-
-**`us/v` −18.2 %, `xform` −1.7 ms, `draw` −3.0 ms, ~+2.5 FPS.** All three are
-**ON by default**; `kb/state-log.md` carries the evidence and the counters.
-
-### What shipped
-
-1. **G-C — `emit` 2.20 → 1.45 ms (−34 %).** `emit_projected()` writes the eight
-   TA words straight into `pvr_dr_target()` and `pref`s with `pvr_dr_commit()`.
-   Counter `[DC/PVR] dr verts=` reads **81.7 %** of emitted vertices — exactly
-   the non-punch-through share. Kill: `-DDC_PVR_NO_DR`.
-2. **`DCGXVertex` → `aligned(32)`.** It was 32 bytes at `aligned(8)` landing on
-   `&31 == 8`, so **every vertex straddled two operand-cache lines**, split
-   across pos/tex/color | normal. Kill: `-DDC_GX_NO_VTXALIGN`.
-3. **`vmemo_same()` branch-free** — 12 dependent branches → 8 XOR-OR loads per
-   side and one branch. `memo` 1.77 → 1.26 (−29 %). ⭐ **Hit rate 51.0 → 51.5 %:
-   the cost of asking changed, the answer did not.** Kill:
-   `-DDC_PVR_NO_VMEMO_WORDCMP`.
-
-### What did NOT pay, and why it is worth knowing
-
-`shade`'s lazy-`rgba` and alpha-byte shortcuts are **written, correct, and
-DEFAULTED OFF** (`-DDC_PVR_SHADE_LAZYRGBA`, `-DDC_PVR_SHADE_ALPHA8`). They took
-`shade=` 2.09 → 1.94, and put more than that back: **`xform − sum` went 0.44 →
-0.71 ms** and `us/v` did not move. The predicates are evaluated **per vertex**
-to save three converts — that moves work rather than removing it. They are
-per-BATCH constants (every `chan_ctrl_*` writer calls
-`dc_gx_flush_if_begin_complete()` first). **Hoist them next to `need_light` and
-re-measure — that is the first thing to try next session.**
-
-⚠️ **[ANSWERED 2026-08-09, NEGATIVE — see session 13 at the top.** The hoist
-landed (`shade_batch_mode()`) and is **neutral** (2.65 → 2.68); the shortcuts on
-top of it are **worse** (`shade` 1.82 → 1.89). The diagnosis in this paragraph
-was wrong about the cost: the predicates were **compile-time constants** with the
-shortcuts off, so hoisting *created* a runtime branch rather than removing one.
-Closed as settled-negative.]
-
-### 🔴 TWO CORRECTIONS THIS SESSION FORCED — MEASUREMENT RULE 10
-
-**RULE 10: `[VTXSPLIT]`'s `xf`/`lit`/`tex`/`shade`/`post` are charged on memo
-MISSES, not on `v`.** Their `VS_MARK`s are downstream of the memo-hit
-`continue`. At a 49.9 % hit rate, dividing by `v` halves every one of them:
-`shade` is **~295** cycles/vertex not 148, `lit` is **~89** not 44. `memo`,
-charged on every vertex, is unaffected at 122. This retires
-`kb/research-sh4zam-gap.md` §3's "44 cycles ≈ six FIPRs, so the block was never
-slow" — **the §0a/G-D demotion still stands, but on absolute milliseconds
-(0.58 ms of 30), not on that argument.**
-
-**`GX_AF_SPOT` is unreachable in the whole tree.** `emu64.c:3316` gates it on
-`G_LIGHTING_POSITIONAL` (0x400000), which has three references — a name table
-and its two readers — and nothing ever sets it. `chan_eval`'s spot branch and
-its per-light FDIV are dead weight. The town runs **exactly 2 lights** (sun +
-moon, unconditional, `m_kankyo.c:1282-1290`), not 8.
-
-## 🔴🔴 SESSION 11b (2026-08-08) — `xform` IS SPLIT, AND THE FRAME IS
-## MEMORY-BOUND. THE sh4zam QUEUE IS RE-RANKED. READ THIS BEFORE §1 BELOW.
-
-`us/v = 3.24` is **648 SH-4 cycles per vertex** against ~60 cycles of vertex
-arithmetic. G5 (`-DDC_PVR_VTXSPLIT=16`, `dc/src/dc_pvr.c`) split it, town,
-sampling 1 primitive in 16, ledger closing at **88 %**:
-
-```
-[VTXSPLIT] memo=1.68 xf=0.23 lit=0.58 tex=0.62 shade=2.03 post=0.57 emit=2.15
-           | sum=7.87  (against [PHASE] xform=8.9)
-```
-
-⭐⭐ **`kb/research-sh4zam-gap.md` §0a/G-D are aimed at `lit` = 0.58 ms of a
-30 ms frame — 1.9 %, and a perfect FTRV rewrite takes about half of it.** At
-222 ns over 2,613 lit vertices the block runs at **44 cycles**, which is what
-six FIPRs, an FSRRA and a normalize should cost. **It was never slow.** The
-position FTRV is **0.23 ms**. Every matrix-unit idea in that document is
-chasing ~0.8 ms combined; §0a is demoted to the bottom on a measurement.
-
-⭐⭐⭐ **THE FRAME IS MEMORY-BOUND, NOT FPU-BOUND.** `memo` is **122 cycles a
-vertex** for a hash and a 12-field compare — that is the random read into
-`verts[]` missing the operand cache, not arithmetic. With `emit` (a 32-byte
-copy per corner into the SQ) and `shade`, the memory-shaped stages are
-**5.86 ms, 75 % of `xform`**. Independently corroborated by
-`tools/dcopt/icache_map.py`: the 12-symbol inner loop is **1.4x** an 8 KB
-direct-mapped icache. ⚠️ **Flycast models neither cache, so both are
-understatements.**
-
-**The queue that follows, replacing §1's:**
-1. **G-C — `emit`, 2.15 ms.** `pvr_dr_*` instead of `pvr_prim`. KOS 2.3:
-   `pvr_dr_target()` is `pvr_dr_addr ^= 32`, `pvr_dr_commit` is `sq_flush`,
-   and `pvr_list_begin` already `sq_lock`s the TA — DR and `pvr_prim` share
-   one QACR setup and can be mixed. ⚠️ §4e first.
-2. **`shade_vertex` — 2.03 ms.** Never examined, never on any list.
-3. **memo — 1.68 ms.** Net positive today; G-B replaces it structurally.
-4. **G-B — 13.31 ms**, still the largest block in the project and upstream of
-   everything above. Unchanged, and still a multi-session change.
-5. §0a / G-D / G-F — 0.58 + 0.23 + 0.70 ms. Last, if ever.
-
-## 🔴 SESSION 11 (2026-08-08) — THE HARDWARE GAP NOW HAS AN INSTRUMENT, AND IT
-## IS WAITING ON A BURN. READ THIS BEFORE §0h, WHICH IT ANSWERS HALF OF.
-
-**Nothing in this session makes the game faster.** It builds the thing that
-makes steps 2-5 of the hardware plan falsifiable, plus one free finding.
-
-### 🔴 THE `-f` BURN FAILED, AND THE FAILURE IS A FINDING. BURN `-g` INSTEAD.
-
-**Human, on `AC-DC-20260808f-pmcr.cdi`:** *"The white table showed up but then
-the game never booted."*
-
-**Cause: `DC_CONSOLE_MUTE` armed at the top of `main()`.** KOS busy-waits on
-the SCIF FIFO with or without a cable, so this port's boot has always run with
-hundreds of ms of implicit console delay in it; deleting all of it at once
-changed init's timing and the game never left `boot_main`. The table appearing
-is what localises it — the HUD only draws from `VIWaitForRetrace`, so boot was
-already past the asset load and `pvr_init`. **Flycast could not have caught
-it:** that image had no `DC_AUTOSTART`, so the emulator run sat on the title
-screen and never reached the failure. Full write-up in `kb/traps.md`.
-
-**Fixed two ways, both in `-g`:**
-1. The mute now arms at `DC_CONSOLE_MUTE_FRAME` **presented frames** (default
-   300), inside the game loop. Boot keeps its original timing.
-2. The HUD leads with a **liveness line — `f= t= d= c=`** (presented frames,
-   logic ticks, GX draw calls, emu64 commands). A repeat failure is now
-   readable off the screen: `f=` frozen ⇒ the loop died; `f=` advancing with
-   `d=0 c=0` ⇒ the loop lives and the game is submitting nothing.
-
-### What to do next, in order
-
-0. 🔴 **BURN `AC-DC-20260808g-pmcr.cdi`** — on the NAS (`Jupiter`, share
-   `Gabe`, `AC-DC/`) and in `~/Downloads`. Verified in Flycast to scene 9.
-   and read the table off the TV. It is the shipping config plus
-   `DC_PMCR=1 DC_PMCR_HUD=1 DC_CONSOLE_MUTE=1`, with no `DC_SCIF_FAST`, no
-   `DC_AUTOSTART` and no probes. **It is a measurement image, not a play
-   image**: the HUD covers the top-left and the console is off.
-   **What to photograph:** the town, standing still, after the table has
-   filled in (~12 s — the rows say `--` until their event has had a window).
-   **The three numbers that matter:** `cyc` (does `ms` ≈ `wall`? then the CPU
-   never idles and the frame is compute-bound), `istall` (icache stall cycles
-   — the hypothesis), `dstall`.
-1. Then, and only then, step 2 of the plan: section ordering, and re-A/B the
-   `-O3` hot list against `istall` rather than against Flycast FPS.
-
-### P1 — `dc/src/dc_pmcr.c`, and the four things to know
-
-1. **PRFC1 only** — KOS owns PRFC0 (`perf_cntr_timer_ns`). Same split Xash3D
-   DC uses. Two counters, one spoken for ⇒ **one event at a time**, so the
-   event **ROTATES**: 8 events, one per 30-frame window, full table ~12 s.
-   ⚠️ Ratios BETWEEN two modes come from two different windows; ratios
-   WITHIN one (audio vs draw) share a window and are exact.
-2. **Per PRESENTED frame.** Same block as `[PERF]`/`[PHASE]`. Do not double it.
-3. ⚠️ **FLYCAST IMPLEMENTS NO PMCR — every event reads 0, including elapsed
-   cycles.** The instrument says so itself now rather than looking unarmed. An
-   emulator run can validate the plumbing and nothing else.
-4. ⚠️ **`DC_CONSOLE_MUTE=1` is not optional on a measuring burn.** KOS
-   busy-waits on the SCIF FIFO with or without a cable, and a perf build puts
-   ~10 lines into every 30-frame window — the log would be measuring itself.
-   `-DDC_PMCR_HUD` is the channel instead. It silences crash dumps too.
-
-### 🔴 THE FREE FINDING — THE INNER LOOP DOES NOT FIT IN THE ICACHE
-
-`tools/dcopt/icache_map.py` (host-side, seconds, no burn). Against an **8 KB
-direct-mapped** icache:
-
-| hot set | bytes | vs icache |
-|---|---:|---:|
-| the town frame's hot symbols | 97,504 | **11.9x** |
-| **the 12-symbol innermost draw loop** | 11,648 | **1.4x** |
-
-⭐ `dc_gx_backend_submit` shares cache lines with six of the `GX*` setters it
-calls per vertex. **This sizes the pressure; only `istall` on a burn prices
-it.**
-
-⚠️ **The plan's `--symbol-ordering-file` is an LLD flag and we use GNU ld.**
-2.45.1 has **`--section-ordering-file FILE`**, which does the same job because
-`-ffunction-sections` is already on.
-
-## ⭐⭐⭐ SESSION 9 (2026-08-08) — THE MUSIC PLAYS, G3 LANDED, AND BOTH ARE
-## DEFAULTS NOW. START HERE; SESSIONS 7-8's QUEUE IS LARGELY SPENT.
-
-**`dev` @ `c177552` + the G3 commit. Human verdict: "performance is insanely
-good on g3 with audio. wow, major gains."** Burn image of this exact tree:
-`~/Downloads/AC-DC-20260808.cdi` (740,087,817 B, padded).
-
-### The four things that changed, and all four are ON by default
-
-1. 🔴→✅ **THE MUSIC PLAYS.** The port-queue drain landed
-   (`dc_audio_drain_port()`, `dc/src/dc_audio.c`, kill switch
-   `-DDC_AUDIO_NO_DRAIN`). Session 7's diagnosis was right about the mechanism
-   and **incomplete about the trigger**: the queue's only consumer was inside
-   synthesis, so it starved on a disarmed scene *and* on any armed tick that hit
-   the `have >= RING - HEADROOM` break with a full ring. Drains every pump now,
-   before the gate.
-2. ⭐ **`DC_ARAM_AUDIO_DROP=0` IS DERIVED FROM `DC_AUDIO=1`.** It was documented
-   in two places and wired in none; without it every sound build streams all
-   8,300,384 B of `audiorom.img` into ARAM and throws it away. This was a
-   standing trap that had already cost one session.
-3. ⭐⭐ **THE PEAK AUDIO COST IS VOICE COUNT — MEASURED, and it retires the
-   "bimodal" mystery.** See §0c below.
-4. ⭐⭐⭐ **G3 SHIPPED AND IT IS THE BIGGEST WIN THE PROJECT HAS BOOKED.**
-   `dc/src/dc_emu64_cull.cpp`, `DC_EMU64_CULL` **defaults to 1**.
-
-### The numbers, all audio-on, town, matched build lines
-
-| | session start | + audio levers | **+ G3 (now)** |
-|---|---:|---:|---:|
-| `fps_p50` (whole run) | 17.4 | 19.5 | **23.2** |
-| town `draw` | 65.4 | 69.8 | **49.9 ms** |
-| `[STUTTER]` events / 900 s | 192 | 70 | **65** |
-| `synth_us` (one DAC frame) | 2,732 | 1,202 | 1,202 |
-| `vcull` (the LATE cull) | 9,963 | 9,915 | **1,002** |
-
-⚠️ **The old silent build's town frame was 45.6 ms.** Sound now costs roughly
-what the whole renderer used to. `ASSET MISSING 0`, `aram LOST 0`,
-`deepest_scene 18`, `run_report --vs` clean on every step.
-
-### ⚠️ THE DEFAULTS MOVED. A PLAIN BUILD IS NO LONGER THE OLD BUILD.
-
-`dc/Makefile`: `DC_EMU64_CULL ?= 1`, and inside the `DC_AUDIO=1` block
-`DC_ARAM_AUDIO_DROP ?= 0`, `DC_AUDIO_MIXRATE ?= 24000`,
-`DC_AUDIO_SUBDELAY ?= 0`. Every one is `?=`, so naming it explicitly still
-wins, and each has a documented revert. **This was deliberate: a result that
-lives only in a command line is one unset environment variable away from being
-lost.** The burn line is now just:
-
-```bash
-DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
-DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-DC_ARAM_WINDOW=524288 DC_ARENA_BYTES=1200000 \
-DC_AUDIO_SCENES=all DC_CDI_PAD=1 bash dc/build-dc.sh
-```
-
-## 0c. WHAT THE VOICE CENSUS SAID ONCE THE MUSIC WAS PLAYING
-
-Session 7 retracted two lever deaths because the census had measured silence.
-This is the same census with music, and it is decisive:
-
-```
-v>= 0 n=8741  mean=2332us      v>=32 n=1794 mean= 9355us
-v>= 8 n=16085 mean=3907us      v>=40 n=480  mean=11415us
-v>=16 n=7985  mean=5701us      v>=48 n=460  mean=13533us
-v>=24 n=6061  mean=7583us      v>=56 n=303  mean=17285us
-```
-
-⭐ **Monotonic: `cost ≈ 2,332 us + ~265 us per voice-update`** (bucket N = N/4
-concurrent voices). **The "bimodal ~2.5 ms / ~10 ms" this project chased from
-2026-08-06 is simply SFX-only versus music-playing**, and `filt@=0 comb@=0` on
-every `[STUTTER]` row rules the conditional FIR/comb stages out at the same
-time. Two levers applied, both now defaults:
-
-- **L2 `DC_AUDIO_MIXRATE=24000`** — internal mix rate, `samples/update` 200 →
-  96. Pitch is preserved (the error term is independent of this field).
-  ⚠️ Does **not** cut ADPCM decode, and it pushes more notes over the
-  `pitch >= 2.0` two-part threshold, which claws some back.
-- **L5 `DC_AUDIO_SUBDELAY=0`** — the hall reverb's *second* tap, ~16 KB of
-  memcpy and ~1,664 MACs per DAC frame, echo tail only. NEW knob.
-- **L1 `DC_AUDIO_VOICES` is priced and UNUSED** — the next audio lever if one
-  is wanted. Peak is 14-15 concurrent voices; a cap of 12 bounds the worst
-  frame linearly. ⚠️ **It is no longer a SAFETY requirement** — see S8e below.
-
-⚠️ **A LATENT `.bss` OVERRUN WAS FOUND AND FIXED BEFORE IT COULD FIRE.**
-jaudio's own bound is `max_audio_cmds = 24*20*4 + 30 + 400 = 2,350`
-(`memory.c:1029`), but the DC path writes into a fixed
-`pc_task_buf[2][1600]` (`neosthread.c:35`) and `Nas_smzAudioFrame` checks
-nothing — **6,000 B past the end at a full voice load.** Never seen because the
-music never started; turning the music on is exactly the change that walks a
-buffer into its bound. `make_src_shrink.py` **S8e** grows it to 2,432 when
-sound is on (+13,312 B of `.bss`).
-
-## 0d. G3 — WHAT IT IS, AND THE TWO THINGS THAT ALMOST MADE ITS GATE MEANINGLESS
-
-`dc/src/dc_emu64_cull.cpp` installs trampolines into emu64's dispatch table for
-slots **59 (`G_TRIN`) and 60 (`G_TRIN_INDEPEND`)**, walks the packed index
-stream, builds an AABB over the referenced vertices in emu64's own
-`vertices[]`, and consumes the command itself when the box is fully outside the
-frustum — so the 75 % of vertex references that `dc_gx.c` used to reject at
-flush time never reach `set_position` or our `GX*` setters at all.
-
-- **The frustum test is not a second test.** `dc_gx_batch_is_offscreen`'s clip
-  half is split out as **`dc_gx_aabb_is_offscreen()`** and both callers use it.
-  ⚠️ One implementation, **two different inputs** — they coincide only because
-  `emu64.c:4935`'s `GXEnd()` makes flush granularity exactly one TRIN.
-- **Gate: `-DDC_EMU64_CULL_VERIFY`** (now a real knob) never culls; it runs both
-  paths and counts any batch we would have dropped that the reference path
-  drew. **Ran: `falsecull=0 gfxp_bad=0 reinst=0` over 473 windows to the town.**
-- **Measured cull rate in the town: 61 % of TRIN batches, ~9,120 vertex
-  references skipped per frame** against `[PHASE] vcull ≈ 9,963` — it catches
-  what the late cull was catching, one command earlier. 19 % punt.
-- **Punts, and each one is load-bearing:** decal-Z batches (`set_position`
-  submits a projection round-trip, not `position`), `G_TEXTURE_GEN` batches (it
-  transforms `normal` in place with no idempotence flag, so skipping changes how
-  many times a shared normal is multiplied), and any batch whose referenced
-  vertices disagree on `MTX_NONSHARED`.
-
-⚠️ **TWO REVIEW FINDINGS THAT WOULD HAVE MADE THE GATE A LIE:**
-
-1. **G3's tripwire must run BEFORE `dc_emu64_hist_frame_open()`**, at both
-   `dc_vi.c` sites. G1/G2 rewrite **all 64 slots** per sampled frame; G3
-   re-installs its two. Wrong order and G3 evicts G1's thunks for **exactly the
-   two opcodes G3 exists to fix**, and `hist_enter()` bills their time to
-   whichever opcode ran before them. Fixed; `reinst=` is the tripwire.
-2. **`falsecull=0` was not a gate.** `dc_gx_flush_vertices` returns at
-   `dc_gx.c:684` on a frameskipped tick **before** the cull test, so
-   `pc_gx_culled_draws` cannot move and every correct cull there scored as a
-   false positive. Those are `nocmp=` now, and `-DDC_NO_BATCH_CULL` + VERIFY is
-   a hard `#error`. **`-DDC_NO_BATCH_CULL` also disables G3** — it means "no
-   frustum cull", not "no *late* frustum cull".
-
-**Still open on G3:** a screenshot pair (`DC_EMU64_CULL=0` vs `=1`) was NOT
-taken — the VERIFY gate is the stronger instrument and it passed, but
-measurement rule 2 is not formally satisfied. And on the visible path
-`dirty_check` + `setup_1tri_2tri_1quad` run **twice**; that comes off the
-headline and is not separately measured.
-
-## 0g. ⏸ THE AUDIO/DISC WORK IN FOUR BURNS — READ THIS BEFORE TOUCHING AUDIO
-
-Every burn falsified the previous fix's **scope**, never its mechanism. The
-mechanism was right the first time; the location was wrong three times. That
-pattern is the lesson.
-
-| burn | human verdict | what it falsified |
-|---|---|---|
-| `AC-DC-20260808.cdi` | "still stutters … lines up with laser load sounds" | that the stutter was voice count. It is disc I/O — a hypothesis this project had recorded as **refuted**, on a Flycast A/B (`FastGDRomLoad=yes`, no seek model) |
-| `-b` pager chunked + yield | "same problem but less laser thrash … actually it's still there" | **the LOCATION.** `dc_dvd_pager_read()` is the ARAM pager; the game's own assets go `DVDRead` → `dc_dvd_read_impl`, and the keep-list loader had three more sites. Most bytes were never chunked |
-| `-c` every read routed | "certain parts of the music are **repeating**" | **the GUARD.** Repeating ≠ silence — an empty ring zero-fills. Repeating means `snd_stream_poll()` never ran, and jaudio's OWN sample fetches hit the `s_audio_busy` guard and returned without polling |
-| `-d` poll when re-entrant + 512 KB cache | "not solved but **way better**" | — |
-| `-e` 1 MB cache + pump ceiling + voice cap | ⏸ **awaiting** | — |
-
-**Four rules, all general:**
-
-1. **There is exactly ONE place a disc read may block —
-   `dc_dvd_read_yielding()` (`dc/src/dc_dvd.c`). Add new `fs_read` calls THERE,
-   never at a call site.** Five sites route through it.
-2. **Yield BEFORE the seek**, not only between chunks. A 100-200 ms head
-   movement cannot be subdivided by any chunk size; the only defence is
-   entering it with a full ring.
-3. **The re-entrant case is "poll, do not synthesise", not "do nothing".**
-   `snd_stream_poll()` touches no jaudio state and is safe at any depth;
-   re-entering `pc_audio_process_frame` is not.
-4. ⭐ **`DC_AUDIO_MAX_FRAMES` IS AN FPS CONSTANT, NOT AN AUDIO ONE.** Production
-   is capped at `MAX_FRAMES × 17.49 ms × 2 ticks` per presented frame. At the
-   old value of 2 that is 70 ms/frame — **the audio cannot keep up below
-   ~14 FPS however cheap synthesis becomes**, which is exactly "the title
-   screen sounds choppy because the fps is low". Now 6 (~4.8 FPS).
-
-⭐ **AND THE LARGEST WIN WAS NOT CODE: `DC_ARAM_WINDOW` 131072 → 1048576.**
-Matched 420 s runs:
-
-| | 128 KB | 512 KB | **1 MB** |
-|---|---:|---:|---:|
-| disc reads | 4,183 | 358 | **106** |
-| bytes off disc | 137.9 MB | 12.6 MB | **4.3 MB** |
-| evictions | 4,173 | 336 | **68** |
-
-It sat at 131072 because that was measured when **RAM was the binding
-constraint** — which stopped being true on 2026-08-06, and nobody re-costed it.
-⚠️ With the LRU pager on this knob is a **disc-seek** lever, not a RAM lever,
-and the "floor 851,968" note applies only at `DC_ARAM_LRU=0`.
-**Generalise: when a constraint is lifted, re-cost everything that was sized
-under it.** There are probably other constants in this tree still carrying a
-dead assumption.
-
-## 0h. 🔴 THE HEADLINE OPEN QUESTION — HARDWARE IS NOT THE EMULATOR
-
-**Human, on the console:** *"on hardware the game runs super stable, fps and
-audio is worse for sure. idk if the audio is the cause of it, or it's
-elsewhere … because the emulator runs buttery smooth."*
-
-**Expected in DIRECTION, unmeasured in MAGNITUDE.** Flycast models **no
-instruction cache**. The SH-4's is **8 KB, direct-mapped**, against a
-**2,883,248 B `.text`**. So every FPS number this project has ever produced —
-including today's 23.2 p50 — comes from a machine with a perfect icache.
-
-⚠️ **AND NO AMOUNT OF FLYCAST WORK CAN ANSWER IT.** That is the same trap as
-the disc-timing refutation, one layer up: do not "A/B it in the emulator".
-
-**The instrument that would settle it: SH7750 PMCR performance counters via KOS
-`perfctr`**, bracketing (a) the presented frame and (b)
-`pc_audio_process_frame()`, printed over SCIF on a burn. ~50 lines. It answers
-three things in one run: how much of a hardware frame is cache stall, whether
-audio really is the FPS cost on console, and whether the audio cost has a
-memory component at all. **Until it runs, "audio is what costs the frame rate
-on hardware" is a hypothesis, not a finding.**
-
-Second, cheaper probe if a burn is precious: the direct-mapped aliasing check is
-HOST-side and takes minutes — `sh-elf-nm` the ELF, take the hot jaudio and
-`dc_pvr`/`dc_gx` symbols mod 8192, and look for collisions along one call chain.
-No collisions kills the aliasing hypothesis without a burn.
-
-## 0i. THE SHIPPING CONFIG AS OF THIS FLUSH
+### The shipping config
 
 ```bash
 DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
@@ -542,863 +41,364 @@ DC_AUDIO_SCENES=all DC_AUDIO_DISC_FRAMES=8 DC_AUDIO_VOICES=12 \
 DC_CDI_PAD=1 bash dc/build-dc.sh
 ```
 
-Everything else is a DEFAULT now and needs no flag: `DC_EMU64_CULL=1` (G3),
-and with `DC_AUDIO=1` → `DC_ARAM_AUDIO_DROP=0`, `DC_AUDIO_MIXRATE=24000`,
-`DC_AUDIO_SUBDELAY=0`, `DC_AUDIO_MAX_FRAMES=6`.
+⭐ **Everything else that matters is a DEFAULT and needs no flag**:
+`DC_EMU64_CULL=1` (G3), the vertex-index side channel, `pvr_dr_*` emit,
+`DCGXVertex` `aligned(32)`, the branch-free memo compare, the shade-predicate
+hoist; and inside the `DC_AUDIO=1` block `DC_ARAM_AUDIO_DROP=0`,
+`DC_AUDIO_MIXRATE=24000`, `DC_AUDIO_SUBDELAY=0`, `DC_AUDIO_MAX_FRAMES=6`. Every
+one is `?=`, so naming it explicitly still wins, and each has a documented
+revert. **This was deliberate: a result that lives only in a command line is one
+unset environment variable away from being lost.**
 
-**The CDI ledger in `~/Downloads/`, all padded and burnable, oldest first —
-they are a bisection set, do not delete them:**
+### The run variants
 
-| file | what it adds |
-|---|---|
-| `AC-DC-20260808.cdi` | music plays + G3. No disc yield |
-| `-b` | yield in the ARAM pager only |
-| `-c` | yield at every read site |
-| `-d` | + poll when re-entrant, 512 KB cache |
-| `-e` | + 1 MB cache, pump ceiling 6, voice cap 12 |
+Add to the prefix above, then run the harness:
 
-## 0e. THE RANKED LIST FROM HERE (2026-08-08)
-
-0. 🔴 **MEASURE THE HARDWARE GAP WITH PMCR** — §0h. The console is materially
-   slower than Flycast and nobody knows by how much or why. Everything about
-   FPS is guesswork until this runs, and Flycast structurally cannot answer it.
-   The free host-side aliasing check comes first.
-0b. ⏸ **The hardware verdict on `AC-DC-20260808e.cdi`** — §0g. Two specific
-   questions: is the title-screen choppiness gone (that was the
-   `DC_AUDIO_MAX_FRAMES` trap), and is the town FPS gap constant or worse while
-   music plays?
-1. **The G3 screenshot pair.** The one measurement rule this session did not
-   satisfy.
-2. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified,
-   **never run**. `-DDC_PVR_TEVP3`. Free falsification:
-   `[DC/PVR] tevp3 batches=0` on a run reaching the keyboard.
-3. **A hardware burn.** `~/Downloads/AC-DC-20260808.cdi` is built and unburned.
-   Flycast models no instruction cache and previously under-reproduced the audio
-   stutter ~10× — ⚠️ **that under-reproduction is now suspect**, because it was
-   measured when the music was silent and Flycast reported 192 events/900 s once
-   it played.
-4. **AICA offload (stage B), re-costed and now much better motivated.** The
-   per-voice term (~265 us/voice-update) is exactly what the 64 hardware ADPCM
-   channels do. ⚠️ It needs an offline VADPCM → AICA-ADPCM converter and a
-   residency manager for 8.3 MB of samples in ~1.8 MB of sound RAM. A cheaper
-   BGM-only variant was scoped this session and is in `kb/state-log.md`.
-5. **`DC_AUDIO_VOICES=12`** if more audio headroom is wanted — priced, unused.
-6. **N2b, the VMU save path.** Still the only way to get a villager into the
-   town, and therefore still the gate on testing R2/R3.
-
-## SESSION 8 (2026-08-08) — COSMETIC ONLY. THE RANKED LIST BELOW IS SUPERSEDED
-## BY §0e ABOVE.
-
-`762ebbd` added a "SPECIAL THANKS TO" block to the boot splash (ACreTeam,
-Cuyler36, Dia2809, flyngmt, Falco Girgis) and renamed the README's `Credits`
-to `Hall of Heroes` with the same five names in the same order. **Keep the two
-lists in step** — the screen is the credits most people will ever see.
-No engine, RAM or perf change: 94 B of `.rodata`, `.text` still 2,871,792 B,
-the verification run still reaches the town at 29.8 FPS / 99 %. Kill switch
-`-DDC_SPLASH_NO_THANKS`. **Session 7's item 1 (the music) is still the top of
-the queue and nothing in it was touched.**
-
-## ⭐⭐⭐ SESSION 7 (2026-08-06) — READ THIS FIRST
-
-1. 🔴 **THE MUSIC NEVER PLAYS, AND IT IS NOT THE SYNTHESISER.** The audio
-   command queue overruns while the scene gate is disarmed
-   (`SendStart::Mesg Full Queue`, 6 events; scenes 4 and 18 are DISARMED under
-   `DC_AUDIO_SCENES=3,9`). `Nap_PortSet` then overwrites one ring slot forever.
-   **BGM's `START_SEQ` is issued ONCE per scene and gets eaten; SFX and VOICE
-   are re-issued and survive** — which is exactly the reported symptom, talking
-   but no music. Fix: drain the queue every tick, gate synthesis only.
-   Confirm free with `DC_AUDIO_SCENES=all`. `kb/state-log.md` top entry.
-2. ⚠️ **TWO LEVER DEATHS FROM THE SAME SESSION ARE RETRACTED.** The
-   `[DC/VOICE]` census ran with no music, so "the voice cap can never bind"
-   and "FIR/comb never run" are **withdrawn**; both are untested. Generalised:
-   **an instrument pointed at a subsystem that is not running measures the
-   subsystem not running.**
-3. ⭐ **G4 RAN — queue item 1 is CLOSED.** The ~23.6 ms is **~1/5 ours, ~4/5
-   emu64's** (`ours=8.4 ms`, `emu=~30.9`, of `TRIN×2 = 55.5` in a 69.3 ms
-   draw). **The work is G3.** Its net-loss case is refuted: the cost is
-   per-VERTEX (0.536 µs/ref), not per-command, and at the measured 75 % cull
-   rate G3 is worth **5.4-19.2 ms**.
-4. ⚠️ **`[GXSPLIT]` is per PRESENTED frame — do NOT double it.** Its
-   accumulators publish in `dc_gx_frame_timing_snapshot()`, below the frameskip
-   early return. Only `[EMU64H]` needs the ×2. Rule 9 generalised: **state the
-   denominator for every new counter, from the code, not by assumption.**
-5. **TEV P3 is in the tree, compile-verified, OFF, and never run**
-   (`-DDC_PVR_TEVP3`). It handles **9 of 27** P3 configs exactly.
-6. ⚠️ **`DC_OPT_O0_EXTRA` is SPACE-separated.** A colon-joined list reads as one
-   filename.
-7. ⚠️ **Flycast under-reproduces the audio stutter ~10×.** No audio verdict is
-   final without a burn.
-
-
-Top rewritten 2026-08-06 (session 6). **This file is the handoff — start here,
-then `kb/STATE.md` for the current numbers.** The narrative and the evidence
-behind every figure below are in `kb/state-log.md`, top entry. Everything under
-"Older material" is kept because it is still the reasoning behind items now
-closed.
-
-## ⭐⭐ SESSION 6 (2026-08-06) — READ THIS FIRST. IT CORRECTS THE INSTRUMENT
-## EVERY FPS PLAN IS COSTED AGAINST
-
-1. ⚠️ **`[EMU64H]` IS PER LOGIC TICK. DOUBLE EVERY NUMBER IT PRINTS.** G1 arms
-   at the end of every tick — `dc_vi.c:405` (frameskip) and `dc_vi.c:633`
-   (presented) — and `s_frames` counts ticks. At `ticks_per_visual = 2`,
-   `tot 24.28 × 2 = 48.56` matches `draw 45.6 + skip 2.9 = 48.5`, and the
-   2026-08-05 run's `42.86 × 2 = 85.7` matches `78.3 + 8.2 = 86.5`.
-   **Two sessions quoted the halved numbers.** This is measurement rule **9**
-   (§0b, which now says NINE). ⚠️ `probe=` is not subtracted from `tot` or
-   `gap` — `dc_emu64_hist.c:300` only prints it.
-2. **G1 was re-run** (`smoke-oc-dc-g1b-20260806-164033-15671`). Corrected to
-   per presented frame: **`G_TRIN_INDEPEND` 34.4 ms / 306 calls = 112.5 µs, and
-   75 % of a 45.6 ms frame.** `G_VTX` 1.84 (was 10.8), `G_MTX` 1.72, `gap`
-   5.96 (was 15.8), `tot` 48.56.
-3. ⭐ **~23.6 ms of the frame is unattributed and it is the largest block in the
-   project.** `cull 2.0 + xform 8.8 = 10.8 ms` of TRIN is measured `dc/`; the
-   remaining **~23.6 ms (52 % of the frame) is emu64's `dl_G_TRIN` index
-   expansion PLUS our own `GX*` attribute setters in `dc_gx.c`, never
-   separated.** Splitting them is queue item 1 and **nothing else should be
-   costed first**.
-4. ⭐ **G3 is the biggest lever in the project.** `vcull=5250` against
-   `v=2899`: **64 % of vertex references are fully expanded and pushed through
-   the GX setters before the batch is rejected.**
-5. ✅ **`gap` is CLOSED** — emu64's own dispatch-loop overhead (slot
-   `HIST_GAP=64`, `dc_emu64_hist.c:87`, accumulated in `hist_enter()`
-   `:124-131`; `emu64_taskstart_r` `:5807-5824`, `:5847-5855`, `:5874`).
-   Confirmed by 15.8 → 5.96 ms when that loop went `-O3`.
-6. ❌ **G2 is DEAD** — its target *was* `gap`. Delete `dc_emu64_shadow.cpp`
-   after one A/B: it costs nothing when off, **but it blocks G1** via the
-   `#error` at `dc_platform.h:417`.
-7. ✅ **`pvr_dropped` is CLOSED and has no speed mechanism** — `s_tris_dropped`
-   (`dc_pvr.c:134`) fires only on near-plane geometry, so it tracks **where the
-   camera is standing**. Never read it as a regression.
-8. ⭐ **RAM HAS STOPPED BEING THE BINDING CONSTRAINT.** Real headroom
-   **~146 KB → ~2.05 MB**, after spending 952,416 B on interiors, winter and
-   gyroids (`296a1d2`). What binds now is **residency**. And the opposite
-   extreme is closed by a boot: a full `DC_ASSET_STUB=0` image prints
-   `margin=-781036 OVER`, fails a **15,638,528 B contiguous malloc**, and comes
-   back with **all 14,495 assets MISSING** (`kb/closed.md`).
-   ⚠️ **Cost a keep-list addition from two links** — the gyroids were estimated
-   at 155,360 B by summing `Vtx` arrays and cost 432,160 B of span.
-9. **T1 is designed and much cheaper than its concept note** — the seam is
-   already ours, **no pool is needed**, phase 1 is **−579,248 B** and phase 2
-   buys **5,685 textures / 2,782,080 B of content for +68,000 B**.
-   `kb/levers.md` **L10**.
-10. **A whole TEV class is unimplemented and it is visible.** The name-entry
-    keyboard renders black: 18 of its 26 display lists are **config #037, class
-    P3**, and `dc_pvr.c` implements no part of P3 — `pv.oargb` is hardcoded `0`
-    at `:1988`. **27 of the 101 configs.** §4 item 7,
-    `kb/tev-map-hard-cases.md` §6.6.
-11. ⚠️ **Correction to the record: the per-lit-vertex block at `dc_pvr.c:2868`
-    is ALREADY OPTIMAL** and must stop being listed as an sh4zam candidate —
-    `mv`/`nm` are hoisted per batch at `:2779-2781` and the seven ops at
-    `:2875-2886` are already `fipr()`. Holding `nm` in XMTRX **loses**, because
-    `comb` needs XMTRX for the position FTRV at `:2863`. The live light-loop
-    candidate is `chan_eval` (`dc_pvr.c:837-902`).
-
-    ⚠️⚠️ **REOPENED 2026-08-08 — this correction was itself wrong.** "Already
-    `fipr()`" is not the same as "already fast". Falco's own writeup
-    (<https://dreamcast.wiki/SH4_FIPR_Optimizations>) says the compiler
-    **cannot pipeline FIPR**, so back-to-back calls stall 4-5 cycles *each*;
-    and <https://dreamcast.wiki/SH4_FTRV_Optimizations> gives the rule —
-    **3+ dot products back-to-back against a constant vector ⇒ use FTRV.**
-    The block matches that twice over (3 dots vs `mv` rows, 3 vs `nm` rows) and
-    should be **two FTRVs, not six FIPRs**. The "holding `nm` in XMTRX loses"
-    argument is correct only for a *single-pass* loop — the community answer is
-    to split T&L into passes over 32-vertex blocks, which frees XMTRX per pass.
-    Full reasoning, sources and the pass-split design: `kb/research-sh4zam-gap.md`
-    §0a and §1 G-D. **Not yet A/B'd — this is a reopened question, not a result.**
-
-## ⭐ SESSION 5 (2026-08-06) — the `-O0` reversal
-
-**The `-O0` directive is REVERSED by user decision.** `src/` builds at `-Os`
-with 14 hot TUs at `-O3`; `DC_OPT_PROFILE=o0` is the byte-identical revert.
-
-1. **Town 11.6 → 20.0 FPS, `.text` 5,506,964 → 2,729,152 B (−2.78 MB).**
-   Matched windows, `ASSET MISSING 0`, `crashes=0`, screenshot-gated against a
-   same-source `DC_OPT_PROFILE=o0` control. `kb/state-log.md` has everything.
-2. **The `dc/` phase is the control and it did not move** (`xform` 13.1 →
-   12.4 ms). That is what makes this a real result and not drift.
-3. **EVERY FPS NUMBER WRITTEN BEFORE TODAY IS `-O0` AND IS NOW WRONG.** §1's
-   78.3 ms frame is 46.8 ms; G1's per-opcode histogram was measured at `-O0`
-   and **must be re-run before any opcode is costed again**. The `src/`-heavy
-   framing that justified G2/G3 has shifted toward `dc/`, which is where
-   `dc_gx_backend_submit` already was.
-4. **A full rebuild is 96 seconds.** It was never measured before; every plan
-   in this kb that treats a rebuild as expensive was costing a guess. Bisecting
-   a bad TU is now cheap — `tools/dcopt/bisect_o0.sh`.
-5. **The build knows what UB it is standing on.** `DC_TARGET=warnscan` +
-   `tools/dcopt/warnscan_report.py`: 35 missing returns in 30 files, 99
-   uninitialised reads. `emu64.c` is CLEAN on missing returns; `jammain_2.c`
-   is the one C++ TU that is not, and it is audio-only.
-6. ⚠️ **`shot_diff.py` cannot gate an optimization change** — probes fire per
-   presented frame, so a faster build samples a different point in the same
-   camera pan. Judge the SCENE, not the pixels.
-7. ⚠️ **`-O3` on `emu64.c` is unproven; `-O2` on it is device-verified (armhf).**
-   First two experiments if the display list misbehaves:
-   `DC_OPT_O0_EXTRA=src/static/libforest/emu64/emu64.c`, then
-   `DECOMP_HOT_OPT=-O2`.
-8. ⚠️ **`JUTRomFont::spFontHeader_` is still undefined and is being LEFT that
-   way** — if an optimized build emits a reference, the link fails loudly
-   instead of the game dereferencing NULL. Do not "fix" it by defining it.
-9. **Nothing here has run on hardware.** Flycast models no instruction cache,
-   so it understates a change that deleted 2.8 MB of `.text`.
-10. **sh4zam is vendored (`dc/third_party/sh4zam`) and ships NOTHING.** The
-    FIPR `PSMTXMultVec` experiment measured **flat** (`us/v` 3.11 → 3.12) and
-    is off by default on precision grounds. What it did find: that function's
-    residency probe was **dead code** and is gone. The two experiments still
-    worth running with it are the AABB cull (`dc_gx.c:495`, ~2.0 ms/frame,
-    scalar, never touches the matrix unit) and ~~the per-lit-vertex block
-    (`dc_pvr.c:2868`)~~ — ⚠️ **[CORRECTED 2026-08-06, §6 item 11: that block is
-    ALREADY OPTIMAL. `chan_eval` (`dc_pvr.c:837-902`) is the real candidate.]**
-    Composing `P·MV` in XMTRX is **costed and dropped** —
-    67 µs of a 45 ms frame. `kb/state-log.md` top entry.
-11. **The RAM picture changed as much as the FPS picture.** −2.78 MB of `.text`
-    is bigger than every `.bss` lever landed so far, combined; `kb/levers.md`
-    and `kb/ram-plan.md` are costed against an image that no longer exists.
-
-## SESSION 4 IN TEN LINES (2026-08-05)
-
-1. **G1 RAN, and it moved the FPS argument off `G_VTX`.**
-   `TRIN_INDEPEND 22.25 ms / 146 calls` = **152 µs a call: 63 % of emu64
-   dispatch and 28 % of the whole 78.3 ms town frame, from one opcode.**
-   `G_VTX` is **5.40 ms**, not the ~48 ms that four documents costed G3
-   against.
-2. **65 % of that heavy opcode is ALREADY `dc/` code at `-O2`.** `GXEnd` is
-   live at `emu64.c:4935`, so the AABB cull (~15 µs) and
-   `dc_gx_backend_submit` (~81 µs) bill into it; only ~53 µs is `src/` at
-   `-O0`. G2 and G3 shrink accordingly — and **the biggest single addressable
-   block in the frame is `dc_gx_backend_submit` at 12.2 ms, which needs no
-   sign-off, no trampoline and no `objcopy`.**
-3. **The cull rate is a measurement now:** `vcull=6042` against `v=3002` —
-   **66.8 %** of vertices discarded after emu64 paid the full `-O0` price.
-   ⚠️ It is **not** worth 22.25 × 0.668; culled vertices already cost `xform`
-   nothing. An ideal cull at TRIN entry is **4.5-7.0 ms**.
-4. **`gap=7.92 ms`** — 18 % of emu64's own total, inside the draw phase and
-   outside every command. Unexplained. **OPEN.**
-5. **R1 landed** (`60222ba`): the 96 acre ground textures load off `/cd`
-   instead of living in `.bss`. **`.bss` −81,856 B, `margin` +87,392 B**, FPS
-   unchanged, screenshot-verified. Kill switch `DC_BGTEX_DEMAND=0`.
-6. **R2/R3 are written and DEFAULTED OFF (`35cb00c`), and the reason is the
-   finding:** the port constructs **ZERO villager NPCs**. `mNpc_SetNpcList`
-   reads the save's `Animal_c animals[]`, the VMU path is unwired,
-   `[PC] No save file found`. Two 900 s town runs printed not one
-   `[DC/NPCTEX]`/`[DC/NPCMDL]` line. **Wiring the save (N2b) is now a
-   PREREQUISITE for testing the pools, not just a feature.**
-7. ⭐ **THE ACCOUNTING CORRECTION — the most reusable finding of the session.**
-   In a stubbed image an asset class's resident cost is **what the KEEP LIST
-   kept**, not what the class totals: villager textures are 1,154,944 B on
-   paper and **90,464 B resident**. A pool converts MISSING into PRESENT; it
-   usually frees nothing. Cost one against *keeping the class*, never against
-   the class total. **The acres are the one exception** — all 242 summer acre
-   TUs really are kept, so **815,024 B** of `grd_s_*` vertex arrays really is
-   resident and an acre pool really would free RAM.
-8. **Four instrument holes fixed** (`82cb299`). G1's report sat inside
-   `#ifdef DC_PERF_PHASE` while its arm sites did not, so without that flag it
-   armed, paid a clock read on ~2,867 commands a frame and printed nothing;
-   **G1 and G2 overwrite each other's table entries and were silent about it**
-   (now an `#error`, `dc_platform.h:417`); `EMU64_TBL_OBJ` spelled a literal
-   object path that breaks the moment `emu64.c` enters a scratch tree; and G2's
-   shadow had lost the original's 5-message rate limiter and dropped one
-   command on its punt path.
-9. **SH-4 math: FTRV/FIPR/FSRRA were already live; two real gaps were not.**
-   `DC_MTX_USE_FIPR` now defaults to **1** (`-DDC_MTX_NO_FIPR` reverts), and
-   **272 `sqrtf` sites in `src/` were linking newlib's SOFTWARE
-   `__ieee754_sqrtf`** — `dc/src/dc_fmath.c` binds them to FSQRT
-   (`-DDC_NO_FSQRT` reverts). **sh4zam stays a PASS**, for corrected reasons:
-   `kb/closed.md`.
-10. **`--wrap` DOES NOT WORK AS SPELLED anywhere in this kb.** sh-elf prefixes
-    user labels with `_` (`_mNpc_SetNpcList`), and ld does not diagnose
-    `--wrap` on an unknown symbol — so every proposed `--wrap` seam matches
-    nothing, silently.
-
-<details><summary>SESSION 3 IN TEN LINES — kept for the sequence; items 4-6 are superseded above</summary>
-
-1. **All 84 summer structures render.** They were affordable because every
-   `obj_s_*.c` carries winter too and the keep list was buying it: the new
-   `path.c#!obj_w_` filter in `make_stub_data.py` drops it. +108,320 B `.bss`,
-   no OOM, no regression, confirmed on a screenshot pair.
-2. **Regenerating `keeplist-town.txt` used to delete Tom Nook** and 24 other
-   hand-typed entries. They are in `EXTRA_SOURCES` now.
-3. **Interiors (`rom_*`, `tmp*`, …) are excluded by default** — +269,312 B,
-   does not fit yet. `--interiors` turns them on.
-4. **`DC_EMU64_HIST` was never forwarded into the container.** G1 was
-   unreachable from the documented build line; that is why it was never run.
-5. **G1 also armed on the wrong tick** (the frameskipped one, which issues no
-   commands). Fixed.
-6. **G2 is written** (`dc/src/dc_emu64_shadow.cpp`, off by default) and
-   measured once at +0.8 FPS whole-run.
-7. **`emu64.hpp`'s offset comments are PowerPC and wrong here.**
-   `sizeof(emu64)` = 0x2278. Never hand-write an offset map.
-8. **`emu64_set_aflags()` is not a seam** — `AFLAGS_MAX` is 0.
-9. **`mFM_DecideAcre` does not exist**; it is `mRF_MakeRandomField`, and the
-   layout lives in the SAVE, not in per-boot randomness.
-10. **`tools/dcfb/shot_diff.py`** makes the screenshot gate mechanical.
-
-</details>
-
-⚠️ **Killing a build mid-link corrupts `dc/build/objs.rsp` with NUL bytes** and
-the next link fails with `undefined reference to 'main'`. `rm` it and relink;
-do not go hunting in your own diff. (`kb/traps.md`.)
-
-## 0. What is committed on `dev`
-
-**The main thread commits; agents do not.** ⚠️ **This list stops at session 4 —
-sessions 5 and 6 landed the `-O0` reversal, sh4zam, and the interiors/winter/
-gyroid content spend on top of it. Check the log, not this block.** Session 4:
-
-```
-35cb00c feat(dc): villager texture and model pools -- written, and OFF,
-                  because the town has no villagers to test them on
-60222ba feat(dc): the acre ground textures load off the disc, not out of .bss
-82cb299 fix(dc): G1 could not print, and 63% of emu64 is ONE opcode
-```
-
-⚠️ **The SH-4 math work (item 9) and the TEV `tev_const_alpha_last()` work were
-still in the tree, uncommitted, behind a running build when this was written.**
-Check the tree before assuming either is committed or measured.
-
-<details><summary>sessions 2-3, newest first</summary>
-
-```
-bb12d18 feat(dc): every summer structure renders, and G2 takes over the dispatch loop
-0f269d1 fix(dc): Nook and the houses; and K.K.'s strum is slaved to the music
-f6e8a8d feat(dc): keep every summer acre -- the town stops disappearing
-7970358 docs(dc): hardware loading is at parity with the emulator
-ad2f6da fix(dc): the wide keep list does NOT fit, and MEMLEDGER said OK anyway
-a2c0738 docs(dc): correct my own arithmetic on the state-command finding
-91da28f test(dc): bench_mem runs clean, and Flycast cannot answer it
-2fcaa80 fix(dc): the clock screen had no assets, and autowalk drove the keyboard
-3aefe97 fix(dc): most of the town is missing GEOMETRY, not textures
-34d3772 feat(dc): print the opcode mix, and 73% of the town frame is state
-```
-
-</details>
-
-## 0b. THE MEASUREMENT RULES. Now ELEVEN — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, 9 on 2026-08-06, 10 on 2026-08-08, **11 on 2026-08-09**.
-
-1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
-   any visual comparison.
-2. **Judge a renderer change on a screenshot pair, not on counters.**
-3. **Total frames is NOT a progression metric.** Use `deepest_scene`.
-4. ⚠️ **NEVER build a perf run with `DC_FB_PROBE`.** The dump costs **1,506 ms**
-   into the `vi` bucket and dragged p1 from 11.56 FPS to 8.50. Screenshot runs
-   and perf runs are different experiments.
-5. ⚠️ **Estimate from a matched-frame A/B, not from instruction counts.**
-6. ⚠️ **`MEMLEDGER FIT … OK` IS NOT A STATEMENT THAT THE IMAGE BOOTS.** `margin=`
-   *is* libc's pool and the ledger has no model of libc's demand. A build
-   reported `margin=1606292 OK` and died on the splash with
-   `Out of memory … diff 1449984`. Plan `.bss` work against the *measured*
-   headroom (§2b), never against `margin=`. `kb/heap-two-pools.md`.
-7. ⚠️ **An AVERAGE cost per command is not the cost of ANY command.**
-   `emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` is a fit against TOTAL `cmds`,
-   which correlates with `vtx`, so the coefficient belongs to the heaviest
-   opcode. I applied it to the state-command subset and was wrong by a wide
-   margin. ⚠️ **And then broke the same rule inside the rule.** This item used
-   to end "265 `G_VTX` carrying ~6,951 vertices at ~6.9 µs each is ~48 ms, i.e.
-   most of the emu64 budget from one opcode" — which re-applied a whole-command
-   average to a subset *and* counted `GXPosition3f32` references as loaded
-   vertices. **G1 measured `G_VTX` at 5.40 ms and `G_TRIN_INDEPEND` at
-   22.25 ms** (2026-08-05). Only the histogram is allowed to price an opcode.
-   `kb/traps.md`.
-8. ⚠️ **IN A STUBBED IMAGE AN ASSET CLASS COSTS WHAT THE KEEP LIST KEPT — not
-   what the class totals.** `DC_ASSET_STUB` already dropped the rest; an unkept
-   asset is a 1-byte `.bss` symbol with its load suppressed. Every "pool X and
-   free N bytes" claim written before 2026-08-05 costed N against the *non-stub*
-   total. Measured: villager textures are 1,154,944 B on paper and **90,464 B
-   resident**; villager models 438,640 B on paper and **5,536 B resident**.
-   **Cost a pool against the alternative — keeping the class — never against
-   the class total.** The acres are the only class where the old framing still
-   holds. `kb/levers.md`.
-9. ⚠️ **STATE THE DENOMINATOR. `[EMU64H]` IS PER LOGIC TICK, NOT PER PRESENTED
-   FRAME — DOUBLE IT.** G1 arms at the end of *every* tick (`dc_vi.c:405` the
-   frameskip path, `dc_vi.c:633` the presented path) and `s_frames` increments
-   on every `dc_emu64_hist_frame_close()`, so at `ticks_per_visual = 2` every
-   printed figure is a half-frame. Proof in both directions: `tot 24.28 × 2 =
-   48.56` vs `draw 45.6 + skip 2.9 = 48.5`, and `42.86 × 2 = 85.7` vs
-   `78.3 + 8.2 = 86.5`. **Two sessions quoted the halved numbers**, so the
-   `-O0` `G_TRIN_INDEPEND` was 51 % of the frame and not 28 %. ⚠️ `probe=` is
-   **not** subtracted from `tot` or `gap` (`dc_emu64_hist.c:300` prints it and
-   stops), and both probes land inside `gap` by construction. Generalised: an
-   instrument that samples per logic tick and a phase counter that samples per
-   presented frame have **different denominators**, and any new counter must say
-   which one it is. `kb/traps.md`.
-10. 🔴 **STATE THE DENOMINATOR *WITHIN* AN INSTRUMENT TOO — `[VTXSPLIT]`'s
-    SEVEN BUCKETS DO NOT SHARE ONE.** `memo` is charged on every vertex;
-    `xf`, `lit`, `tex`, `shade` and `post` are charged only on memo **MISSES**,
-    because their `VS_MARK`s sit downstream of the memo-hit `continue` in the
-    k-loop; `emit` is charged per PRIMITIVE. So a per-vertex cycle figure for
-    the middle five must divide by `v × (1 − hit_rate)`, not by `v`. At the
-    measured 49.9 % hit that is a factor of two, and **two documents published
-    the halved figures** — `shade` is ~295 cycles/vertex, not 148; `lit` is
-    ~89, not 44 (2026-08-08, `kb/state-log.md`). The ms-per-frame figures the
-    buckets print are correct as printed; only the per-vertex derivation was
-    wrong. Generalisation of rule 9: **a bucket inside a sampler can have a
-    different denominator from the sampler.**
-
-11. 🔴 **THE NOISE FLOOR ON `us/v` IS ~±2 %. ONE A/B PAIR CANNOT RESOLVE A SMALL
-    CHANGE.** Measured 2026-08-09 over five 600 s runs on one build line: the
-    same change (the shade hoist) read **+1.1 %** against one baseline and
-    **−2.0 %** against another — **the sign flipped**. The five cluster
-    2.65 / 2.68 without G-B and 2.51 / 2.54 / 2.56 with it; the GROUPS separate,
-    the members do not. Cause: the town reseeds per boot (`sys_math.c:7`), and
-    `us/v` normalises for vertex COUNT but not for WHICH vertices — the
-    lit / textured / punch-through mix moves with the layout.
-    ⚠️ Session 12's wins were 8-18 % and were safe on one run each. **That does
-    not license a 2 % claim.** Under ~4 %: run each arm 2-3 times and compare
-    groups, or report it as inside the floor. Never pick the favourable pair.
-
-## 1. Where the port is
-
-**It boots on real hardware and LOADING IS AT PARITY WITH THE EMULATOR** —
-human verdict on the `AC-DC-20260804` burn. That closes the "the CD-R is simply
-slow" candidate that has been open since 2026-08-03. ⚠️ Parity on I/O is **not**
-parity on compute: the only hardware FPS figure is still "~11 FPS in the town".
-
-In Flycast it reaches the town, walks around it, meets Tom Nook and is taken to
-the houses. `[SCENE_MODE] 0 → 3 → 4 → 18 → 9`.
-
-**Current numbers (2026-08-06, probe-free, audio off, town keep list, `-Os` +
-`-O3` hot list, `dc/src` `-O3`, interiors + winter + gyroids in the image):**
-
-| | |
-|---|---|
-| the town (scene 9) | **~20 FPS**, `draw` **45.6 ms** |
-| `MEMLEDGER margin` | 5,109,364 — ⚠️ real headroom is **~2.05 MB** (`margin` − the 3,056,276 libc peak, rule 6) |
-| image span / `.text` / `.bss` | 9,878,540 / 2,854,108 / 4,791,884 |
-| `ASSET MISSING` / `aram LOST` / `deepest_scene` | 0 / 0 / 18 |
-
-### THE ARITHMETIC THAT GOVERNS EVERY FPS PLAN — RE-RUN 2026-08-06
-
-⚠️ **All `[EMU64H]` figures below are ×2-corrected (rule 9).** Run
-`smoke-oc-dc-g1b-20260806-164033-15671`, town, probe-free, medians over 47
-windows:
-
-```
-[PHASE]  draw=45.6 skip=2.9 vi=0.4 | cull=2.0 xform=8.8 |
-         v=2899 vlit=2689 vcull=5250 us/v=3.06        cmds=3562
-[EMU64H] (raw, PER TICK)  f=60 tot=20.27ms gap=2.78ms probe=79.9ns |
-         TRIN_INDEPEND 14.75/126 VTX 0.77/132 MTX 0.65/94 MOVEMEM 0.25/207
-         TRI2 0.25/2 DL 0.12/124 SETCOMBINE 0.11/47 ENDDL 0.08/116
-         LOADTLUT 0.07/40 SETTILE_DOLPHIN 0.07/64 SETTIMG 0.06/68 MOVEWORD 0.06/78
-```
-
-| | ×2, per presented frame |
-|---|---|
-| `G_TRIN_INDEPEND` | **34.4 ms / 306 calls = 112.5 µs each — 75 % of the frame** |
-| of which measured `dc/` | `cull 2.0 + xform 8.8` = **10.8 ms** |
-| **of which UNATTRIBUTED** | ⭐ **~23.6 ms = 52 % of the frame** — `dl_G_TRIN`'s index expansion **plus** our own `GX*` attribute setters in `dc_gx.c`, **never separated from each other** |
-| `G_VTX` | **1.84 ms** (was 10.8 at `-O0`) — finished as a topic |
-| `G_MTX` / `G_TEXRECT` | 1.72 / 2.88 |
-| every state opcode | **≤ 0.5 ms.** Stripping state commands stays worth nothing (F8) |
-| `gap` | **5.96 ms** (was 15.8) — ✅ **CLOSED**, it is `emu64_taskstart_r`'s loop control |
-| `vcull` / `v` | 5,250 / 2,899 = ⭐ **64 % of vertex references expanded and pushed through the GX setters before the batch is rejected** |
-
-**The largest addressable block in the frame is the ~23.6 ms nobody has
-attributed, and it is at least partly ours.** Splitting it is §5 item 1, and it
-decides whether the next piece of work belongs in emu64 (G3) or in our own
-renderer. **Do not cost anything else first.**
-
-## 2. The build lines
-
-Common prefix (**note the keep list and the arena — both changed this session**):
-
-```bash
-DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
-DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
-DC_ARAM_WINDOW=524288 DC_ARENA_BYTES=1200000 DC_AUTOSTART=300 DC_SCIF_FAST=1 \
-```
-
-**PERF run — no framebuffer probe:**
-```bash
-  DC_XDEFS='-DDC_PERF_PHASE' bash dc/build-dc.sh
-bash harness/dc/smoke.sh <copy>.cdi --timeout 600 -c config:LimitFPS=no
-```
-
-**SCREENSHOT run — probe on, `--fb-writeback` REQUIRED, and now it can WALK:**
-```bash
-  DC_FB_PROBE=150 DC_FB_IMAGE=2 DC_XDEFS='-DDC_PERF_PHASE -DDC_AUTOWALK=1' \
-    bash dc/build-dc.sh
-bash harness/dc/smoke.sh <copy>.cdi --timeout 900 --fb-writeback -c config:LimitFPS=no
-python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots
-```
-
-**G1 — the per-opcode histogram (this is the line that produced §1's numbers):**
-```bash
-  DC_EMU64_HIST=1 DC_XDEFS='-DDC_PERF_PHASE' bash dc/build-dc.sh
-```
-⚠️ **G1 and G2 are mutually exclusive** — both install into emu64's dispatch
-table, G2 wins, and G1 would measure nothing. That is an `#error` now
-(`dc/include/dc_platform.h:417`), not a silent wrong number.
-
-**RELEASE / burn image:** drop `DC_SCIF_FAST`, `DC_AUTOSTART`, `DC_AUTOWALK` and
-every probe; add `DC_CDI_PAD=1`. ⚠️ `DC_SCIF_FAST` on hardware loses the console.
+| run | add | then |
+|---|---|---|
+| **perf** | `DC_AUTOSTART=300 DC_SCIF_FAST=1 DC_XDEFS='-DDC_PERF_PHASE'` | `bash harness/dc/smoke.sh <copy>.cdi --timeout 600 -c config:LimitFPS=no` |
+| **vertex split** | the above **+** `DC_PVR_VTXSPLIT=16` | same |
+| **screenshot** | `DC_FB_PROBE=150 DC_FB_IMAGE=2 DC_XDEFS='-DDC_PERF_PHASE -DDC_AUTOWALK=1'` | `… --timeout 900 --fb-writeback …` then `python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots` |
+| **opcode histogram (G1)** | `DC_EMU64_HIST=1 DC_XDEFS='-DDC_PERF_PHASE'` | same as perf |
+| **burn** | drop `DC_SCIF_FAST`, `DC_AUTOSTART`, `DC_AUTOWALK` and every probe; keep `DC_CDI_PAD=1` | burn the CDI |
 
 **Verdict on any run:**
 `python3 tools/dcqa/run_report.py <run>/console.log --vs <baseline>/console.log`
 
-⚠️ **Build to a COPY of the CDI before a long run.** ⚠️ **Never edit the tree
-while a build runs**; never run two builds at once.
-⚠️ **The harness writes `console.log` only when Flycast EXITS.** Polling it
-mid-run finds nothing and reads exactly like a hang. A 900 s run is ~17-20 min
-of wall clock; wait for it. (`kb/traps.md`.)
-
-## 2b. THE MEMORY ARITHMETIC THAT ACTUALLY BINDS
-
-> ### ⭐ [2026-08-06] THE HEADROOM IS ~2.05 MB, AND FIT IS NO LONGER THE PROBLEM
->
-> | | shipping | + interiors/winter | **+ gyroids (now)** |
-> |---|---:|---:|---:|
-> | `.text` | 2,753,700 | 2,793,284 | **2,854,108** |
-> | `.bss` | 3,945,484 | 4,428,076 | **4,791,884** |
-> | image span | 8,926,124 | 9,446,380 | **9,878,540** |
-> | `margin` | 6,061,268 | 5,541,012 | **5,109,364** |
->
-> Real headroom (`margin` − the 3,056,276 libc peak) went **~146 KB → ~2.05 MB**
-> after spending **952,416 B** on content (`296a1d2`), with `MEMLEDGER OK`,
-> `ASSET MISSING 0`, `aram LOST 0`, `deepest_scene 18`, `run_report --vs` clean
-> and the gyroids confirmed rendering by a human. Most of it came from `-Os`:
-> `.text` alone fell 2.83 MB.
->
-> **What binds now is RESIDENCY, not fit** — 8,813,054 B of asset destination
-> arrays can never all be resident, so the keep list still decides what exists.
-> ✅ And the other extreme is closed **by a boot, not by arithmetic**: a full
-> `DC_ASSET_STUB=0` image prints `margin=-781036 OVER`, fails a **15,638,528 B
-> contiguous malloc** (that is the whole of `foresta.rel`), and comes back with
-> **all 14,495 assets MISSING**. `kb/closed.md`.
->
-> ⚠️ **Cost a keep-list addition from TWO LINKS.** The gyroid set was estimated
-> at 155,360 B by summing its `Vtx` arrays and cost **432,160 B** of span —
-> 2.8× low, because the files carry textures and display lists too.
-> ⚠️ **S6 is NOT a demand loader** — it deletes `s_assets[]`'s `path` field and
-> 14,495 string literals (598,648 B of `.rodata`) and nothing else. The real
-> demand loader is `dc_stub_keep_assets()` / `dc_stub_keep_load_one()`
-> (`dc_main.c:885-1135`), inside `#ifdef DC_ASSET_STUB`. And `rom_src=0` means
-> **`SRC_REL`**, not "row 0".
-
-`margin=` is not headroom. The real number, from the pair of runs that produced
-rule 6:
-
-```
-libc peak demand  ≈ margin + shortfall = 1,606,292 + 1,449,984 = 3,056,276
-margin on the build that booted                                  3,202,932
-⇒ real headroom for .bss growth, BEFORE this session            ≈ 146,656 B
-```
-
-Two levers were then applied, and they are what paid for the acre fix:
-
-| lever | bytes | evidence |
-|---|---|---|
-| **arena cut**, `DC_ARENA_BYTES` 1,900,000 → 1,200,000 | +700,000 | `[DC/ARENA] zelda used=289536 free=1124944` — **measured in a loaded TOWN**, the first time that probe has been read anywhere but the title screen |
-| **jaudio `.bss` shrink**, keyed to `DC_AUDIO=0` (S8/S9) | +450,368 | the pump is `#if DC_AUDIO` and every downstream function has exactly one caller, so the sequencer never ticks at the default |
-
-Current shipping image after R1 (2026-08-05): **`.bss` 3,945,356**,
-`margin=3191348`, no OOM, `ASSET MISSING 0`.
-
-⚠️ **Do NOT plan the next `.bss` spend against a pool's "non-stub total"** —
-rule 8. R2 was ~break-even and R3 *spends* 115,424 B; neither freed room for
-the interiors, and the section in `kb/STATE.md` that used to promise otherwise
-is corrected.
-
-## 3. WHAT WAS WRONG WITH THE TEXTURES — it was mostly GEOMETRY
-
-Human: *"once the character leaves acre one, basically all the textures are
-missing."* An acre `.c` stubs its **`Vtx` array** under `TARGET_PC` while its
-`Gfx` display list stays real, so an unkept acre executes normally against
-all-zero vertices, every triangle collapses to the origin, and the acre draws
-nothing. The keep list had **18 of 268**. Same shape for `obj_s_*` and NPC
-models — Tom Nook rendered as a **black spiky mess**.
-
-⚠️ **AND A CENSUS CAN NEVER FIX IT.** `src/system/sys_math.c:7` seeds the town
-from `sqrand(osGetCount())`, and on DC `osGetCount()` is boot-elapsed time, so
-**every boot lays out a different town**. `tools/dcstub/keeplist-town.txt`
-(generated by `tools/dcstub/make_keeplist_town.py`) enumerates from the tree
-instead: all 371 summer acre TUs, the map overlay, the date/time HUD, Nook and
-the raccoon NPCs, `obj_s_house1`, `obj_s_myhome1`.
-
-⚠️ **THE CENSUS HAS A SECOND, SYSTEMIC BLIND SPOT: it only ever sees the
-depth-0 branch of every decision.** `DC_AUTOSTART` presses A, every choice menu
-defaults to index 0, and the clock screen lives behind index **1**
-(`ac_npc_guide_move.c_inc:302-314`) — which is why `tim_win.c` was missing for
-two sessions and a human had to report it. Anything gated on
-`mEv_CheckFirstIntro() == FALSE` is invisible for the same reason. **The census
-mechanism is sound; its driver is the blind spot.** Two cheap fixes are
-specced and unbuilt: a zero-asset detector at texture upload (`g_gx.tex_obj_src[]`
-already mirrors the source pointer, so `census_resolve.py` symbolises it for
-free), and a `DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice.
-
-## 4. STILL BROKEN, ranked
-
-1. **THE TOWN HAS NO VILLAGERS AT ALL, and that is a save bug, not an asset
-   bug (found 2026-08-05).** `mNpc_SetNpcList` populates the town from the
-   save's `Animal_c animals[]` (`m_start_data_init.c:559`); the VMU path is
-   unwired, so `[PC] No save file found` and **not one villager actor is ever
-   constructed**. Measured, not inferred: two 900 s runs that reach scene 9 and
-   walk printed zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, because
-   `aNPC_dma_draw_data_proc` (`ac_npc_ctrl.c_inc:687`) never runs.
-   **R2 and R3 exist and are DEFAULTED OFF for exactly this reason** —
-   `DC_NPCTEX_POOL=1` / `DC_NPCMDL_POOL=1` turn them on, and the first honest
-   test of either is after N2b wires the save. ⚠️ The old text here said "60 of
-   72 villager models are stubbed, 392 KB + ~992 KB"; **both figures were
-   non-stub totals** (rule 8) and the model count is 32, not 72.
-2. **The other 74 `obj_s_*` structures** — 333 KB (shop1, museum, tailor,
-   police box, shrine, post office…). Each is one building silhouette.
-3. ✅ **Winter ground — FIXED 2026-08-05 by R1.** All 41 `mFM_grd_w_*` textures
-   (70,144 B) are demand-loaded off `/cd` by `dc/src/dc_bgtex.c` instead of
-   being resident-or-absent, so the December black-floor bomb is defused. ⚠️
-   **The winter time bomb is REDUCED, NOT CLEARED**: the 84 `obj_w_*`
-   structures are still stubbed, so a winter town still draws every building as
-   a black spiky mess (item 2's summer twin). Still needs a `DC_SEASON=winter`
-   build to verify.
-4. **The station roof clip-through.** Now REPRODUCIBLE for the first time —
-   `DC_AUTOWALK` can walk a character under it, `DC_PVR_BATCH_LOG` prints
-   `src=`/`vram=` so a batch joins to a symbol, and `-DDC_PVR_PT_NEAREST` is a
-   one-line test of H2. Never run.
-5. **`aram zero=7 (2016 B)`** appeared in the walking run and must be 0. Small,
-   new, unexplained.
-6. **The large black wedges in the town are TEV config #007 losing BOTH of its
-   alpha factors — diagnosed 2026-08-05, NOT fixed.** `ef_shadow_out.c:34-35`
-   records as **two** stages, not the three an earlier reading assumed:
-   `stage0 alpha = (ZERO, TEXA, A1, ZERO)` and
-   `stage1 alpha = (ZERO, TEXA, APREV, ZERO)` (`emu64.c:1888-1897`, config #007
-   in `kb/tev-map-table.md:120`). PRIM.a sits on stage 0 in a **mirrored**
-   spelling that `tev_const_alpha()` reaches and then throws away at its
-   `konst != GX_CA_A0` narrowing, and the last stage is `APREV * TEXEL1.a`, the
-   mirror of what `tex1_alpha_active()` tests. **So the batch draws at
-   `vtx.a * T0.a`, where `vtx.a` is the `G_RM_FOG_SHADE_A` fog coefficient — a
-   flat dark quad, exactly the reported symptom.** The two real levers are
-   widening `tev_const_alpha()`'s A1 arm and adding the mirrored shape to
-   `tex1_alpha_active()`; both are widenings, and widenings in this family have
-   regressed before (`dc_pvr.c:1080-1098`), so **both need a screenshot pair.**
-   ⚠️ The new `tev_const_alpha_last()` in the tree (kill switch
-   `-DDC_PVR_NO_TEVALPHA_LAST`, counter `tevalpha_last batches=`) recognises a
-   final stage of shape `APREV * konst` and **does not fix this**.
-   ✅ **Transcribed 2026-08-06 into `kb/tev-map-alpha.md` §5.6**, which is now
-   the reference copy.
-7. 🔴 **THE NAME-ENTRY KEYBOARD RENDERS BLACK, and it is a whole unimplemented
-   TEV class — not a stub (found 2026-08-06).** The widget draws at
-   `m_editor_ovl.c:2221-2258` (`mED_KeyDraw`), 26 display lists; its assets
-   `kai_sousa.c`, `kai_sousa2.c`, `lat_sp.c` are on **both** keep lists and in
-   the generated loader, and alpha here is `TEXEL0`, so a zeroed texture would
-   be **invisible, not black**. 18 of the 26 DLs — every structural piece —
-   are `gsDPSetCombineLERP(PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT,
-   0,0,0,TEXEL0)` = **config #037, class P3**. `dc_pvr.c` implements **no part
-   of P3**: `tev_const_color()` rejects it at its first test (`:1000`),
-   `tev_fold_color()` rejects it at `tev_carg_affine()` (`:1162`, `GX_CC_TEXC`)
-   — so **`-DDC_PVR_TEVFOLD` will not fix it, which is a free falsification
-   test** — and **`pv.oargb` is hardcoded `0` at `:1988`: PVR offset colour has
-   never been wired.** The DL clears `G_LIGHTING`, so the result is
-   `rgb = vtx.rgb * T0.rgb` and both PRIM and ENV are lost; 21 of 26 DLs are
-   wrong and the 5 that survive use the flat `(0,0,0,PRIMITIVE)` shape.
-   **P3 is 27 of the 101 configs.** Fix, native and no second pass: vertex base
-   colour `= PRIM − ENV`, per-vertex `oargb = ENV`, `PVR_TXRENV_MODULATE` + the
-   offset-colour bit — per-vertex cost ~zero because `pv.oargb` is already
-   stored. Needs its own kill switch and a screenshot pair.
-   ⚠️ **Falsifiable prediction: the panel is black but the 40 key caps are
-   correctly coloured** (`m_editor_ovl.c:2092` uses the recognised shape). **If
-   the caps are black too, the diagnosis is wrong.** Full write-up:
-   `kb/tev-map-hard-cases.md` §6.6. Note the relationship to item 6: **#007
-   loses both ALPHA factors, #037 loses both COLOUR constants.**
-
-## 5. THE RANKED NEXT ACTIONS (2026-08-06)
-
-**Same list as `kb/STATE.md` — the two must agree.** This is the ordering a
-fresh context should work down. It **supersedes the 2026-08-05 list**, whose top
-two items were costed against halved `[EMU64H]` numbers and an `-O0` frame.
-
-1. ⭐ **Split the ~23.6 ms TRIN remainder.** One build, one run: a
-   `dc_time_us()` bracket around the `GX*` attribute setters in `dc_gx.c`. It
-   decides whether the next piece of work goes into emu64 (item 2) or into our
-   own renderer. **Nothing below should be costed until it lands.**
-2. ⭐ **G3 — cull at TRIN entry.** An AABB over the index window at entry,
-   tested against `projection_mtx ×` (identity for SHARED / `position_mtx_stack`
-   for NONSHARED), `dl_G_TRIN` kept as the fallback. **64 % of vertex references
-   are wasted** (`vcull=5250` vs `v=2899`). ⚠️ **Hazard for any installer into
-   the dispatch table:** `dc_emu64_hist.c:262` and `dc_emu64_shadow.cpp:492`
-   each `memcpy` **all 64 slots** on frame open and restore all 64 on close — arm
-   slot-wise, or initialise strictly before them.
-3. **TEV P3 / `oargb`** — fixes the black keyboard and 27 of the 101 configs.
-   §4 item 7, `kb/tev-map-hard-cases.md` §6.6. Kill switch + screenshot pair.
-4. **AABB cull via XMTRX.** `dc_gx_batch_is_offscreen` (`dc_gx.c:435`, math at
-   `:495-519`) puts 8 corners through **two scalar stages each** — MV 3 dots
-   (`:503-505`), P 4 dots (`:506-509`) = **200 mults per batch** — and never
-   touches the matrix unit, while `dc_pvr.c:2782-2799` builds the same `P·MV`
-   one line later but **after** the cull (`:559` cull, `:591` submit). Est
-   **0.4-0.8 ms** of 45.6. Kill switch `-DDC_GX_NO_FTRV_CULL`.
-   ⚠️ **Must call `dc_mtx_xmtrx_invalidate()`**, as `dc_pvr.c:2812` does.
-5. **`chan_eval`'s light loop** (`dc_pvr.c:837-902`) — 3 FIPRs per light per
-   vertex, ~35-70k FIPR/frame. ⚠️ **Correction to the record: the
-   per-lit-vertex block at `dc_pvr.c:2868` is ALREADY OPTIMAL** — `mv`/`nm` are
-   hoisted per batch at `:2779-2781` and the seven ops at `:2875-2886` are
-   already `fipr()` via `DC_DOT4`/`DC_DOT3` (`:187-191`). **Holding `nm` in
-   XMTRX loses**, because `comb` needs XMTRX for the position FTRV at `:2863`.
-6. **T1 phase 1 (−579,248 B), then phase 2** — every remaining texture for
-   **+68,000 B**. `kb/levers.md` **L10**; run the zero-behaviour-change
-   `DC_TEXPOOL_PROBE=1` falsifier (`interior`/`mutated`/`oversize`) first, and
-   read the seek analysis before writing the loader.
-7. **Wire the VMU save path (N2b).** Unchanged: still the only way to get a
-   villager into the town, and therefore the only way to test R2/R3 (§4 item 1).
-8. **Burn to hardware.** Nothing this session ran on silicon, and Flycast models
-   no instruction cache against a 2.83 MB `.text` cut — it **understates** the
-   optimization work rather than flattering it.
-9. **Re-cost the audio.** The 19.8 ms/DAC-frame figure that drove the whole
-   AICA-vs-software verdict was measured at `-O0`; jaudio is `-Os` now and has
-   **never been re-measured**. The old probe still applies:
-   `-Wl,--wrap=_RspStart2` — **note the leading underscore**, §0b/`kb/traps.md`
-   — plus an empty `__wrap_`, reading `synth_us=` against 19,840.
-   ⚠️ **`jammain_2.c` is the first quarantine suspect the moment `DC_AUDIO=1`:**
-   C++ TU, missing return, 22 uninitialised reads (`dc/opt-lists.mk`).
-
-## 5a. The emu64 decision gate — RE-COSTED 2026-08-06. G2 IS DEAD, G3 GREW
-
-`kb/research-fps-ideas.md` carries this in full. ⚠️ All figures ×2-corrected
-(rule 9).
-
-| | what | win | gate |
-|---|---|---|---|
-| **G1** | per-opcode timing histogram | 0 ms, unlocks the rest | ✅ **RE-RUN 2026-08-06.** `TRIN_INDEPEND 34.4 ms/306`, `VTX 1.84`, `gap 5.96`, `tot 48.56` |
-| ~~G2~~ | ~~reimplement the dispatch LOOP in `dc/` at `-O2`~~ | ❌ **DEAD** | **Its target IS `gap`, which is 5.96 ms and already `-O3`. The compiler did G2's job.** Delete `dc_emu64_shadow.cpp` after one A/B — it costs nothing when off but **blocks G1** (`#error`, `dc_platform.h:417`). `kb/closed.md` |
-| **G3** | AABB cull at `TRIN_INDEPEND` entry | ⭐ **the biggest lever in the project**, and bigger than the old 4.5-7.0 ms estimate | ✅ signed off 2026-08-04. **Build the cull half only** — the `-O2`-shadow half died with G2 |
-| — | the **~23.6 ms unattributed** inside TRIN | unknown, and it is 52 % of the frame | **no gate — at least partly ours.** §5 item 1 splits it |
-
-**The re-cost, in one line:** `G_TRIN_INDEPEND` is 34.4 ms of a 45.6 ms frame;
-`cull 2.0 + xform 8.8 = 10.8 ms` of that is measured `dc/`, and the remaining
-~23.6 ms is emu64's index expansion plus **our own `GX*` attribute setters**,
-which have never been separated. **Interposing on emu64 is not the question any
-more — attributing that 23.6 ms is.** And the cull is worth more than ever:
-64 % of vertex references are expanded and pushed through those setters before
-the batch is rejected.
-
-**⚠️ F1 (offline bbox-CULLDL injection) is NO LONGER RECOMMENDED.** A full design
-pass found its cost is **594 KB of `.data`** for town scope — 5-16× its own
-estimate — because its "50+ vertex" cap selects **zero** chunks (no
-`gsSPVertex` anywhere in `src/data` exceeds 32 vertices; ⚠️ **corrected
-2026-08-05** — the bound comes from the 5-bit per-vertex *index* width
-(`POLY_5b`), not from the N-triangle count, which `emu64.c:4814` reads as
-**7 bits**, 1..128 faces). It also cannot compute its bboxes without the ROM. It buys a *smaller*
-version of what G3 gets for zero bytes. Details and the surviving 212 KB
-model-granularity variant are in `kb/research-fps-ideas.md`.
-
-~~**RUN G1 BEFORE COSTING ANY OF THEM** (rule 7).~~ ✅ Done 2026-08-05; the
-table above is the re-cost. Rule 7 still binds every *future* opcode claim.
-
-## 5b. K.K.'S STRUM IS SLAVED TO THE MUSIC — one cause, two symptoms
-
-Human: *"the silent loading right before kk starts talking"* and *"kk is not
-strumming in the intro like he should be"*. Same bug.
-
-`p_sel->strum_timer = 440` (`ac_npc_p_sel_schedule.c_inc:71`) = **7.3 s** before
-K.K. offers dialogue. That is his guitar intro, and the game requests the track
-every tick (`[TRG_VOL] id=0x044D`). And `ac_npc_p_sel.c:141-148`:
-
-```c
-if (animation_id == aNPC_ANIM_4HAKU_E1) {
-    sAdos_GetStaffRollInfo(&info);
-    if (info.staffroll_part != STAFFROLL_PART_FINISH) {
-        speed = 0.0f;          /* animation frozen */
-        arm_flag = FALSE;      /* arms disabled    */
-        current_frame = 1.0f + 64.0f * info.percent;   /* driven by the SONG */
-```
-
-`Na_StaffRollStart` (`game64.c_inc:1512`) fires on **every** BGM start, not just
-the credits, latching `start_flag = TRUE`; `Na_GetStaffRollInfo` (`staff.c:37`)
-then tests `AG.groups[…].flags.enabled`, false because the sequencer never ticks
-at `DC_AUDIO=0`, and returns `PART_START` forever. `info.percent` is written
-only at `staff.c:223`, past that early return — so `current_frame` reads an
-**uninitialised stack value**.
-
-**`DC_AUDIO_SCENES=3` is the fix** (new this session): the audio pump runs only
-in the named scene modes, so the K.K. scene (888 vertices, at the 30 FPS cap)
-gets sound while the town (6,951 vertices, 14.9 FPS) does not. Verified arming:
-`[DC/AUDIO] gate scene=3 armed=1 gain=256`, 642 frames synthesised,
-`arms=1 disarms=1` on the scene change, no OOM.
-⚠️ **The strum was NOT visually confirmed** — probes 60 frames apart alias
-against a ~112-frame cycle. Needs adjacent-frame capture or a human.
-⚠️ `DC_AUDIO=1` disables the S8 shrink by design, costing **455,848 B** of span.
-
-## 5c. RAM — bench_mem is answered, and the answer is "not in Flycast"
-
-`harness/dc/bench/{Makefile,build.sh}` now exist. It **passes** — `end_rc=0`,
-every case checksum-verified, nothing hangs. But the numbers are artefacts:
-read == write == **114.3 MB/s** at every size in *both* VRAM windows, and the
-DMA rows come off 0-2,240 ns samples. Flycast models neither VRAM latency nor
-Holly contention. **R1/R3/R4/R5/R6 stay gated, now on a CD-R burn rather than on
-an unrun benchmark.** A hardware build must drop `BENCH_BAUD` to 57,600 first.
-
-## 6. What is new in the tree — SESSION 4 (2026-08-05)
-
-| thing | what it is |
-|---|---|
-| `dc/src/dc_bgtex.c`, `DC_BGTEX_DEMAND=0` | **R1.** 96 acre ground textures demand-loaded off `/cd`; −81,856 B `.bss`. The seam is `make_src_shrink.py` rewriting one `bcopy`, not `--wrap` |
-| `dc/src/dc_npctex.c`, `DC_NPCTEX_POOL=1` | **R2**, 16 × 4,832 B villager texture slots. **OFF by default** — there are no villagers to load into it |
-| `dc/src/dc_npcmdl.c`, `DC_NPCMDL_POOL=1` | **R3**, 16 × 7,552 B villager model slots. **OFF by default**, same reason; costs +115,424 B when on |
-| `dc/src/dc_fmath.c`, `-DDC_NO_FSQRT` | binds `sqrtf` to SH-4 `FSQRT` so newlib's software `__ieee754_sqrtf` is never linked. **Bit-identical to newlib for every normal input** — KOS sets `FPSCR = 0x00040000` (DN=1, round-to-nearest-even) at `startup.S:74-85` — so there is nothing to A/B on a screenshot |
-| `DC_MTX_USE_FIPR` now **1**, `-DDC_MTX_NO_FIPR` | the `TODO(M3)` at `dc_mtx.c:71-72` resolved rather than measured; the kill switch is the A/B |
-| `tev_const_alpha_last()`, `-DDC_PVR_NO_TEVALPHA_LAST` | recognises a final TEV stage of shape `APREV * konst`; counter `tevalpha_last batches=`. ⚠️ **Does not fix the black wedges** — §4 item 6 |
-| `vcull=` in `[PHASE]` | `dc_gx_phase_culled_verts` — vertices rejected by the AABB cull, the counter that turned "60 % culled" into a measurement |
-| `#error` in `dc_platform.h:417` | G1 and G2 both install into emu64's dispatch table; building both was silently useless |
-
-<details><summary>session 3's additions</summary>
-
-| thing | what it is |
-|---|---|
-| `[EMU64]` line | the opcode mix, free, under `-DDC_PERF_PHASE` |
-| `DC_EMU64_HIST=<N>` | **G1.** Timing thunks swapped into emu64's dispatch table at runtime; `src/` untouched, one `objcopy --globalize-symbol` is the only build change. ✅ **RUN 2026-08-05** |
-| `DC_AUTOWALK=<N>` | deterministic 8-direction stick walk, gated to `DC_AUTOWALK_SCENE` (default 9, the town). ⚠️ Ungated it drives the NAME-ENTRY KEYBOARD and the run never leaves the intro |
-| `DC_AUDIO_SCENES=<list>` | per-scene audio gate; `bash dc/build-dc.sh` derives `DC_AUDIO=1` from it |
-| `DC_AUDIO_HEAPLOG` | jaudio heap high-water; the gate on shrinking `audiomemory` further |
-| `DC_PVR_TEXNULL_STAGE0_ONLY` | reverts the `GX_TEXMAP_NULL` fix (it read stage 0 only; the one combiner that parks NULL on stage 0 has all six of its `src/` sites in `obj_s_shop1.c`, so the bug was "Nook's shop draws untextured") |
-| `DC_PVR_PT_NEAREST` | point-sample the punch-through list — the one-line test of station-roof H2 |
-| `DC_MTX_NO_XMTRX_CACHE` | reverts the F2 rework. ⚠️ F2's premise was FALSE: `dl_G_VTX` alternates TWO matrices per vertex, so a residency cache misses every call. Single-vector `PSMTXMultVec`/`SR` now take FTRV only when the matrix is provably resident and plain scalar otherwise, never clobbering XMTRX on the miss path |
-| `DC_PVR_BATCH_LOG` `src=`/`vram=` | joins a batch to a source symbol through `census_resolve.py` |
-| unhandled-texture-format log | an unhandled format decoded to a transparent rectangle **in silence**, which is byte-identical to a missing asset |
-| `tools/dcstub/make_keeplist_town.py` | generates `keeplist-town.txt` |
-| `harness/dc/bench/` | bench_mem's build path |
-
-</details>
+- ⚠️ **`DC_SCIF_FAST` on hardware loses the console** — a coder's cable will not
+  sync at 1.5 Mbps, crash dumps included.
+- ⚠️ **Build to a COPY of the CDI before a long run** — Flycast holds the file
+  open for the whole run.
+- ⚠️ **The harness writes `console.log` only when Flycast EXITS.** Polling
+  mid-run finds nothing and reads exactly like a hang. A 900 s run is ~17-20 min
+  of wall clock.
+- ⚠️ **A game smoke run ALWAYS exits 1** with `status=exited_early` — the game
+  never returns. `run_report.py` is the verdict, not the exit code.
+- ⚠️ **Never build a perf run with `DC_FB_PROBE`** — rule 4.
+- ⚠️ **G1 and G2 are mutually exclusive** and it is an `#error`
+  (`dc/include/dc_platform.h:454`): both install into emu64's dispatch table.
 
 ---
 
-# Older material, kept for the reasoning behind items now closed
+## 3. THE MEASUREMENT RULES — eleven, each paid for
 
-## What was fixed in session 1 (do not re-investigate)
+1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
+   any visual comparison.
+2. **Judge a renderer change on a screenshot pair, not on counters.**
+   `tools/dcqa/run_report.py` is the floor, not the verdict — it cannot see
+   colour.
+3. **Total frames is NOT a progression metric.** Use `deepest_scene`. The town
+   is ~11 FPS and the train intro 30, so arriving *sooner* lowers the count.
+4. ⚠️ **NEVER build a perf run with `DC_FB_PROBE`.** The dump costs **1,506 ms**
+   into the `vi` bucket and dragged p1 from 11.56 FPS to 8.50. Screenshot runs
+   and perf runs are different experiments.
+5. ⚠️ **Estimate from a matched-frame A/B, not from instruction counts.**
+6. ⚠️ **`MEMLEDGER FIT … OK` IS NOT A STATEMENT THAT THE IMAGE BOOTS.**
+   `margin=` *is* libc's pool and the ledger has no model of libc's demand. A
+   build reported `margin=1606292 OK` and died on the splash with
+   `Out of memory … diff 1449984`. Derive real headroom from an OOM pair, never
+   from `margin=`. `kb/heap-two-pools.md`.
+7. ⚠️ **An AVERAGE cost per command is not the cost of ANY command.**
+   `emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` is a fit against TOTAL `cmds`,
+   which correlates with `vtx`, so the coefficient belongs to the heaviest
+   opcode and to no other. This rule was broken twice, once *inside* its own
+   text. **Only the histogram (G1) may price an opcode.**
+8. ⚠️ **IN A STUBBED IMAGE AN ASSET CLASS COSTS WHAT THE KEEP LIST KEPT — not
+   what the class totals.** `DC_ASSET_STUB` already dropped the rest; an unkept
+   asset is a 1-byte `.bss` symbol with its load suppressed. Measured: villager
+   textures are 1,154,944 B on paper and **90,464 B resident**; villager models
+   438,640 B on paper and **5,536 B resident**. **Cost a pool against the
+   alternative — keeping the class — never against the class total.** A pool is
+   worth building when it delivers content the keep list cannot afford, not when
+   it "frees" bytes the stub system dropped long ago.
+9. ⚠️ **STATE THE DENOMINATOR. `[EMU64H]` IS PER LOGIC TICK — DOUBLE IT.** G1
+   arms at the end of *every* tick (`dc_vi.c:490` the frameskip path,
+   `dc_vi.c:839` the presented path) and `s_frames` counts ticks. Proof both ways: `tot 24.28 × 2 =
+   48.56` vs `draw 45.6 + skip 2.9 = 48.5`. **Two sessions quoted the halved
+   numbers.** `[GXSPLIT]`, `[PHASE]`, `[VTXSPLIT]` and `[PMCR]` are per
+   PRESENTED frame — do NOT double those. ⚠️ `probe=` is not subtracted from
+   `tot` or `gap`; both probes land inside `gap` by construction.
+10. 🔴 **STATE THE DENOMINATOR *WITHIN* AN INSTRUMENT TOO — `[VTXSPLIT]`'s SEVEN
+    BUCKETS DO NOT SHARE ONE.** `memo` is charged on every vertex; `xf`, `lit`,
+    `tex`, `shade`, `post` only on memo **MISSES** (their `VS_MARK`s sit
+    downstream of the memo-hit `continue`); `emit` is per PRIMITIVE. A
+    per-vertex figure for the middle five must divide by `v × (1 − hit_rate)`.
+    At a ~50 % hit rate that is a factor of two, and **two documents published
+    the halved figures**. The ms-per-frame figures the buckets print are correct
+    as printed; only the per-vertex derivation was wrong.
+11. 🔴 **THE NOISE FLOOR ON `us/v` IS ~±2 %. ONE A/B PAIR CANNOT RESOLVE A SMALL
+    CHANGE.** Measured over five 600 s runs on one build line: the same change
+    read **+1.1 %** against one baseline and **−2.0 %** against another — the
+    sign flipped. Cause: the town reseeds per boot (`sys_math.c:7` →
+    `sqrand(osGetCount())`), and `us/v` normalises for vertex COUNT but not for
+    WHICH vertices. **Under ~4 %: run each arm 2-3 times and compare groups, or
+    report it as inside the floor. Never pick the favourable pair.** Session
+    12's wins were 8-18 % and were safe on one run each; that does not license a
+    2 % claim.
 
-All four were the same shape: **state that is recorded and never consumed.**
+---
 
-1. **GX wrap mode** — stored since M1, never read; every texture repeated.
-2. **TEV constant colours** — `g_gx.tev_colors[]` stored, never read; a black
-   vignette rendered **white** over 27.9 % of the frame.
-3. **The keep list** — 77 of 117 texture uploads decoded to all-zero.
-4. **`.c_inc` files** — invisible to `make_stub_data.py`, so the dialogue
-   balloon's arrays got a `.bss` buffer and no loader.
+## 4. The instruments
 
-Narrative and numbers: `kb/state-log.md`. Gotchas: `kb/traps.md`.
+| instrument | knob | denominator | notes |
+|---|---|---|---|
+| `[PHASE]` | `-DDC_PERF_PHASE` | presented frame | `draw`/`skip`/`vi`, `cull`/`xform`, `v`/`vlit`/`vcull`/`us/v` |
+| `[VTXSPLIT]` | `-DDC_PVR_VTXSPLIT=<N>` | **mixed — rule 10** | splits `xform` into 7 stages, sampling 1 primitive in N |
+| `[EMU64H]` | `DC_EMU64_HIST=<N>` | **logic tick — rule 9** | per-opcode timing; the only thing allowed to price an opcode |
+| `[EMU64C]` | `DC_EMU64_CULL=1` | 30-frame window | G3's own counters: `trin`/`cull`/`vis`/`punt`/`pdec`/`ptgen`/`pmix` |
+| `[PMCR]` | `DC_PMCR=1`, `DC_PMCR_HUD=1` | presented frame | ⚠️ **burn-only — Flycast returns 0 for all 8 events** |
+| framebuffer | `DC_FB_PROBE` / `DC_FB_IMAGE` | — | ⚠️ never in a perf run (rule 4) |
+| `icache_map.py` | host-side | — | sizes icache pressure; only `istall` on a burn prices it |
 
-## The punch-through list, and why `MODULATEALPHA` is wrong
+**Gates** (they never change behaviour, they only check it):
+`-DDC_EMU64_CULL_VERIFY` (runs both paths, counts a batch we would have dropped
+that the reference drew), `-DDC_GX_VTXID_VERIFY` (content-checks every
+vertex-id hit). ⚠️ **`-DDC_EMU64_CULL_VERIFY` cannot certify the vertex-id side
+channel** — it only checks batches we cull, and a decal batch never culls.
 
-`opb_sizes[4] = PVR_BINSIZE_32`, cutouts route to `PVR_LIST_PT_POLY`, threshold
-pinned to 144, geometry buffered until the base list closes and replayed.
+---
 
-**`cxt.txr.env` is `PVR_TXRENV_MODULATEALPHA`, so the alpha the PT comparator
-tests is `vertex_alpha × texel_alpha`. On the N64 those two were never
-multiplied.** Every alpha-tested display list runs `G_RM_FOG_SHADE_A`, where the
-vertex alpha byte is the per-vertex **fog coefficient**. Fixed by forcing vertex
-alpha opaque on textured PT batches; kill switch
-`-DDC_PVR_PT_KEEP_VTXALPHA`. **A/B settled: PT stays ON.**
+## 5. The subsystems, as they stand
 
-## Fog — hardware, and the mapping is exact
+### G3 — the cull at `G_TRIN_INDEPEND` entry (`dc/src/dc_emu64_cull.cpp`)
 
-`PVR_FOG_TABLE` with a custom 129-entry table, derived in closed form rather
-than fitted. Vertex fog was not an option: KOS's `pvr_fog_vertex_color()` is an
-`assert_msg(0, "not implemented")` stub. Kill switch `-DDC_PVR_NO_FOG`.
+Installs trampolines into emu64's dispatch table for slots 59 (`G_TRIN`) and 60
+(`G_TRIN_INDEPEND`), walks the packed index stream, builds an AABB over the
+referenced vertices in emu64's own `vertices[]`, and consumes the command when
+the box is fully outside the frustum — so vertex references that `dc_gx.c` used
+to reject at flush time never reach `set_position` or our `GX*` setters.
+**−19.9 ms of a 69.8 ms town frame when it shipped; 61 % of TRIN batches culled;
+`vcull` 9,915 → 1,002.** Gate passed `falsecull=0 gfxp_bad=0 reinst=0` over 473
+windows. Since 2026-08-09 it also **records the index sequence** its AABB walk
+already visits and arms `dc_gx.c` with it — the source half of the vertex-index
+side channel.
 
-## The speaker name / reply text — fixed, and it was never the loader
+- **The frustum test is one implementation with two inputs.**
+  `dc_gx_aabb_is_offscreen()` is shared; the two callers coincide only because
+  `emu64.c:4935`'s `GXEnd()` makes flush granularity exactly one TRIN.
+- **Three punts, each load-bearing for CULLING**: decal-Z (`set_position`
+  submits a projection round-trip, not `position`), `G_TEXTURE_GEN` (transforms
+  `normal` in place with no idempotence flag), and any batch whose referenced
+  vertices disagree on `MTX_NONSHARED`. **ARMING is a weaker bar than culling** —
+  see `kb/STATE.md` action 1.
+- ⚠️ **G3's tripwire must run BEFORE `dc_emu64_hist_frame_open()`** at both
+  `dc_vi.c` sites. G1/G2 rewrite all 64 slots per sampled frame; G3 re-installs
+  its two. Wrong order and G3 evicts G1's thunks for exactly the two opcodes G3
+  exists to fix. `reinst=` is the tripwire. `kb/traps.md`.
+- ⚠️ **`-DDC_NO_BATCH_CULL` also disables G3** — it means "no frustum cull", not
+  "no *late* frustum cull".
+- **Still open:** the screenshot pair (rule 2), and on the visible path
+  `dirty_check` + `setup_1tri_2tri_1quad` run twice, which is not separately
+  measured.
 
-`mFont_SetVertex_dol` writes `cn[0..3] = 0` into every glyph vertex and the font
-display list clears `G_LIGHTING`, so `shade_vertex()` returned `0x00000000` and
-`MODULATEALPHA` multiplied the glyph away. On GX that zero is harmless because
-`mFont_CC_FONT` never reads `RASC`/`RASA`. The **fifth** member of the
-recorded-but-never-consumed family.
+### The vertex-index side channel (`dc_gx.c` + `dc_pvr.c`, 2026-08-09)
 
-## Environment
+`GXPosition3f32` walks the recorded sequence with a cursor and stamps
+`(epoch << 8) | index` into **`DCGXVertex` bytes 30-31, which were dead
+padding** — `sizeof` stays 32, the `aligned(32)` is untouched. The memo then
+keys on the stamp: no hash, no 30-byte compare, and **no random read into
+`verts[]`**, which was the operand-cache miss that made `memo` 122 cycles a
+vertex. **`us/v` 2.68 → 2.51 (−6.3 %), hit rate 50.9 → 53.7 %.** Kill
+`-DDC_GX_NO_VTXID`. Gate ran `vidchk=15,538,941 vidbad=0 over=0`.
 
-⚠️ **A short run is usually the human closing the emulator window, not a hang.**
-Ask before bisecting a short run.
+- **The epoch is load-bearing.** `GXBegin` merges batches
+  (`pc_gx_merged_batches`): one submit can hold two TRIN commands and emu64
+  **reloads `vertices[]` between them**, so a bare index would hand the second
+  TRIN the first one's transforms.
+- ⚠️ **The win lands in `shade`/`lit`/`tex`/`post`, not in `memo`** — those are
+  charged on memo misses (rule 10), and the miss-count drop is ~¾ of the gain.
+- 🔴 **This is NOT the 13.31 ms block.** That is `dl_G_TRIN`'s index expansion
+  plus our own `GX*` setters; the side channel removes no setter. Several kb
+  files conflated the two — do not add to that.
+
+### Audio — the four rules from four burns
+
+Every burn falsified the previous fix's **scope**, never its mechanism. The
+mechanism was right the first time; the location was wrong three times.
+
+1. **There is exactly ONE place a disc read may block —
+   `dc_dvd_read_yielding()` (`dc/src/dc_dvd.c`). Add new `fs_read` calls THERE,
+   never at a call site.** Five sites route through it.
+2. **Yield BEFORE the seek**, not only between chunks. A 100-200 ms head
+   movement cannot be subdivided by any chunk size; the only defence is entering
+   it with a full ring.
+3. **The re-entrant case is "poll, do not synthesise", not "do nothing".**
+   `snd_stream_poll()` touches no jaudio state and is safe at any depth;
+   re-entering `pc_audio_process_frame` is not.
+4. ⭐ **`DC_AUDIO_MAX_FRAMES` IS AN FPS CONSTANT, NOT AN AUDIO ONE.** Production
+   is capped at `MAX_FRAMES × 17.49 ms × 2 ticks` per presented frame. At the
+   old value of 2 that is 70 ms/frame — **the audio cannot keep up below
+   ~14 FPS however cheap synthesis becomes.** Now 6 (~4.8 FPS).
+
+⭐ **The peak audio cost is VOICE COUNT**, measured with the music actually
+playing: `cost ≈ 2,332 µs + ~265 µs per voice-update`, monotonic across every
+bucket. The "bimodal 2.5 / 10 ms" chased for two sessions was **SFX-only versus
+music-playing**, and `filt@=0 comb@=0` on every `[STUTTER]` row retires the
+FIR/comb suspicion. Peak is 14-15 concurrent voices; `DC_AUDIO_VOICES=12` bounds
+the worst frame linearly.
+
+⭐ **And the largest single win was not code: `DC_ARAM_WINDOW` 131072 →
+1048576.** Matched 420 s runs: disc reads 4,183 → **106**, bytes off disc
+137.9 MB → **4.3 MB**, evictions 4,173 → **68**. It sat at 131072 because that
+was measured when RAM was the binding constraint, which stopped being true on
+2026-08-06, and nobody re-costed it. **Generalise: when a constraint is lifted,
+re-cost everything that was sized under it.**
+
+---
+
+## 6. 🔴 THE HEADLINE OPEN QUESTION — hardware is not the emulator
+
+**Expected in DIRECTION, unmeasured in MAGNITUDE.** Flycast models no
+instruction cache; the SH-4's is **8 KB direct-mapped** against a 2,876,648 B
+`.text`+`.rodata`. `tools/dcopt/icache_map.py` sizes the pressure host-side:
+the town frame's hot symbols are **11.9×** the icache, the 12-symbol innermost
+draw loop **1.4×**, and `dc_gx_backend_submit` shares cache lines with six of
+the `GX*` setters it calls per vertex.
+
+⚠️ **NO AMOUNT OF FLYCAST WORK CAN ANSWER THIS.** Same trap as the disc-timing
+refutation, one layer up: do not "A/B it in the emulator".
+
+The instrument exists — **P1, `dc/src/dc_pmcr.c`**, SH7750 performance counters
+on **PRFC1** (KOS owns PRFC0), rotating through 8 events one per 30-frame
+window, bracketed into `[PHASE]`'s draw/skip/vi plus `audio` and `xform`.
+`DC_PMCR_HUD=1` draws the table on the TV. It is **blocked on a burn**:
+`AC-DC-20260808g-pmcr.cdi`, built and unburned.
+
+- ⚠️ **`DC_CONSOLE_MUTE=1` is not optional on a measuring burn** — KOS
+  busy-waits on the SCIF FIFO with or without a cable, and a perf build puts
+  ~10 lines into every window, so the log would be measuring itself.
+- 🔴 **But muting at `main()` stops the game booting.** The `-f` burn showed the
+  HUD and never booted; this port's boot has always run with hundreds of ms of
+  implicit console delay in it. The mute now arms at `DC_CONSOLE_MUTE_FRAME`
+  presented frames (default 300), inside the game loop. The HUD leads with a
+  liveness line `f= t= d= c=` so a repeat failure is readable off the screen.
+  `kb/traps.md`.
+- ⚠️ **`--symbol-ordering-file` is an LLD flag and we use GNU ld** — 2.45.1
+  wants **`--section-ordering-file`**, which does the same job because
+  `-ffunction-sections` is already on.
+- **What to photograph:** the town, standing still, ~12 s after boot (rows read
+  `--` until their event has had a window). **`cyc` (does `ms` ≈ `wall`?),
+  `istall`, `dstall`.**
+
+---
+
+## 7. Still broken, ranked
+
+1. 🔴 **THE TOWN HAS NO VILLAGERS, and it is a save bug, not an asset bug.**
+   `mNpc_SetNpcList` populates the town from the save's `Animal_c animals[]`
+   (`m_start_data_init.c:559`); the VMU path is unwired, so `[PC] No save file
+   found` and **not one villager actor is ever constructed**. Measured: two
+   900 s runs that reach scene 9 and walk printed zero
+   `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, because `aNPC_dma_draw_data_proc`
+   (`ac_npc_ctrl.c_inc:687`) never runs. **R2/R3 are DEFAULTED OFF for exactly
+   this reason.** N2b is the prerequisite for testing either.
+2. 🔴 **The name-entry keyboard renders black — a whole TEV class, and the fix
+   is WRITTEN BUT NEVER RUN.** 18 of its 26 display lists are config **#037,
+   class P3**, which is **27 of the 101 configs**. The implementation exists
+   behind **`-DDC_PVR_TEVP3`, default OFF** (`dc/src/dc_pvr.c`, ~11 sites):
+   vertex base colour `= PRIM − ENV`, per-vertex `oargb = ENV`,
+   `PVR_TXRENV_MODULATE` + the offset-colour bit, with `oargb` carried through
+   the clipper and the vertex memo exactly like `argb`. With the switch off
+   `emit_projected()` sets `oargb = 0` and every P3 batch loses both colour
+   constants. **Compile-verified, never run on a frame** — it handles 9 of the
+   27 P3 configs exactly.
+   ⚠️ **Free falsification before any screenshot: `[DC/PVR] tevp3 batches=0` on
+   a run that reaches the keyboard** kills the diagnosis for nothing.
+   ⚠️ **Second falsifiable prediction: the panel is black but the 40 key caps
+   are correctly coloured.** If the caps are black too, the diagnosis is wrong.
+   `kb/tev-map-hard-cases.md` §6.6.
+3. **The large black wedges are TEV config #007 losing BOTH alpha factors** —
+   diagnosed, not fixed. `ef_shadow_out.c:34-35` records as **two** stages, not
+   three; the batch draws at `vtx.a * T0.a`, where `vtx.a` is the
+   `G_RM_FOG_SHADE_A` fog coefficient. The two levers are widening
+   `tev_const_alpha()`'s A1 arm and adding the mirrored shape to
+   `tex1_alpha_active()`; both are widenings, widenings in this family have
+   regressed before, so **both need a screenshot pair**.
+   ⚠️ `tev_const_alpha_last()` (`-DDC_PVR_NO_TEVALPHA_LAST`) does **not** fix
+   this. Reference copy: `kb/tev-map-alpha.md` §5.6.
+   **Note the relation to item 2: #007 loses both ALPHA factors, #037 loses both
+   COLOUR constants.**
+4. **The other 74 `obj_s_*` structures** — 333 KB, one building silhouette each.
+5. ⚠️ **The winter time bomb is REDUCED, NOT CLEARED.** R1 made all 41
+   `mFM_grd_w_*` ground textures demand-loadable, but the 84 `obj_w_*`
+   structures are still stubbed, so a winter town still draws every building as
+   a black spiky mess. Verifying it needs a season-forcing build, and **no such
+   knob exists yet** — `DC_SEASON` has been written up as if it did.
+6. **The station roof clip-through.** Reproducible for the first time —
+   `DC_AUTOWALK` can walk a character under it, `DC_PVR_BATCH_LOG` prints
+   `src=`/`vram=` so a batch joins to a symbol, and `-DDC_PVR_PT_NEAREST` is a
+   one-line test of H2. Never run. `kb/station-bugs.md`.
+7. **`aram zero=7 (2016 B)`** in the walking run; must be 0. Small, unexplained.
+
+---
+
+## 8. Two systemic blind spots in the census
+
+⚠️ **A census can NEVER produce a town keep list.** `src/system/sys_math.c:7`
+seeds the town from `sqrand(osGetCount())` and on DC `osGetCount()` is
+boot-elapsed time, so **every boot lays out a different town**. The real
+generator is `mRF_MakeRandomField` (`m_random_field.c:9`), which writes the
+layout **into the save** — so the true reason is "per player", and the port
+re-rolls per boot only because the VMU path is unwired.
+⚠️ **`mFM_DecideAcre` DOES NOT EXIST.** Several kb files used to cite it.
+`tools/dcstub/keeplist-town.txt` enumerates from the tree instead.
+
+⚠️ **The census only ever sees the depth-0 branch of every decision.**
+`DC_AUTOSTART` presses A, every choice menu defaults to index 0, and the clock
+screen lives behind index **1** (`ac_npc_guide_move.c_inc:302-314`) — which is
+why `tim_win.c` was missing for two sessions and a human had to report it.
+Anything gated on `mEv_CheckFirstIntro() == FALSE` is invisible for the same
+reason. **The mechanism is sound; its driver is the blind spot.** Two cheap
+fixes are specced and unbuilt: a zero-asset detector at texture upload, and a
+`DC_AUTOCHOICE` knob that presses Down-then-A on the Nth choice — **neither
+exists in the tree today.**
+
+⚠️ **Regenerating `keeplist-town.txt` once DELETED TOM NOOK.** 25 entries were
+hand-typed and the generator never emitted them (the START map overlay, the
+clock/date HUD, and `rcn/rcc/rcd/rcf/rcs/tuk _1`). They live in `EXTRA_SOURCES`
+in `tools/dcstub/make_keeplist_town.py` now. **Verify the regenerated list is a
+strict superset of what shipped whenever it is regenerated** — two lines of
+python.
+
+---
+
+## 9. Renderer facts already settled — do not re-investigate
+
+- **The recorded-but-never-consumed family.** Five bugs of one shape: GX state
+  written by `dc_gx.c` and never read by `dc_pvr.c` (wrap mode, TEV constants,
+  `GX_TEXMAP_NULL`, alpha compare, colour update; and the font's zeroed vertex
+  colours). **Sweeping every `g_gx` field for a consumer is the standing
+  technique**; fog was the largest one and is now read.
+- **Punch-through.** `cxt.txr.env` was `PVR_TXRENV_MODULATEALPHA`, so the alpha
+  the PT comparator tested was `vertex_alpha × texel_alpha` — but every
+  alpha-tested display list runs `G_RM_FOG_SHADE_A`, where the vertex alpha byte
+  is the **fog coefficient**. Fixed by forcing vertex alpha opaque on textured
+  PT batches (`-DDC_PVR_PT_KEEP_VTXALPHA` reverts). **A/B settled: PT stays ON.**
+- **Fog is hardware and the mapping is exact** — `PVR_FOG_TABLE` with a
+  129-entry table derived in closed form. Vertex fog was never an option: KOS's
+  `pvr_fog_vertex_color()` is an `assert_msg(0, "not implemented")` stub.
+  `-DDC_PVR_NO_FOG`.
+- **`pvr_dropped` has no speed mechanism.** `s_tris_dropped` (`dc_pvr.c:134`)
+  fires only on near-plane geometry, so it tracks **where the camera is
+  standing**. `run_report.py --vs` will keep calling it a REGRESSION and keep
+  being wrong.
+- **`GX_AF_SPOT` is unreachable in the whole tree** — `emu64.c:3316` gates it on
+  `G_LIGHTING_POSITIONAL`, which nothing ever sets. The town runs **exactly 2 lights** (sun + moon, unconditional, in
+  `m_kankyo.c`), not 8.
+- **K.K.'s strum is slaved to the music** — `Na_StaffRollStart` latches on every
+  BGM start, `Na_GetStaffRollInfo` returns `PART_START` forever when the
+  sequencer does not tick, and `current_frame` then reads an uninitialised stack
+  value. Fixed by the audio actually running.
+
+---
+
+## 10. Working hygiene
+
+- **The main thread commits; agents do not run git.**
+- ⚠️ **Never edit the tree while a build runs**, and never run two builds at
+  once — killing a build mid-flight corrupts `objs.rsp`.
+- ⚠️ **A short run is usually the human closing the emulator window, not a
+  hang.** Ask before bisecting one.
+- ⚠️ **A knob that `dc/build-dc.sh` does not FORWARD is silently off.** This is
+  why G1 sat "in the tree, never run" for two sessions.
+- **Every optimization gets a kill switch**, and the default is the good build.

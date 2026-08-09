@@ -2,15 +2,15 @@
 
 Written 2026-08-04, from a deliberately out-of-the-box pass over the 16 MB
 problem, then vetted against `kb/closed.md` idea by idea. The companion to
-`kb/research-creative-ram.md` (which this does not repeat) and to
-`kb/ram-plan.md` (whose arithmetic it corrects).
+`kb/levers.md` (which this does not repeat) and to
+`kb/levers.md` (whose arithmetic it corrects).
 
 **Every idea below was cross-checked against `kb/closed.md`. None reopens MMU
 paging, AICA-as-C-arrays, `--icf`, strip/compress, or ~~`-O1+`~~.**
 
 > ## ⚠️ [2026-08-06] `-O1+` WAS REOPENED, AND IT WAS WORTH MORE THAN THIS WHOLE PAGE
 >
-> The `-O0` directive was reversed. `src/` builds at `-Os` with a 14-TU `-O3`
+> The `-O0` directive was reversed. `src/` builds at `-Os` with an 18-TU `-O3`
 > hot list; `dc/src` moved `-O2` → `-O3`. Measured, matched town windows:
 >
 > | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
@@ -40,7 +40,7 @@ paging, AICA-as-C-arrays, `--icf`, strip/compress, or ~~`-O1+`~~.**
 
 ## Two corrections. These are worth more than several of the ideas.
 
-### C-1. `kb/ram-plan.md` P4 is stale by ~917 KB
+### C-1. `kb/levers.md` P4 is stale by ~917 KB
 
 P4 ("ARAM graph window → VRAM") is billed at **−1,048,576 B of additive heap**.
 But the disc-backed pager that landed 2026-08-02 already shrank the ARAM line to
@@ -52,7 +52,7 @@ closing table still credits the old figure, so anyone re-running that arithmetic
 starts ~0.9 MB optimistic. This is exactly the class of error the
 one-inequality rule exists to catch.
 
-### C-2. `kb/texture-path.md` and `kb/ram-plan.md` P2 contradict each other on VQ
+### C-2. `kb/texture-path.md` and `kb/levers.md` P2 contradict each other on VQ
 
 `texture-path.md` §2 says "VQ is closed too" — KOS's `PVR_TXRLOAD_VQ_LOAD` is
 unsupported and SH-4 codebook generation is infeasible. `ram-plan.md` P2
@@ -119,8 +119,7 @@ dwarfs any VRAM copy).
 
 ⚠️ Before moving: audit every reader for scattered byte access — VRAM dislikes
 8-bit access. And "does a non-texture blob survive untouched in VRAM across PVR
-scene operations" is listed as *unestablished* in
-`kb/research-second-tier-memory.md`; a checksum-across-frames probe answers it.
+scene operations" is *unestablished*; a checksum-across-frames probe answers it.
 
 ### R4. VRAM spare as the S4 pool's eviction tier. ~0.5-1 MB off the pool ceiling.
 

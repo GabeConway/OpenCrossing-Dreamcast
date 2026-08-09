@@ -1,6 +1,6 @@
-/* dc_mem_budget.h - the kb/mem-budget.md §4 table, as constants.
+/* dc_mem_budget.h - the kb/mem-budget-m1-sh4.md table, as constants.
  *
- * DO NOT edit these numbers without editing kb/mem-budget.md §4 in the same
+ * DO NOT edit these numbers without editing kb/mem-budget-m1-sh4.md in the same
  * commit. mem-budget.md §5 wants this file generated from the kb table by a
  * host script so doc and code cannot drift; until that script exists, the
  * numbers are transcribed by hand and this comment is the contract.
@@ -102,8 +102,17 @@
  * where "additive heap" is buckets 1 + 6 + 8 + 12 only. Buckets 3/4/5 ARE the
  * image span, so adding them to the heap side double-counts them.
  *
- *   usable      16,646,144   (16 MB - 64 KB low RAM - 65 KB KOS reserve)
- *   image span  21,374,996   as linked today  -> OVER by 9,568,532 B
+ *   usable        16,646,144   (16 MB - 64 KB low RAM - 65 KB KOS reserve)
+ *   image span    10,364,764   town keep list + audio, 2026-08-09
+ *   additive heap  2,576,256   KOS + arena 1.2M + ARAM 1M + stacks
+ *   -> margin      3,705,124   and it FITS. (It was OVER by 9,568,532 B when
+ *                              this comment was first written; -Os and the
+ *                              keep-list system closed it on 2026-08-06.)
+ *
+ * WARNING: margin is NOT headroom -- it IS libc's pool, and the ledger has no
+ * model of libc's demand. Real headroom is margin minus the measured libc peak
+ * (~3,056,276 B, itself measured at the OPENING keep list and never re-derived)
+ * = roughly 649 KB. Derive it from an OOM pair, not from this comment.
  *
  * kb/STATE.md carries the current numbers and the ranked levers. */
 #define DC_RAM_USABLE_BYTES        16646144u

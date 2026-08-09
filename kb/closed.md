@@ -109,10 +109,23 @@ ever got wrong and the shape of the error is worth keeping.**
 > benchmark optimization as a size or speed lever. That argument has been had
 > and retired.~~
 
-**What is true now:** `src/` builds at `-Os`, with a 14-TU hot list at `-O3`.
-`DC_OPT_PROFILE` selects it, `dc/opt-lists.mk` holds the lists,
-`DC_OPT_PROFILE=o0` is a byte-identical revert. Measured on this tree
-(`kb/state-log.md`, 2026-08-06):
+**What is true now:** `src/` builds at `-Os`, with an 18-TU hot list at `-O3`
+(`DC_OPT_PROFILE=perf`, the default; `dc/opt-lists.mk` holds the lists).
+
+⚠️ **`-O0` IS NOW CONDITIONAL, NOT ABOLISHED — and "the ban is reversed" is
+routinely misread as "`-O0` is finished".** It survives at three levels, and
+each is deliberate:
+
+| level | knob | when |
+|---|---|---|
+| whole tree | `DC_OPT_PROFILE=o0` | a **byte-identical revert**. Keeping it working is the contract that replaced the ban |
+| per TU, permanent | `OPT_QUARANTINE_SRC` (`dc/opt-lists.mk`) | a TU **measured** to miscompile — `-O0` regardless of profile. **Currently empty.** An unjustified entry is permanently slower code nobody will dare delete |
+| per TU, throwaway | `DC_OPT_O0_EXTRA` (⚠️ **space**-separated) | bisecting, via `tools/dcopt/bisect_o0.sh`. For the search, not the fix |
+
+So the correct summary is **"`-O0` is no longer the default and is no longer
+mandatory; it is the evidence-gated exception and the whole-tree escape
+hatch"** — not "`-O0` is dead". Measured on this tree (`kb/state-log.md`,
+2026-08-06):
 
 | | `-O0` | `-Os` | `-Os` + `-O3` hot |
 |---|---:|---:|---:|
@@ -125,7 +138,7 @@ ever got wrong and the shape of the error is worth keeping.**
 1. **It was ARM evidence applied to SH-4.** The whole record traces to one
    armhf session on 2026-07-13 and survives only as a comment block in
    `pc/CMakeLists.txt:21-29`. No log, no commit, no test case. It was never
-   reproduced on this target — and `kb/design-shelf-flags.md` §9 had already
+   reproduced on this target — and `kb/traps.md` §9 had already
    said so ("Achievable, and probably mandatory"), in a document this file
    overrode.
 2. **The armhf failure was never isolated.** `-O2` was changed together with
@@ -187,12 +200,12 @@ there is nothing in the file to compress).
 - **Compressing `1ST_READ.BIN` saves 0 RAM** — `.bss` is `NOBITS`.
 - **`-fno-builtin` breaks the link.** `m_select.c:936,993` then call a real
   `alloca` newlib does not provide, and there is no `-fbuiltin-alloca`.
-  `kb/design-shelf-hazards.md` marked it "(VERIFIED)" as KOS convention; that
+  `kb/traps.md` marked it "(VERIFIED)" as KOS convention; that
   was **false for this image**.
 
 ## `-mfsrra` and `-mfsca` are INERT in this build (2026-08-05)
 
-They are in `$KOS_CFLAGS` (`kb/toolchain-components.md`), so a grep finds them
+They are in `$KOS_CFLAGS` (`kb/toolchain.md`), so a grep finds them
 and they look live. **GCC will not act on either without
 `-funsafe-math-optimizations`** — plus `-ffinite-math-only` for `fsrra` — and
 neither flag appears anywhere in this tree. So no `sqrtf`, `1/x`, `sinf` or
@@ -212,7 +225,7 @@ not "discover" the flags again and do not add
 The user asked about **sh4zam** (`https://sh4zam.com/`,
 `https://github.com/gyrovorbis/sh4zam`, MIT) after community advice that GCC
 does not emit the SH-4's T&L instructions. It is also flagged as a follow-up in
-`kb/toolchain-components.md` §4.3 and `kb/toolchain-decision.md` item 6.
+`kb/toolchain.md` §4.3 and `kb/toolchain.md` item 6.
 **Verdict: do not adopt it.** The community premise is true in general and
 false here:
 
@@ -381,7 +394,8 @@ specific buffers (audio — `kb/levers.md` L3), never as general storage.
 
 ## emu64 is NOT an N64 emulator, and there is no emulated RDRAM anywhere
 
-Verified independently twice. Full writeup: `kb/research-n64-origin.md`.
+Verified independently twice. (The 355-line writeup was deleted in the
+2026-08-09 audit — its whole conclusion is the paragraph below.)
 
 emu64 is a GBI display-list interpreter emitting GX. `emu64.hpp:750`'s
 `u32 segments[16]` is 64 bytes of real GameCube pointers; `seg2k0()`
@@ -402,7 +416,7 @@ No SH-4 address qualifies.
 
 ## Second-tier memory (VRAM / AICA) probing — deprioritised
 
-`kb/research-second-tier-memory.md` is a **salvaged fragment, not a real doc** —
+`kb/research-ram-tiers.md` is a **salvaged fragment, not a real doc** —
 the agent died before writing. Recovered: a complete but **never-compiled,
 never-run** benchmark at `harness/dc/bench/bench_mem.c` (probes every
 main-RAM↔VRAM and main-RAM↔AICA path both directions with checksum
@@ -586,6 +600,39 @@ the emulator cannot answer the question it exists to ask. CPU read == write ==
 DMA rows come off 0-2,240 ns samples. Flycast models neither VRAM access latency
 nor Holly bus contention. **Do not re-run it in an emulator and quote the
 numbers.** It is a CD-R burn task now, at 57,600 baud.
+
+## The 2026-08-09 kb audit — 47 documents deleted
+
+The kb had grown to 102 files / 28k lines, with sessions 5-13 duplicated across
+`STATE.md`, `RESUME.md`, `state-log.md` and `CLAUDE.md`. The audit deleted every
+file that was dead, void, armhf-era or superseded by measurement. **Recover any
+of them from git history — do not re-derive them.**
+
+| set | why it went |
+|---|---|
+| `research-mmu-*` (5 parts) | the verdict is DEAD and nothing acted on the evidence. The verdict + the four reopen preconditions stay in `kb/research-mmu-paging.md` |
+| `design-shelf-*` (5) | measured on GCC 9.3 / KOS `525cbda`, not our GCC 15.2 / KOS 2.3; missed both collisions that actually bit us; parts instructed editing `src/`, which the hard rules forbid. The traps that were real are in `kb/traps.md` |
+| `research-budget-*` (6) | the image-budget audit for a RAM crisis that ended on 2026-08-06. Its surviving results are banked in `kb/levers.md` A1/L3 |
+| `research-size-*` (5) | `kb/levers.md` L3 re-costed every number in them and found them all wrong |
+| `toolchain-*` + `design-toolchain` (6) | the toolchain is built and working; `dc/Dockerfile` is the recipe. Decisions and host facts condensed into `kb/toolchain.md` |
+| `design-harness*` (6) | the harness works; `harness/dc/README.md` is the live doc |
+| `mem-budget*` armhf/void/index (5) | the 12-bucket ledger was already marked VOID; `kb/mem-budget-m1-sh4.md` is the part that is still true |
+| `ram-plan`, `research-creative-ram`, `research-second-tier-memory`, `mem-probe-plan`, `mem-ledger-runtime-design` | plans for the RAM crisis. T1 graduated to `kb/levers.md` L10; the ledger and the probes are built |
+| `perf.md`, `device.md`, `renderer.md`, `build-test.md` | armhf-era. Accurate on game facts, wrong on this hardware |
+| `research-n64-origin.md` | its conclusion is one line, already here: emu64 is a display-list interpreter, not an emulator, and the 22.5 MB image is not an emulation artefact |
+
+**Facts corrected in the same pass**, each verified against the tree:
+
+- "`src/` carries exactly **four** `#if defined(TARGET_DC)` branches" → **five
+  branches in four files**, three of them in `src/` and two in
+  `include/libforest/emu64/texture_cache.h`.
+- "all **3917** TUs" → the link holds **3,936 objects**, 3,902 of them decomp,
+  and the number moves with the scratch-tree config (`BUILDING-DC.md`).
+- "**~2.05 MB** of real headroom" → **~649 KB**. That figure predates
+  `DC_ARAM_WINDOW` 131072 → 1048576 and `DC_AUDIO=1` disabling the S8 jaudio
+  shrink. `kb/STATE.md`.
+- `DC_SEASON`, `DC_AUTOCHOICE` and `DC_GX_NO_FTRV_CULL` were written up as
+  knobs. **None exists in the tree.** They are proposals.
 
 ## Caveat on the wider `kb/`
 

@@ -1,6 +1,6 @@
 /* dc_mem_ledger.c - allocation accounting against the 16 MB budget.
  *
- * Implements kb/mem-budget.md §5. See dc/include/dc_mem_ledger.h for the API
+ * Implements kb/mem-budget-m1-sh4.md See dc/include/dc_mem_ledger.h for the API
  * and dc/include/dc_mem_budget.h for the §4 table.
  *
  * WHAT IS IMPLEMENTED HERE

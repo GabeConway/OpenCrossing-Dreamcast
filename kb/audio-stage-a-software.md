@@ -16,7 +16,7 @@ again (`kb/audio-plan.md`).
 ### 0.1 `src/` is not `-O0` any more
 
 The `-O0` directive on `src/` was reversed on 2026-08-06. `src/` builds at
-`-Os` with a 14-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default);
+`-Os` with a 18-TU `-O3` hot list (`DC_OPT_PROFILE=perf`, the default);
 `DC_OPT_PROFILE=size` is `-Os` everywhere; `DC_OPT_PROFILE=o0` is a
 byte-identical revert. **Everything under `src/static/jaudio_NES/` —
 `internal/rspsim.c`, `driver.c`, `internal/jammain_2.c` — is `-Os` like the
@@ -163,6 +163,6 @@ the current build is unmeasured.*
 `fixSize` 0x38000 (229,376), `ememSize` 0x28000 (163,840), session cache heaps
 0xE700 (59,136), 4 KB DMEM, 4 × 0xF80 AI buffers (15,872), 8 KB reverb rings,
 72 waveload buffers × 0x400 (73,728), 2 × 2240 B DSP bufs.
-**≈ 0.55–0.6 MB of main RAM** — must appear as a line item in `kb/mem-budget.md`.
+**≈ 0.55–0.6 MB of main RAM** — must appear as a line item in `kb/mem-budget-m1-sh4.md`.
 These are GC-era sizings and can be cut hard (the acmd buffers alone only need
 2350 × 8 B).

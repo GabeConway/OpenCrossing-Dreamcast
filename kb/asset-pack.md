@@ -328,7 +328,7 @@ statically allocated arrays compiled into the binary
 to **~8,617,214 B (8.22 MB)** and they stay resident whether the bytes arrive
 from a blob or from the pack. The pack removes 15.68 MB of *peak*; it does
 not remove the 8.22 MB of BSS/data. **That 8.22 MB is the next RAM problem
-and it is larger than everything else in the ledger** — `kb/mem-budget.md`
+and it is larger than everything else in the ledger** — `kb/mem-budget-m1-sh4.md`
 must carry it as a separate line, and the eventual fix is a different one
 (demand-load per asset into pooled storage, which this pack format already
 supports since every asset is individually addressable).

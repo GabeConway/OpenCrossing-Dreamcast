@@ -46,7 +46,7 @@
 # The 16 MB hardware contract is enforced mechanically on every run:
 # _runner.py always passes config:Dreamcast.RamMod32MB=no. Never remove it.
 #
-# EXIT / TIMEOUT SEMANTICS (kb/design-harness.md §5, verified). Flycast does
+# EXIT / TIMEOUT SEMANTICS (harness/dc/README.md, verified). Flycast does
 # not exit when the guest returns from main and does not exit on a KOS kernel
 # panic -- it sits in its window forever, and there is no exit-on-condition
 # flag in the cask build. macOS here also has no timeout(1)/gtimeout(1). So the

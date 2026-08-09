@@ -1,5 +1,12 @@
 # Session log — what was observed running, in order
 
+**This file is the ARCHIVE and the evidence.** Newest first. Since the
+2026-08-09 kb audit it is the *only* place the session-by-session narrative
+lives — `kb/STATE.md` and `kb/RESUME.md` used to carry a second and third copy
+of it and no longer do. Entries are dated snapshots: a number here was true when
+it was written and is **not** a claim about today. For what is true now, read
+`kb/STATE.md`.
+
 ## ⭐⭐⭐ 2026-08-09 (session 13) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED
 ## (`us/v` 2.68 → 2.51), THE SHADE HOIST IS NEUTRAL, AND THE SHORTCUTS ARE DEAD
 ## FOR A REASON THAT IS NOW UNDERSTOOD
@@ -1352,7 +1359,7 @@ went looking for.** (`kb/traps.md`.)
 
 ### T1 IS DESIGNED, AND IT IS MUCH CHEAPER THAN THE CONCEPT NOTE SAID
 
-`kb/research-creative-ram.md` T1 has been the highest-value open idea in the
+`kb/levers.md` T1 has been the highest-value open idea in the
 project since 2026-08-01. Designed against the tree today, it is smaller and
 better-placed than its own write-up:
 
@@ -1598,7 +1605,7 @@ Audited this session, and it does not survive:
 
 1. **It was never reproduced on SH-4.** The entire record is one armhf session
    (2026-07-13) surviving as a comment in `pc/CMakeLists.txt:21-29`. No log,
-   no commit, no test case. `kb/design-shelf-flags.md` §9 had already called
+   no commit, no test case. `kb/traps.md` §9 had already called
    `-O2` "achievable, and probably mandatory" on this target; `kb/closed.md`
    overrode it with the ARM story.
 2. **The armhf `-O2` was never isolated** — it shipped together with
@@ -1614,7 +1621,7 @@ Audited this session, and it does not survive:
    `--gc-sections` drops its callers — and it is being left that way
    deliberately: if an optimized build ever emits a reference, the linker
    fails loudly instead of the game dereferencing NULL.
-4. **`-O2` on `emu64.c` was device-verified SAFE on armhf** (`kb/perf.md` #8:
+4. **`-O2` on `emu64.c` was device-verified SAFE on armhf** (`kb/perf-dc.md` #8:
    train passes, crashes=0) — the same TU, and the same intro train scene the
    `-O1` SIGBUS was blamed on.
 
@@ -1890,8 +1897,8 @@ Two consequences, and the second is a schedule change:
 
 **Every pool claim in the kb was costed against the NON-STUB total, as if those
 bytes were resident today.** `kb/STATE.md`'s "the RAM plan from here is a POOL"
-section, `kb/levers.md` L1, `kb/ram-plan.md` P1/P2, `kb/plan-stages.md` S4 and
-`kb/research-creative-ram.md` T1 all read "villager textures 1,154,944 B",
+section, `kb/levers.md` L1, `kb/levers.md` P1/P2, `kb/plan-stages.md` S4 and
+`kb/levers.md` T1 all read "villager textures 1,154,944 B",
 "~992 KB of NPC textures", "60 of 72 villager models are still stubbed" — and
 then present a pool as **freeing** that. It does not. `DC_ASSET_STUB` already
 dropped those bytes: an unkept asset is a **1-byte `.bss` symbol** and its load
@@ -1945,8 +1952,8 @@ interiors):** *in a stubbed image, an asset class's resident cost is what the
 KEEP LIST kept, not what the class totals. A pool is worth building when it
 delivers content the keep list cannot afford — not when it "frees" bytes the
 stub system already dropped.* Corrected in place in `kb/STATE.md`,
-`kb/levers.md`, `kb/ram-plan.md`, `kb/plan-stages.md`,
-`kb/research-creative-ram.md` and `kb/RESUME.md`.
+`kb/levers.md`, `kb/levers.md`, `kb/plan-stages.md`,
+`kb/levers.md` and `kb/RESUME.md`.
 
 #### The one place the OLD framing is still right: the acre pool
 
@@ -3029,7 +3036,7 @@ The list is exactly what static tracing missed: the logo glyphs, all seven
 plus one 49,152 B `texture_buffer_data`, which is emu64 scratch and not an
 asset. **So the title screen's entire real texture working set is ~62 KB
 against the 4.6 MB of texture destinations the image keeps in `.bss`.** That is
-the strongest evidence yet for `kb/research-creative-ram.md` T1.
+the strongest evidence yet for `kb/levers.md` T1.
 
 ⚠️ **The census sees textures only.** `GXSetArray` recorded **zero** hits — the
 title path does not use indexed vertex fetch, and emu64 dereferences `Vtx` and

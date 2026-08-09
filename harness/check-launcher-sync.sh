@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guard against the three hand-maintained launcher copies drifting apart
 # (assemble.sh does not copy them; a stale copy once nearly shipped without
-# the PipeWire audio fix — kb/build-test.md).
+# the PipeWire audio fix — BUILDING-DC.md).
 #
 # Lines that legitimately differ between the muOS release launcher and the
 # PortMaster-catalog submission are normalized away:

@@ -18,6 +18,15 @@ is *after* spending 952,416 B on content. `MEMLEDGER OK`, `ASSET MISSING 0`,
 `aram LOST 0`, `deepest_scene 18`, `run_report --vs` clean, town `us/v`
 3.07 → 3.09, gyroids confirmed rendering by a human.
 
+⚠️ **THE ~2.05 MB IS STALE — IT IS ~649 KB NOW (re-derived 2026-08-09).** Two
+deliberate spends came after this table and nobody re-ran the arithmetic:
+`DC_ARAM_WINDOW` 131072 → 1048576 (+917,504 B of additive heap, and it cut disc
+reads 40×) and `DC_AUDIO=1` disabling the S8 jaudio `.bss` shrink (+455,848 B of
+span). The current inequality is in `kb/STATE.md`. ⚠️ **The 3,056,276 B libc
+peak itself was measured on 2026-08-04 at the OPENING keep list and has never
+been re-derived** — the honest next step is an OOM pair on the current config,
+not more arithmetic. The conclusion below is unchanged: fit is not what binds.
+
 **The consequence for this file: "does it fit" has stopped being the question.**
 What binds now is **residency** — 8,813,054 B of asset destination arrays can
 never all be resident, so the keep list still decides what exists. A lever is
@@ -40,13 +49,15 @@ until this session.** `src/` at `-Os` (`DC_OPT_PROFILE=perf`, the default):
 .bss   3,945,356 -> 3,945,484     (+128, noise)
 ```
 
-The 14-TU `-O3` hot list then spends **+48,476 B** of that back for 3.5 ms of
-frame time. `DC_OPT_PROFILE=size` gives it up again if an image will not fit;
+The `-O3` hot list then spends **+48,476 B** of that back for 3.5 ms of
+frame time. ⚠️ **That figure was measured with 14 entries on the list; it holds
+18 today** — the four jaudio TUs joined the same day to fix a measured stutter,
+and their `.text` cost was never broken out. `DC_OPT_PROFILE=size` gives it up again if an image will not fit;
 `DC_OPT_PROFILE=o0` is the byte-identical revert.
 
 ⚠️ **EVERY NUMBER BELOW THIS LINE WAS COSTED AGAINST A 5.5 MB `.text` IMAGE.**
 The fit inequality, the `margin=` readings, and every "does X fit" verdict in
-this file and in `kb/ram-plan.md` predate a 2.83 MB image shrink. Re-measure
+this file predate a 2.83 MB image shrink. Re-measure
 before spending it — and read rule 6 first (`margin=` is not headroom).
 
 Evidence: `kb/state-log.md` 2026-08-06. Post-mortem on the ban: `kb/closed.md`.
@@ -56,11 +67,12 @@ Every way found so far to close the RAM gap, with status. **Read this before
 planning any size work.** Read `kb/closed.md` before *proposing* any — several
 obvious ideas are already dead.
 
-Current gap: **6,999,924 [SUPERSEDED gap — now 4,705,628 post-ARAM-pager, see `kb/STATE.md`] B** over; the `.bss` ceiling is **3,604,832 B** against
-10,669,268 today (measured 2026-08-01 after S3, clean full rebuild). See
-`kb/STATE.md` for the inequality and the execution order — this file is the
-ledger, that file is the plan. `kb/research-creative-ram.md` holds unbanked
-*concepts* that are not yet levers.
+⚠️ **THERE IS NO GAP ANY MORE.** This file used to open with one ("6,999,924 B
+over", then "4,705,628 post-ARAM-pager"); `-Os` closed it on 2026-08-06 and the
+image has fitted ever since. Every entry below that is *ranked* against a
+deficit is ranked against a number that no longer exists — read them as "what
+this delivers per byte", per the section above. `kb/STATE.md` carries the
+current inequality; this file is the ledger, that file is the plan.
 
 ## ⭐ 2026-08-04 — TWO LEVERS APPLIED, and they bought the acre fix
 
@@ -291,8 +303,7 @@ Real memory no longer `memalign`ed at boot, not a ledger edit.
   calls `changeFrameBuffer(nullptr, 0, 0)`. The buffer *indices*, which drive
   `JFWDisplay`'s rotation, are untouched.
 
-  ⚠️ `kb/research-budget-premises.md` §2.2 advises handing back a **non-NULL
-  dummy**. That advice was deliberately **not** followed: a small dummy leaves
+  ⚠️ The old budget research advised handing back a **non-NULL dummy**. That advice was deliberately **not** followed: a small dummy leaves
   `JUTDirectPrint` "enabled" and aimed at 32 bytes, which is a heap-corruption
   trap. NULL disables it, which is correct on DC.
 - **GX FIFO, −65,696 B.** `jsyswrap.cpp`'s
@@ -373,9 +384,10 @@ Two rules from the pack author:
      2,714,642 B. See Corrections 0 and 1. -->
 
 
-Six agents re-derived every row against the real ELF. **Every estimate in
-`kb/research-size-reduction.md` was wrong, most of them by a lot, and two of
-the stated *mechanisms* were impossible.** The originals are kept in the right
+Six agents re-derived every row against the real ELF. **Every estimate in the
+old `research-size-*` set was wrong, most of them by a lot, and two of the
+stated *mechanisms* were impossible** — which is why those files were deleted
+(`kb/closed.md`). The originals are kept in the right
 column so nobody re-proposes them.
 
 | item | defensible | claimed | status |
@@ -396,12 +408,12 @@ column so nobody re-proposes them.
 ### Correction 0 — the `s_assets[]` figure was 37% too big [MEASURED 2026-08-02]
 
 `−821,569` was derived from `pc_assets.c`'s **total** `.rodata` contribution
-(888,853 B, `kb/research-budget-premises.md` §3.6). That total is the name-string
+(888,853 B). That total is the name-string
 pool **plus the 347,880 B `s_assets[]` table itself** — and the table is live:
 its `dest`/`size`/`rom_off`/`rom_src`/`swap` fields are the entire asset load.
 Only the strings and the `const char* path` slot that points at them can go.
 
-Measured across two clean full rebuilds of all 3917 TUs that differ only in
+Measured across two clean full rebuilds of the whole tree that differ only in
 whether the rule ran:
 
 | | before | after | Δ |
@@ -438,7 +450,7 @@ Nothing indexes it randomly, memcpy()s it, or byte-swaps it. So it does not have
 to be an array; it only has to be replayable in order. S7 run-length-codes it and
 expands it at that call site.
 
-Measured across two clean full rebuilds of all 3917 TUs differing only in whether
+Measured across two clean full rebuilds of the whole tree differing only in whether
 the rule ran:
 
 | | before | after | Δ |
@@ -548,8 +560,8 @@ the storage is live.** Do not re-propose these.
 ⚠️ **[CORRECTED 2026-08-06 — the premise is gone and the verdict is stronger.]**
 ~~`-O0` is mandatory, so `.text` (6,318,552 B) cannot shrink; it can only move.~~
 **`.text` shrank to 2,854,108 B on a compiler flag (L0), so the item this lever
-existed to relocate is now less than half its old size against ~2.05 MB of real
-headroom. Do not start this — it was already unnecessary, and it is now
+existed to relocate is now less than half its old size, and the image fits with
+room to spare. Do not start this — it was already unnecessary, and it is now
 unnecessary by a wider margin.** The rest of the entry stands as written.
 
 
@@ -644,8 +656,8 @@ our objects precede `-lm` on the link line, so libm's copy is never reached.
 
 ## ⭐ L10. T1 — textures never reach the SH-4. **−579,248 B, then +2.78 MB of content for 68 KB** (designed 2026-08-06)
 
-`kb/research-creative-ram.md` T1 has been the highest-value open *concept* since
-2026-08-01. Designed against the tree today it is **smaller, better-placed and
+T1 was the highest-value open *concept* from 2026-08-01 until it graduated
+into this entry. Designed against the tree today it is **smaller, better-placed and
 cheaper than its own write-up**, and it is the first lever since R1 that frees
 bytes instead of converting MISSING into PRESENT.
 
@@ -717,7 +729,7 @@ offsets span **10.9 MB**, i.e. ~22 s of linear read.
 
 ## L7. Bucket 6's high-water mark — deferred, deliberately.
 
-Still unmeasured. Recipe: `kb/research-budget-premises.md` §2.4 (instrument the
+Still unmeasured. Recipe (from the deleted bucket-6 research): instrument the
 Anbernic host build, drive from a late-game save, report `__osMalloc` peak /
 `JKRExpHeap` peak / `largest_free`). It **blocks nothing** now: A1 cut the arena
 by exactly its dead weight, so the pool is unchanged.

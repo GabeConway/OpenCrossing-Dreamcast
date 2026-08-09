@@ -3,7 +3,7 @@
  * whole KOS "Unhandled exception" register dump into the console log so that
  * sh-elf-addr2line can symbolise the faulting PC on the host.
  *
- * NOTE (verified, see kb/design-harness.md §6): Flycast does NOT trap unaligned
+ * NOTE (verified, see harness/dc/README.md): Flycast does NOT trap unaligned
  * accesses or writes to address 0, under either the dynarec or the interpreter.
  * An illegal instruction is the only reliable crash canary here.
  *

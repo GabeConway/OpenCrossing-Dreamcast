@@ -17,7 +17,7 @@ any number below without reading it first. Evidence: `kb/state-log.md`
 ## 🛑 0.0 STOP — `src/` IS NOT `-O0` ANY MORE (2026-08-06)
 
 **Read this before §0.1, §0.2, or anything in §2.** The `-O0` directive on
-`src/` was reversed on 2026-08-06. `src/` now builds at `-Os` with a 14-TU
+`src/` was reversed on 2026-08-06. `src/` now builds at `-Os` with an 18-TU
 `-O3` hot list (`DC_OPT_PROFILE=perf`, the default); `size` is `-Os`
 everywhere; `o0` is a byte-identical revert. `src/static/jaudio_NES/**` —
 `rspsim.c` included — is `-Os` like the rest of the tree.

@@ -22,7 +22,7 @@
   `DC_AUTOVAR_INIT=zero` A/Bs the 99 uninitialised reads. Detail:
   `kb/state-log.md` 2026-08-06.
 - ⚠️ **The "decomp code cannot be optimized" rule is gone (2026-08-06).**
-  `src/` builds at `-Os` with a 14-TU `-O3` hot list on Dreamcast
+  `src/` builds at `-Os` with an 18-TU `-O3` hot list on Dreamcast
   (`dc/opt-lists.mk`); `.text` 5,506,964 → 2,753,700, town FPS 11.6 → 20.6.
   The UB above is real, but it is handled with guard flags (`OPT_GUARDS`) and
   a per-TU quarantine list, not with `-O0`.

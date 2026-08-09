@@ -1,648 +1,220 @@
-# Unbanked FPS concepts — ranked, each with a failure mode
+# Unbanked FPS concepts — ranked against a MEMORY-BOUND frame
 
-> ## 🔴 [2026-08-06, session 6] G1 WAS RE-RUN. G2 IS DEAD, G3 GREW, AND EVERY
-> ## HISTOGRAM NUMBER ON THIS PAGE IS HALF ITS REAL VALUE
->
-> ⚠️ **`[EMU64H]` is per LOGIC TICK, not per presented frame — double it.** G1
-> arms at the end of every tick (`dc_vi.c:405`, `dc_vi.c:633`) and `s_frames`
-> counts ticks. `tot 24.28 × 2 = 48.56` matches `draw 45.6 + skip 2.9 = 48.5`;
-> the `-O0` run's `42.86 × 2 = 85.7` matches `78.3 + 8.2 = 86.5`. So **this
-> page's `TRIN_INDEPEND 22.25 / VTX 5.40 / gap 7.92` were 44.5 / 10.8 / 15.8**,
-> and `G_TRIN_INDEPEND` was **51 %** of the `-O0` frame, not 28 %. Measurement
-> rule 9, `kb/traps.md`.
->
-> Re-run `smoke-oc-dc-g1b-20260806-164033-15671`, ×2-corrected, `draw` 45.6 ms:
->
-> | | `-O0` | `-Os`+`-O3` |
-> |---|---:|---:|
-> | `G_TRIN_INDEPEND` | 44.5 / 292 | **34.4 ms / 306 = 112.5 µs, 75 % of the frame** |
-> | `G_VTX` | 10.8 | **1.84** |
-> | `G_MTX` / `G_TEXRECT` | 4.36 / 4.34 | **1.72 / 2.88** |
-> | `gap` | 15.8 | **5.96** |
->
-> **What this settles on this page:**
->
-> - ❌ **G2 is DEAD, and now for a measured reason as well as a structural one.**
->   Its target *is* `gap` — emu64's own dispatch-loop overhead — which is
->   **5.96 ms and already `-O3`**. `gap` is therefore also **CLOSED** as an open
->   question: slot `HIST_GAP=64` (`dc_emu64_hist.c:87`), accumulated in
->   `hist_enter()` (`:124-131`), i.e. `emu64_taskstart_r`'s loop control
->   (`emu64.c:5807-5824`, `:5847-5855`, `:5874`) plus frame prologue/epilogue.
->   ⚠️ `probe=` is **not** subtracted from `tot` or `gap` and both probes land
->   inside `gap`. **Recommend deleting `dc_emu64_shadow.cpp` after one A/B** —
->   it costs nothing when off, but it blocks G1 (`#error`,
->   `dc_platform.h:417`).
-> - ⭐ **G3's cull half is the biggest lever in the project**, and bigger than
->   the 4.5-7.0 ms this page estimates: `vcull=5250` against `v=2899` means
->   **64 % of vertex references are fully expanded and pushed through the `GX*`
->   attribute setters before the batch is rejected.**
-> - ⭐ **A new item outranks everything here: ~23.6 ms is unattributed.** Of
->   `G_TRIN_INDEPEND`'s 34.4 ms, `cull 2.0 + xform 8.8 = 10.8` is measured
->   `dc/`; the rest is `dl_G_TRIN`'s index expansion **plus our own `GX*`
->   attribute setters in `dc_gx.c`**, and those two have **never been separated
->   from each other**. That is **52 % of the frame**. One `dc_time_us()`
->   bracket, one build, one run — and **nothing on this page should be costed
->   until it lands** (`kb/RESUME.md` §5 item 1).
-> - ✅ **`G_VTX` is finished** (1.84 ms) and **F8 stays answered** — every state
->   opcode is ≤ 0.5 ms.
-> - **Two new candidates, both `dc/` and both outside this page's frame:** the
->   AABB cull via XMTRX (`dc_gx.c:435`, math `:495-519` — 200 scalar mults per
->   batch, never touches the matrix unit, est 0.4-0.8 ms, kill switch
->   `-DDC_GX_NO_FTRV_CULL`, ⚠️ must call `dc_mtx_xmtrx_invalidate()`), and
->   `chan_eval`'s light loop (`dc_pvr.c:837-902`). ⚠️ **The per-lit-vertex block
->   at `dc_pvr.c:2868` is ALREADY OPTIMAL** — `mv`/`nm` hoisted per batch at
->   `:2779-2781`, the seven ops at `:2875-2886` already `fipr()`; holding `nm`
->   in XMTRX loses because `comb` needs XMTRX for the FTRV at `:2863`.
->
-> Evidence: `kb/state-log.md`, top entry, 2026-08-06 (session 6).
+Written 2026-08-04 from an out-of-the-box pass over the frame-time problem, then
+vetted against the code. Pruned 2026-08-09: the settled entries are compressed to
+their verdicts, the spent decision gate is one line, and the survivors are
+**re-ranked against the measurement that changed everything below.**
 
-> ## 🔴 [2026-08-06] THE BIGGEST UNBANKED FPS IDEA WAS NOT ON THIS PAGE — IT WAS BANNED
+> ## ⭐⭐⭐ THE RE-RANKING PREMISE: THE FRAME IS MEMORY-BOUND, NOT FPU-BOUND
 >
-> **`-O0` was reversed on 2026-08-06.** `src/` builds at `-Os` with a 14-TU
-> `-O3` hot list (`DC_OPT_PROFILE=perf`, the default) and `dc/src` moved
-> `-O2` → `-O3`. Measured on matched town windows:
+> `[VTXSPLIT]` split `xform` into seven stages (`-DDC_PVR_VTXSPLIT=<N>`,
+> `dc/src/dc_pvr.c`). **All the floating-point stages together are ~0.8 ms of a
+> ~30 ms frame.** What costs is memory traffic: the memo's random read, the
+> per-corner copy into the store queue, and the shade pass. Independently
+> corroborated by `tools/dcopt/icache_map.py` — the 12-symbol innermost draw loop
+> is **1.4x** an 8 KB direct-mapped icache and the whole town hot set is
+> **11.9x**. ⚠️ **Flycast models neither cache, so both are understatements.**
 >
-> | | `-O0` | `-Os` | `-Os` + `-O3` hot | + `dc/src` `-O3` |
-> |---|---:|---:|---:|---:|
-> | town FPS | 11.6 | 18.5 | 20.0 | **20.6** |
-> | `draw` ms | 79.1 | 50.3 | 46.8 | **45.4** |
-> | logic tick ms | 6.6 | 3.3 | 2.8 | **2.8** |
-> | `xform` ms (`dc/`) | 13.1 | 12.9 | 12.4 | **9.9** |
-> | `us/v` | 4.05 | 4.05 | 4.05 | **3.11** |
+> **What that does to this page:** every idea whose mechanism is *arithmetic* is
+> demoted, and every idea whose mechanism is *locality* (F5, F6) is promoted —
+> but both of those are **hardware-only to measure**, which is exactly why they
+> are still unbanked. The ideas that remove *work* (F3, F4) keep their value
+> because no optimizer and no cache can invent a skipped vertex.
 >
-> Evidence: `kb/state-log.md`, top entry, 2026-08-06.
->
-> **Three things this does to this page, in order of importance:**
->
-> 1. **The framing premise is void.** This document repeatedly says `src/` is
->    "closed to editing and where compiler flags are banned", and every estimate
->    on it is denominated in an ~78-90 ms `-O0` frame. `src/` is still closed to
->    *editing*; it is no longer closed to *compiling well*. The frame is now
->    45.4 ms.
-> 2. **G2's entire premise is gone.** G2 was "reimplement emu64's dispatch loop
->    in `dc/` at `-O2` because `src/` is stuck at `-O0`". `emu64.c` is now on
->    the `-O3` hot list (`dc/opt-lists.mk`). The compiler did G2's job, in the
->    right place, with no interposition, no `objcopy --globalize-symbol`, no
->    sign-off and no spirit-of-the-rules argument. See the decision-gate section.
-> 3. **Every millisecond estimate below is stale by construction**, because they
->    were sized against `-O0` handlers. The *structural* facts (the dispatch
->    table is writable, `gsSPCullDisplayList` appears twice in `src/`, 66.8 % of
->    vertices are culled after staging, `emu64_set_aflags` is a plain extern C
->    seam) are unaffected — those are facts about the code, not about its cost.
->    **Re-run `DC_EMU64_HIST` at `DC_OPT_PROFILE=perf` before costing any idea
->    here.** A full rebuild is 96 s and `DC_OPT_PROFILE=o0` is a byte-identical
->    control, so the re-measurement is cheap.
->
-> ⚠️ **And the new lever this page should have carried all along:** `-O3` on 14
-> TUs cost +48,476 B of `.text` and bought 3.5 ms. Tuning that list is now the
-> cheapest FPS experiment in the project — but it is bounded, because the
-> frameskipped tick runs ALL of `game_main` for 2.8 ms against the drawn tick's
-> 46.8, so every `src/` TU except `emu64.c` shares those 2.8 ms.
-
-Written 2026-08-04, from a deliberately out-of-the-box pass over the frame-time
-problem, then vetted against the code. The companion to `kb/perf-dc.md`, which
-records what has been *measured*; this file records what has not been *tried*.
-`kb/research-creative-ram.md` is the same shape for memory.
+> Live numbers: `kb/RESUME.md`. Evidence: `kb/state-log.md`. The renderer queue
+> proper: `kb/research-sh4zam-gap.md` §3.
 
 ⚠️ **Read `kb/perf-dc.md` §4 first.** Everything already ruled out with evidence
 — texture upload cost, strip/fan conversion, the batch-merge path, the frameskip
-tick — is not repeated here.
+tick, `pvr_dropped` — is not repeated here.
+
+⚠️ **Measurement rule 11 (2026-08-09): the `us/v` noise floor is ~±2 %.** Nothing
+on this page estimated at under ~4 % can be resolved by a single A/B pair.
 
 ---
 
-## The arithmetic that has to stay in front of any plan
+## The settled entries — verdicts only
 
-⚠️ **[STALE 2026-08-06] — and the clause that mattered is VOID.**
-~~The town frame is ~79-90 ms.~~ The town `draw` is **45.4 ms**. ~~emu64
-display-list traversal plus game logic is **77-80 %**, all in `src/`, which is
-closed to editing **and where compiler flags are banned**.~~ **Compiler flags
-are not banned. That was the wrong half of the sentence, and correcting it was
-worth more than every idea on this page combined.** `src/` remains closed to
-editing; it is compiled at `-Os` with a `-O3` hot list. The shares below have
-not been re-derived — the `src/` half fell 41 % while the `dc/` half moved
-little, so **the renderer's share is now LARGER than 19-27 %**, not smaller.
-Evidence: `kb/state-log.md`, 2026-08-06.
+| # | verdict | where the reasoning lives |
+|---|---|---|
+| **F0** — print the counters emu64 already maintains | ✅ **DONE 2026-08-04.** `[EMU64]` prints `cmds noop vtx tri dl \| cullvis cullrej` next to `[PHASE]`. Its own headline reading ("73 % of commands are state, therefore ~26 ms") was an averaging error and was overturned by G1 | `kb/closed.md` (F8), `kb/traps.md` "An average cost per command…" |
+| **F1** — offline bbox-`CULLDL` injection into acre/model display lists | ❌ **NOT RECOMMENDED.** Costs **594 KB of `.data`** for the town scope (not the 60-120 KB it claimed), its own size cap selects nothing (no `gsSPVertex` in `src/data` exceeds 32 vertices), the bboxes cannot be computed without the ROM, and **G3 already delivered a bigger version of the same win for zero bytes** | `kb/closed.md` §F1 |
+| **F2** — XMTRX residency token for `dl_G_VTX`'s two `PSMTXMultVec` calls | ⚠️ **PREMISE FALSE, REIMPLEMENTED.** The two calls use **different** matrices (`emu64.c:4708` `position_mtx`, `:4710` `model_view_mtx`), so a residency cache misses every time. What shipped instead: `PSMTXMultVec`/`PSMTXMultVecSR` take FTRV only when the matrix is provably resident and go **plain scalar** otherwise, with the miss path deliberately not touching XMTRX. Kill switch **`-DDC_MTX_NO_XMTRX_CACHE`**; `dc_mtx_xmtrx_invalidate()` is the explicit seam `dc_pvr.c` calls after its per-batch `mat_load`. **Still unmeasured** | `dc/src/dc_mtx.c` |
+| **F8** — strip RDP/RSP state commands | ❌ **ANSWERED BY G1, worth ~nothing.** Every state opcode is ≤ 0.55 ms/frame. A large *count* of near-free commands is worth nothing to strip. **Do not build a strip rule** | `kb/closed.md` §F8 |
+| **the decision gate — interposing on emu64 through its dispatch table** | ✅ **SPENT.** G1 ran, G2 is dead (its target was `gap`, which the `-O3` hot list collected), and **G3 shipped 2026-08-08 and is ON by default** (`DC_EMU64_CULL ?= 1`). The elaborate `objcopy --globalize-symbol` machinery, the honesty flag and the sign-off request are all moot. **The expensive general lesson: this section spent real design effort engineering around a ban whose evidence was one unreproduced armhf session — check what a ban actually rests on before engineering around it** | `kb/closed.md` §G2, `kb/RESUME.md` §0d |
 
-The town frame is ~79-90 ms. The renderer (`gx=`, all of it in `dc/`) is
-**19-27 %** of it, at the median and at the tail alike. emu64 display-list
-traversal plus game logic is **77-80 %**, all in `src/`, which is closed to
-editing and where compiler flags are banned.
-
-**Deleting the renderer entirely would take the worst 5 % of frames from 84.7 ms
-to 66.0 ms — 11.8 to 15.2 FPS.** Any plan that quotes a renderer optimisation as
-a route to 30 FPS in the town is wrong on arithmetic. (The *conclusion* still
-holds at `-Os`; the numbers do not.)
-
-⚠️ **G1 re-cut that split along a different axis, and the new one is the useful
-one (2026-08-05).** The `gx=` counter still says 19-27 %, but the per-opcode
-histogram shows that **65 % of the heaviest "emu64" opcode is our own `-O2`
-code**, billed through `GXEnd` (`emu64.c:4935`): of `G_TRIN_INDEPEND`'s
-152 µs/call, ~15 µs is the AABB cull and ~81 µs is `dc_gx_backend_submit`, and
-only ~53 µs is `src/` at `-O0`. **So the editable share of the frame is larger
-than "19-27 % renderer" suggests, and the un-editable share is smaller** — which
-is why the queue below starts with a `dc/` function and not with a sign-off
-request.
-
-⚠️ **[STALE 2026-08-06] The 65/35 split is void; the structural point is not.**
-The `src/` side of that bucket went `-O0` → `-O3` and the `dc/` side went
-`-O2` → `-O3`, so both terms moved and neither the 53 µs nor the 152 µs has
-been re-measured. What survives — and is now *more* true — is that a large
-fraction of the "emu64" bucket is code this project owns. What also survives is
-the conclusion drawn from it: **start with the `dc/` function, not with a
-sign-off request.** Re-run `DC_EMU64_HIST` at `DC_OPT_PROFILE=perf` before
-using any number in this paragraph.
-
----
-
-## The ranked queue as of 2026-08-05 — READ THIS BEFORE PICKING AN IDEA BELOW
-
-The ideas on this page are ranked by their own merits; this is the order to
-actually work in, after G1's histogram. `kb/STATE.md` carries the same list.
-
-⚠️ **[STALE 2026-08-06] This ordering was derived from an `-O0` histogram and
-has not been re-derived.** Item 2 (per-slot `G_MTX` shadow) and item 3 (slot-60
-cull-only shadow) are both *interposition* ideas whose value came from running
-`dc/` `-O2` code in place of `src/` `-O0` code — and `src/` is no longer `-O0`.
-The cull half of item 3 keeps its value (it removes work rather than
-recompiling it); the "`-O2` instead of `-O0`" half of items 2 and 3 has largely
-been collected by the compiler already. **Re-run the histogram before working
-this queue.** Evidence: `kb/state-log.md`, 2026-08-06.
-
-| # | what | est | gate |
-|---|---|---|---|
-| 1 | **`dc_gx_backend_submit`** — 12.2 ms, 15.6 % of `draw`, `dc/src/dc_pvr.c:2448`. First step is free: print the vertex-memo hit ratio and a per-batch `count` histogram from `dc_gx_flush_vertices`, which also settles F3's ceiling dispute | unmeasured; the block is 12.2 ms | **none — it is ours** |
-| 2 | **Per-slot shadow of `G_MTX`** (2.18 ms / 113 calls) as the proof the per-slot machinery works — self-contained, no `gfx_p` rewriting | 0.9-1.4 ms [ESTIMATED] | G2/G3 sign-off already given |
-| 3 | **Slot-60 `TRIN_INDEPEND` cull-only shadow** — AABB over the index window at entry, tested against `projection_mtx ×` (identity for SHARED / `position_mtx_stack` for NONSHARED), `dl_G_TRIN` kept as the fallback | 4.5-7.0 ms [ESTIMATED] | as above |
-| — | the `gap=7.92 ms` | unknown | it is not even attributed yet |
-
-⚠️ **HAZARD FOR ANY THIRD INSTALLER INTO THE DISPATCH TABLE.**
-`dc_emu64_hist.c:262` and `dc_emu64_shadow.cpp:492` each `memcpy` **all 64
-slots** on frame open and restore all 64 on close. A per-slot shadow that arms
-after either of them will be silently reverted on the next frame boundary, and a
-per-slot shadow that arms before will be captured *into* their saved copy.
-**Arm slot-wise, or initialise strictly first.** G1 and G2 are already mutually
-exclusive by `#error` for the same reason (`dc/include/dc_platform.h:417`).
+⚠️ **HAZARD, STILL LIVE, FOR ANY NEW INSTALLER INTO THE DISPATCH TABLE.**
+`dc_emu64_hist.c` and `dc_emu64_shadow.cpp` each `memcpy` **all 64 slots** on
+frame open and restore all 64 on close; G3 re-installs its two. A per-slot
+installer that arms *after* either of them is silently reverted on the next frame
+boundary; one that arms *before* is captured into their saved copy. **G3's
+tripwire must run BEFORE `dc_emu64_hist_frame_open()` at both `dc/src/dc_vi.c`
+sites** (`:490` frameskip, `:839` presented) or G1 bills TRIN's time to whichever
+opcode ran before it. `reinst=` is the tripwire. G1 and G2 are already mutually
+exclusive by `#error` (`dc/include/dc_platform.h:417`). Full write-up:
+`kb/traps.md`.
 
 ---
 
 ## The five facts these ideas rest on
 
-All verified in the tree, 2026-08-04. **Facts 2-5 are statements about the code
-and survive 2026-08-06 unchanged. Fact 1's ratio survives; its cost does not.**
+All verified in the tree 2026-08-04. **These are statements about the CODE, not
+about its cost, so they survive every re-measurement.**
 
-1. **66.8 % of the vertices emu64 produces are thrown away by our own AABB cull,
-   AFTER emu64 has paid full ~~`-O0`~~ price for them.** ⚠️ **[2026-08-06]** —
-   `src/` is `-Os`/`-O3` now, so the price paid before the cull is lower and the
-   4.5-7.0 ms estimate below is an upper bound that has not been re-taken. The
-   **ratio** (`vcull=6042` vs `v=3002`) is a property of the scene and the cull's
-   position in the pipeline, not of codegen, so it stands. ⚠️ **Re-measured
-   2026-08-05 and re-costed downward.** This fact used to read "60 % … at
-   ~6.9 µs of emu64 work per vertex that is **~29 ms/frame**", derived across
-   two differently-instrumented builds from `pc_gx_culled_draws`, which counts
-   BATCHES. The `vcull=` counter (`dc/src/dc_gx.c`) now counts vertices
-   directly: **`vcull=6042` against `v=3002`.**
-   **But it is not worth 29 ms, and it is not worth 14.9 ms either.** `dc_gx.c`
-   returns *before* `dc_gx_backend_submit`, so culled vertices already cost
-   `xform` nothing. An ideal cull at TRIN entry removes the staging of 6,042
-   vertices (5.0-5.6 ms [ESTIMATED]) plus the per-vertex AABB scan
-   (2.1 ms [MEASURED]), minus a new O(window) test (0.25-0.40 ms [ESTIMATED]):
-   **4.5-7.0 ms, central ~6.0 ⇒ 11.5 → 12.2-12.6 FPS.** `kb/perf-dc.md` §2b.
+1. **A large majority of the vertex references emu64 produces used to be thrown
+   away by our own AABB cull, AFTER emu64 had paid for them.** ⭐ **G3 acted on
+   this and it was the biggest win the project has booked** — the cull moved to
+   `G_TRIN_INDEPEND` entry, so those references never reach `set_position` or our
+   `GX*` setters at all. The late cull's yield collapsed accordingly. ⚠️ G3
+   **added** cull calls rather than replacing them — punt and visible batches both
+   still fall through to `GXEnd` → the late cull.
 2. **emu64 already contains a working display-list cull.** `dl_G_CULLDL`
-   (`emu64.c:5189-5318`) classifies vertex-cache entries against six clip planes
-   and pops the DL stack on a hit — exactly the "make emu64 skip a whole object"
-   mechanism wanted, already implemented, already counted.
+   classifies vertex-cache entries against six clip planes and pops the DL stack
+   on a hit — exactly the "make emu64 skip a whole object" mechanism wanted,
+   already implemented, already counted.
 3. **The game's data almost never uses it.** `gsSPCullDisplayList` appears
-   **twice** in all of `src/`: `ac_field_draw.c:325` (an acre-sized box around
-   the whole acre BG list) and `obj_item_fish.c:62`. So acre-level cull already
-   runs; the 60 % waste is the *contents* of partially-visible acres and
-   per-object models — the granularity the game never culled.
+   **twice** in all of `src/`: `ac_field_draw.c:325` (an acre-sized box around the
+   whole acre BG list) and `obj_item_fish.c:62`. Acre-level cull already runs; the
+   waste is the *contents* of partially-visible acres and per-object models — the
+   granularity the game never culled.
 4. **The acre and object display lists are C text, not binary.**
    `src/data/field/bg/acre/` holds 268 acre models as `Gfx foo_model[] = {...}`.
    `grep -rE "gsSPDisplayList\(&" src/data` returns **0** and `gsSPBranchList`
    returns **0** — no interior pointers into any `Gfx` array, so an offline
    rewriter can restructure them safely, through the proven scratch-tree
    mechanism that leaves `src/` untouched.
-5. **`emu64`'s dispatch table is writable.** `static dl_func
-   dl_func_tbl[NUM_COMMANDS]` (`emu64.c:5702`) is a non-const file-static array
-   of member-function pointers in `.data`, called at `emu64.c:5850`. There is no
-   MMU write protection anywhere.
+5. **emu64's dispatch table is writable.** `static dl_func
+   dl_func_tbl[NUM_COMMANDS]` is a non-const file-static array of member-function
+   pointers in `.data`. There is no MMU write protection anywhere. (This is what
+   G1 and G3 both use.)
 
 ---
 
-## The ideas, ranked by (estimated win) / (risk x effort)
+## The surviving ideas, re-ranked
 
-### ✅ F0 — DONE 2026-08-04. ✅ G1 — RUN 2026-08-05, and it OVERTURNS this entry.
-
-`dc/src/dc_vi.c` prints `[EMU64]` next to `[PHASE]`. The town, per frame:
-
-```
-cmds=2867 noop=1 vtx=265 tri=258 dl=250 | cullvis=6 cullrej=3
-```
-
-**773 of 2,867 commands do geometry work. The other 2,094 — 73 % — are RDP
-and RSP STATE.**
-
-⚠️ **Do NOT price that at 12.31 µs/cmd**: 12.31 µs/cmd is a fit of `emu64_ms`
-against TOTAL `cmds`, and total `cmds` correlates with `vtx`, so the coefficient
-is dominated by the opcode that does the most work per command.
-
-⚠️ **AND THE REPLACEMENT ARITHMETIC IN THIS ENTRY WAS ALSO WRONG. Corrected in
-place 2026-08-05.** This paragraph used to read: "265 `G_VTX` commands carry
-~6,951 vertices into `dc_gx` — about 26 vertices each — and at the ~6.9
-µs/vertex of emu64 work already measured, **`G_VTX` alone accounts for ~48 ms,
-i.e. essentially the whole emu64 budget**." It is wrong on both inputs, and it
-is what G2/G3 were costed against:
-
-- **`~6.9 µs/vertex` is itself a whole-command average applied to a subset** —
-  measurement rule 7, committed inside the paragraph that states rule 7.
-- **The ~6,951 were `GXPosition3f32` *references*, not loaded vertices.**
-  `G_VTX` loads ~3,601 per town frame; the rest are re-emissions of the same
-  sources, which is exactly what the vertex memo exists to catch.
-
-**G1 measured it:** `G_VTX` is **5.40 ms over 149 calls**. The budget is in
-`G_TRIN_INDEPEND` — **22.25 ms over 146 calls, 152 µs/call, 63 % of emu64
-dispatch and 28 % of the whole 78.3 ms frame.** Full histogram and the
-consequences: `kb/perf-dc.md` §2b.
-
-Two consequences that hold regardless:
-
-- **F8 is answered, not just reopened. It is worth ~nothing.** The state
-  opcodes G1 priced are all ≤ 0.55 ms each: `MOVEMEM 0.55/207`,
-  `SETTILE_DOLPHIN 0.32/109`, `SETCOMBINE 0.28/58`, `SETTIMG 0.25/112`,
-  `LOADTLUT 0.13/42`. A large *count* of near-free commands is worth nothing to
-  strip — which is what F8's original static-count dismissal said, for the
-  wrong reason. **Do not build a strip rule.**
-- **`cullvis=6`** (7 in the G1 run). emu64's own display-list cull runs nine
-  times a frame and rejects two or three. The acre-level cull the game ships is
-  barely doing anything.
-
-<details><summary>the original F0, for the reasoning</summary>
-
-### F0. Print the counters that already exist. Do this first, unconditionally.
-
-`pc_emu64_frame_noop/vtx/tri/dl_cmds` and `pc_emu64_frame_cull_visible/rejected`
-are maintained by emu64 (`emu64.c:5824-5834`, `:5309-5315`) and defined in
-`dc/src/dc_gx.c:90-97` — but `[PERF]` prints only `cmds` and `crashes`. Every
-idea below needs the town's opcode mix and the current CULLDL hit rate, and both
-are already being counted for free.
-
-**Win: 0 ms. Risk: 0. Unlocks everything else.**
-
-</details>
-
-### F1. Offline bbox-CULLDL injection into acre and model display lists
-
-**10-20 ms/frame. Low-medium risk. Fully inside the rules.**
-
-A new scratch-tree rewriter splits each large static DL into sub-lists, each
-prefixed with 8 synthetic AABB corner vertices and a `gsSPCullDisplayList`:
-
-```c
-Gfx grd_s_c1_1_model[] = {          /* same symbol, same extern type */
-    gsSPDisplayList(chunk0), ... gsSPEndDisplayList()
-};
-static Gfx chunk0[] = {
-    gsSPVertex(chunk0_bbox, 8, 0),  /* 8 AABB corners, computed offline */
-    gsSPCullDisplayList(0, 7),
-    <the original commands for this chunk>,
-    gsSPEndDisplayList(),
-};
-```
-
-This is byte-for-byte the idiom the game itself uses at
-`ac_field_draw.c:322-334`: we extend the developers' own acre cull down to
-sub-acre and object granularity. A culled chunk pops back to the parent and the
-next chunk still runs — which is *why* the split into sub-lists is mandatory. A
-`gsSPCullDisplayList` inserted inline cannot work: a cull hit ends the whole
-current DL.
-
-**Why 8 synthetic verts and not the batch's own 30:** `dl_G_CULLDL` transforms
-every tested vertex through ~~`-O0`~~ `guMtxXFM1F_dol2`, so testing 30 real
-vertices on *visible* chunks would cost more than it saves. ⚠️ **[2026-08-06]
-that function is now `-Os` and the margin is narrower** — the argument still
-points the same way (8 < 30 at any optimization level) but the *quantitative*
-case for it was `-O0`. F1 itself is unaffected: it removes commands, which is
-the one lever the compiler cannot take.
-
-Failure modes, all checkable mechanically:
-- A model DL executed as a root task or via `G_DL_NOPUSH`: a cull would set
-  `end_dl` and kill the rest of the frame (`emu64.c:5301-5305`). Inject only into
-  DLs statically reachable *only* via push-mode `gsSPDisplayList` — fact 4 says
-  that is exhaustively checkable.
-- The 8 bbox verts clobber cache slots 0-7. Safe for chunks that begin with
-  their own `gsSPVertex` (every acre chunk does), fatal for a DL that consumes
-  vertices loaded by its caller. Detectable.
-- Zero normals hit `PSVECNormalize` under `G_TEXTURE_GEN` → NaN. Give them a
-  unit normal; they are never drawn.
-- ⚠️ **RAM: ~60-120 KB of `.data`** for bbox vertices and the extra `Gfx`, on a
-  budget already 4.7 MB over. Bounding injection to DLs of 50+ vertices caps it.
-  **This must be declared in the ledger — it is the one real cost.**
-
-Cheapest experiment: hand-transform ONE town acre (`grd_s_c1_1`) plus one large
-object model in a scratch copy, run 600 s, read `cull_rejected` (F0) and the
-matched-frame `cmds`/`v` drop.
-
-### ⚠️ F2 — THE PREMISE WAS FALSE. Corrected and reimplemented 2026-08-04.
-
-F2 said `dl_G_VTX` calls `PSMTXMultVec` twice per shared vertex **with the same
-matrix**, so a residency token turns the second call into one FTRV. Read the
-call site:
-
-```c
-emu64.c:4708   PSMTXMultVec(position_mtx,         &pos,    &pos);
-emu64.c:4710   PSMTXMultVec(this->model_view_mtx, &normal, &normal);
-```
-
-**Two different matrices, alternating once per vertex.** XMTRX is physically a
-single slot, so a residency cache misses on every call in the one loop that
-matters. F2 as specified is worth **zero**.
-
-What the call site *does* establish is that the single-vector entry points
-should never have been on the XMTRX path at all. For ONE vector the cost is
-entirely in getting the matrix in:
-
-| | |
-|---|---|
-| XMTRX | `transpose44` = 12 loads + 16 stores, `mat_load` = 8 double-`fmov` + the `frchg` pair, then 1 FTRV — **~50+ cycles** |
-| scalar | 12 loads, 9 `fmul`, 9 `fadd`, 3 stores, no memory round-trip, no bank switch — **~30-40 cycles** |
-
-`dc_mtx.c`'s own header already said this ("PSMTXMultVecArray: **this** is where
-XMTRX actually pays") and then loaded XMTRX per call anyway.
-
-**Implemented instead:** `PSMTXMultVec`/`PSMTXMultVecSR` take FTRV only when the
-matrix is provably still resident, and plain scalar otherwise. The miss path
-deliberately does **not** touch XMTRX, so a scalar miss cannot evict the matrix
-a bulk transform loaded. Residency is pointer + a full 12-word content compare
-(emu64 rewrites matrix-stack entries in place, so pointer equality alone is the
-documented stale-matrix failure), plus an explicit `dc_mtx_xmtrx_invalidate()`
-that `dc_pvr.c` calls after its per-batch `mat_load` — those two are the only
-XMTRX writers in the image. Kill switch `-DDC_MTX_NO_XMTRX_CACHE`.
-
-**Unmeasured as of this edit.** Rule 5: the win is whatever a matched-frame A/B
-says it is, not what the cycle table above says.
-
-### F3. Memo generation counter instead of a per-batch flush
-
-**1-2 ms/frame. Low risk.**
-
-The vertex memo (128 slots, 48.2-48.9 % hit rate) is invalidated at the top of
-every `dc_gx_backend_submit()`. But emu64 splits one object into many
-consecutive batches while the folded matrix, lights and TEV constants are often
-unchanged. Hash the per-batch constants and invalidate only when the hash moves.
-
-⚠️ **OPEN, and it decides whether F3 is worth anything at all: is the memo
-already at its ceiling?** Two derivations disagree on one input, the total
-staged vertex references per frame.
-
-| | total refs | loaded vertices | refs/vertex | ceiling | reading |
-|---|---:|---:|---:|---:|---|
-| A | 6,951 (`dc_gx.c:870`'s comment, older docs) | 3,601 | 1.93 | **48.2 %** | measured 48.2 % IS the ceiling — F3 is worth zero |
-| B | `v + vcull` = 3,002 + 6,042 = **9,044** | 3,601 | 2.51 | **~60 %** | ~11 points of headroom |
-
-B's 9,044 comes from the `vcull` counter added 2026-08-05 and is MEASURED;
-A's 6,951 is an older figure and the `dc_gx.c:870` comment carrying it is now
-**stale**. That alone does not settle it — the two counts may not cover the same
-population. **The experiment is a direct count of distinct vertex references per
-batch.** Until it runs, neither "the memo is done" nor "there are 11 points
-left" may be stated as fact.
-
-⚠️ Failure mode: any per-batch constant *not* in the hash makes a stale entry an
-exact-looking wrong vertex. The four "recorded and never consumed" bugs are the
-cautionary tale — enumerate the constants from `shade_vertex`'s reads and assert
-in debug.
-
-### F4. Temporal predicted cull
-
-**1-2 ms/frame. Near-zero risk.**
-
-Thread batch identity (the source `Vtx` pointer, via the seam
-`dc/include/dc_census_vtx.h` already proves) into `dc_gx`. If (identity, matrix
-hash) was AABB-culled last frame, skip staging and the cull entirely. Degrade
-safely by only skipping when the matrix hash is bit-identical — which is exactly
-when a pop-in could not happen.
-
-### F5. I-cache packing by linker placement
+### F5. I-cache packing by linker placement — ⭐ PROMOTED
 
 **Unknown, 0-10 %. Hardware-only measurement. Explicitly legal.**
 
-SH7750's **8 KB** I-cache is direct-mapped (confirmed 2026-08-05; the D-cache is
-16 KB — see F6) and `-ffunction-sections` is already on,
-so a linker-script ordering block can place the dispatch loop, `dl_G_VTX`, the
-TRI handlers, `set_position`, `GXPosition*` and `PSMTX*` contiguously and remove
-*conflict* eviction between the interpreter and the GX layer it calls per
-vertex. Pure layout — ~~"codegen is banned; layout is fair game"~~ **and as of
-2026-08-06 codegen is fair game too, so F5 no longer needs that defence at
-all.**
+SH7750's **8 KB** I-cache is direct-mapped (the D-cache is 16 KB — see F6) and
+`-ffunction-sections` is already on, so a section-ordering block can place the
+dispatch loop, `dl_G_VTX`, the TRI handlers, `set_position`, `GXPosition*` and
+`PSMTX*` contiguously and remove *conflict* eviction between the interpreter and
+the GX layer it calls per vertex. Pure layout, no codegen argument needed.
 
-Failure mode: the `-O0` hot set is likely 40-80 KB, far over 8 KB, so this only
-removes conflict misses, not capacity misses. **Flycast models no cache, so this
-cannot be measured in the emulator at all** — it costs a burn cycle to evaluate.
+⭐ **Why this is now the top unbanked idea rather than a curiosity.**
+`tools/dcopt/icache_map.py` (host-side, seconds, no burn) measured the pressure:
+the town frame's hot symbols are **11.9x** the icache and **the 12-symbol
+innermost draw loop is 1.4x** it — `dc_gx_backend_submit` shares cache lines with
+six of the `GX*` setters it calls per vertex. That is a *conflict* miss pattern,
+which is exactly what ordering fixes. It also lines up with the human report that
+**hardware is materially slower than Flycast and nobody knows why**
+(`kb/RESUME.md` §0h).
 
-✅ **[2026-08-06] F5 GOT BETTER, and it is the one idea on this page the `-O0`
-reversal HELPED.** `.text` fell from 5,506,964 B to 2,753,700 B — the whole
-image is now half the size it was — so the hot set that has to fit an 8 KB
-direct-mapped I-cache shrank by roughly the same factor. The "40-80 KB" estimate
-above was an `-O0` estimate and is stale in the favourable direction.
-`-Os` additionally optimises *for* code size, which is exactly what an I-cache
-wants. **Still hardware-only to measure.** Evidence: `kb/state-log.md`,
-2026-08-06.
+- ⚠️ **`--symbol-ordering-file` is an LLD flag and we use GNU ld.** 2.45.1 has
+  **`--section-ordering-file FILE`**, which does the same job.
+- ⚠️ **Flycast models no cache, so this cannot be measured in the emulator at
+  all.** It costs a burn cycle to evaluate, and `dc/src/dc_pmcr.c`'s `istall`
+  event is the instrument (`DC_PMCR=1`, `DC_PMCR_HUD=1`, and
+  `DC_CONSOLE_MUTE=1` is not optional on a measuring burn — read `kb/traps.md`
+  first).
+- ✅ The `-O0` reversal helped it: `.text` roughly halved, so the hot set that
+  has to fit shrank by about the same factor, and `-Os` optimises *for* code size,
+  which is what an I-cache wants.
 
-### F6. OCRAM for the renderer's hot scratch
+### F6. OCRAM for the renderer's hot scratch — ⭐ PROMOTED, with its premise corrected
 
 **Unknown. Hardware-only. Speculative.**
 
-`.ocram` (8 KB at `0x7c001000`) is in the linker script and completely empty.
-The SH-4's operand-cache-RAM mode gives 8 KB of 1-cycle scratch at the price of
-halving D-cache. ⚠️ **Pin the numbers before sizing anything against this
-(2026-08-05): the SH7750 has an 8 KB direct-mapped I-cache and a 16 KB
-D-cache** — so OCRAM's price is halving a **16 KB** D-cache to 8 KB, not a
-32 KB one, and the headroom both F5 and F6 trade against is half what an
-SH-4-generic 16/32 assumption would give. The vertex memo (now 128 slots), 
-`g_gx.current_vertex`, the folded matrix and the per-batch lighting block are
-~2-4 KB together and would fit.
+`.ocram` (8 KB at `0x7c001000`) is in the linker script and completely empty. The
+SH-4's operand-cache-RAM mode gives 8 KB of 1-cycle scratch.
 
-**The interesting near-miss:** the static `emu64_class` instance is ~8,312 B
-(`emu64.c:5437`) — it misses fitting by ~120 bytes. If a future shrink of its
-debug arrays (`dl_history`, `command_info`) got it under 8 KB, the *entire
-interpreter state* could live in 1-cycle scratch, and for `-O0` code that
-reloads `this->field` incessantly that could be the largest cache lever
-available anywhere in this project.
+⚠️ **Pin the numbers before sizing anything against this: the SH7750 has an 8 KB
+direct-mapped I-cache and a 16 KB D-cache.** So OCRAM's price is halving a
+**16 KB** D-cache to 8 KB, not a 32 KB one, and the headroom both F5 and F6 trade
+against is half what an SH-4-generic 16/32 assumption would give.
 
-⚠️ **[2026-08-06] That last sentence's premise is gone, and it cuts F6 down.**
-`emu64.c` is compiled at `-O3` now, so the "reloads `this->field` incessantly"
-behaviour — the entire reason OCRAM looked large here — is exactly what the
-optimizer removes by keeping those fields in registers. F6 is still legal and
-still unmeasured, but **it should be re-ranked downward**, and it must be
-re-argued from the `-O3` disassembly rather than from `-O0` behaviour.
-Evidence: `kb/state-log.md`, 2026-08-06.
+The candidates that fit: the vertex memo (`VMEMO_SLOTS 128`,
+`dc/src/dc_pvr.c:2640` — `s_vmemo_src`, `s_vmemo_tag`, `s_vmemo_vid` and
+`s_vmemo_val`), `g_gx.current_vertex`, the folded matrix, and the per-batch
+lighting block. ⭐ **The memo is precisely the structure the split identified as
+a cache miss**, which is what promotes F6 — but note the vertex-index side
+channel has already removed the *random read into `verts[]`* that made it
+expensive, so F6's remaining target is `s_vmemo_val` itself.
+
+⚠️ **The "entire interpreter state in 1-cycle scratch" idea is DEAD.** It rested
+on the static `emu64_class` instance (~8,312 B) missing 8 KB by ~120 bytes, and
+on `-O0` code reloading `this->field` incessantly. `emu64.c` is compiled at `-O3`
+now, so the reloads are exactly what the optimizer keeps in registers. If F6 is
+revived it must be re-argued from the `-O3` disassembly.
 
 Verify KOS actually enables OC-RAM index mode before spending anything.
 
+### F3. Memo generation counter instead of a per-batch flush
+
+**Low risk. ⚠️ Its cost basis moved twice and it needs re-deriving before coding.**
+
+The vertex memo is invalidated at the top of every `dc_gx_backend_submit()`
+(`dc/src/dc_pvr.c:3213`). But emu64 splits one object into many consecutive
+batches while the folded matrix, lights and TEV constants are often unchanged.
+Hash the per-batch constants and invalidate only when the hash moves.
+
+⚠️ **Two things changed under this idea, and both must be handled:**
+
+1. **The memo no longer hashes vertex content — it keys on a vertex-index stamp**
+   `(epoch << 8) | index` written into `DCGXVertex`'s two dead padding bytes
+   (`-DDC_GX_NO_VTXID`). So F3's saving is no longer "skip a hash"; it is only
+   "keep hits across a batch boundary".
+2. 🔴 **The epoch is load-bearing and it points the other way.** `GXBegin`
+   **merges** batches, and emu64 **reloads `vertices[]` between two TRIN commands
+   in one submit** — the epoch exists so a stale index MISSES. F3 proposes
+   retaining entries across exactly the boundary the epoch was added to
+   invalidate. **Any F3 implementation must show that the constants hash also
+   covers emu64's `vertices[]` reload, or it will produce an exact-looking wrong
+   vertex.** The four "recorded and never consumed" bugs are the cautionary tale
+   — enumerate the constants from `shade_vertex`'s reads and assert in debug.
+
+⚠️ Open, and it decides whether F3 is worth anything: **is the memo at its
+ceiling?** Nothing in the tree counts distinct vertex references per batch,
+although `dc_emu64_cull.cpp`'s `mark[4]` bitset (`:363`) already holds exactly
+the distinct set for every TRIN batch — one `__builtin_popcount` over it against
+`n_faces * 3` answers it directly. **Until that runs, neither "the memo is done"
+nor "there are N points left" may be stated as fact.**
+
+### F4. Temporal predicted cull
+
+**Near-zero risk. ⚠️ Re-cost against G3 before building it.**
+
+Thread batch identity (the source `Vtx` pointer) into `dc_gx`. If
+(identity, matrix hash) was AABB-culled last frame, skip staging and the cull
+entirely. Degrade safely by only skipping when the matrix hash is bit-identical —
+which is exactly when a pop-in could not happen.
+
+⚠️ **G3 took most of this idea's headroom**: the cull now happens at
+`G_TRIN_INDEPEND` entry, before staging, so F4's "skip staging" half is largely
+already collected. What is left is skipping **the cull test itself** on batches
+that were rejected last frame — and `dc_emu64_cull.cpp` has **zero `dc_time_us`
+reads**, so the cost of that test is not measured anywhere. **Add a bracket
+before costing F4.**
+
 ### F7. `FrameCansel` as a frame-budget relief valve
 
-**0 on average FPS; raises `fps_min`. Product-feel call.**
+**0 on average FPS; raises `fps_min`. Product-feel call, not an optimisation.**
 
-`FrameCansel` (`emu64.c:5700`) is a non-static global the dispatch loop tests
-every command, and the game already handles the abort path. A dc/-owned watchdog
-could set it when a traversal exceeds a budget, turning a 185 ms stall into a
-bounded stutter with a partially-drawn frame.
+`FrameCansel` is a non-static global the dispatch loop tests every command, and
+the game already handles the abort path. A `dc/`-owned watchdog could set it when
+a traversal exceeds a budget, turning a long stall into a bounded stutter with a
+partially-drawn frame.
 
 ⚠️ Failure mode: submission order means the late lists (XLU, UI) vanish first,
 which is visually bad. Only viable with a budget well above p90.
 
-### ⚠️ F8 — REOPENED 2026-08-04. The runtime mix does not match the static count.
-
-Static counts say `src/data` carries ~1,400 sync commands total (881 PipeSync,
-372 LoadSync, 139 TileSync) against 42k triangle commands, and
-`dl_G_RDPPIPESYNC` is already a near-empty body — which is why this was ranked
-last.
-
-**F0 now says 73 % of the town's 2,867 commands per frame are state**, and
-`vtx + tri + dl = 773` accounts for all the geometry. A static ratio over
-`src/data` cannot predict the runtime mix, because the runtime mix is dominated
-by which display lists actually execute, not by how many exist. Whatever those
-2,094 commands are, they are ~26 ms of frame.
-
-This is now **the thing G1 exists to name.** Do not build a strip rule against
-the static count; build it against the histogram, and only for opcodes whose
-handler bodies are genuinely no-ops on a PVR backend.
-
----
-
-## The decision gate: interposing on emu64 through its dispatch table
-
-> ## 🔴 [2026-08-06] THE GATE LARGELY DISSOLVED. READ THIS BEFORE THE TABLE.
->
-> **This entire section exists because `src/` was frozen at `-O0` and `dc/` was
-> not.** Every line of it — the `objcopy` trickery, the "honesty flag", the
-> spirit-vs-letter argument, the request for a user sign-off — is downstream of
-> one sentence: *"`src/` stays unedited and stays at `-O0`; `dc/src/` already
-> builds at `-O2`."* **The second half of that sentence is no longer true.**
-> `src/` is `-Os` with a 14-TU `-O3` hot list, and **`emu64.c` is on that hot
-> list** (`dc/opt-lists.mk`).
->
-> **What that does to each row:**
->
-> - **G2 — premise GONE.** G2 was "reimplement `emu64_taskstart_r` in `dc/` at
->   `-O2` so the dispatch loop stops being `-O0`". The compiler now compiles
->   that exact function at `-O3`, in place, with no interposition, no symbol
->   surgery, no dual maintenance and no sign-off. `dc_emu64_shadow.cpp` is
->   built and in the tree; **its measured +0.8 FPS whole-run was taken against
->   an `-O0` emu64 and is not evidence about the current build.** ⚠️ It may now
->   be a net LOSS — a hand-written `-O3` dispatch loop calling `-O3` handlers is
->   no longer obviously better than the `-O3` loop GCC emits, and it costs
->   `.text`, a `#error` conflict with G1, and a 64-slot save/restore per frame.
->   **A/B it against `DC_OPT_PROFILE=perf` with the shadow off before keeping
->   it.** That A/B is a 96-second rebuild.
-> - **G3 — split in two, and only half survives.** G3's "`-O2` shadow handlers"
->   half has the same dead premise as G2. **G3's *cull* half is untouched and is
->   now the whole of G3's value**, because it removes work rather than
->   recompiling it — no optimizer can invent a visibility test. That was already
->   the recommendation ("build the cull half alone", queue item 3); it is now the
->   *only* recommendation.
-> - **G1** was a measurement, it ran, and its findings stand as findings — but
->   its milliseconds are `-O0` and must be re-taken.
-> - **The unnumbered fourth row (`dc_gx_backend_submit`) was always the right
->   answer** and it needed no gate. It still needs no gate; `dc/src` is `-O3`.
->
-> **The general lesson, and it is the expensive one:** this section spent
-> considerable design effort on an elaborate mechanism for running optimised
-> code in place of `src/` — while the direct route, *compile `src/` optimised*,
-> sat behind a `kb/closed.md` entry whose evidence was one unreproduced armhf
-> session. **Check what a ban actually rests on before engineering around it.**
-> Evidence: `kb/closed.md`'s `-O0` post-mortem and `kb/state-log.md`,
-> 2026-08-06.
-
-**This is the user's call, not engineering's, and it must be surfaced rather
-than buried.**
-
-Fact 5 means `dc/` can replace individual emu64 handlers without editing `src/`:
-`objcopy --globalize-symbol` on `emu64.c.o` (a Makefile post-step — layout, not
-codegen) exposes the table, and `objcopy --redefine-sym` can interpose any
-handler. ~~`src/` stays unedited and stays at `-O0`; `dc/src/` already builds at
-`-O2`.~~ **[VOID 2026-08-06 — see the box above.]** Three escalating uses:
-
-⚠️ **RE-COSTED 2026-08-05 against G1's histogram. Both wins shrank, and the
-biggest block in the frame turned out to need no gate at all.**
-
-| | what | est. win | status |
-|---|---|---|---|
-| **G1** | **Per-opcode time histogram.** Wrap every table entry in a timing thunk that calls the original `-O0` handler. | 0 ms, unlocks G2/G3 | ✅ **RUN 2026-08-05.** `TRIN_INDEPEND 22.25/146`, `VTX 5.40/149`, `gap 7.92`. `kb/perf-dc.md` §2b |
-| G2 | **Reimplement the dispatch LOOP only.** `emu64_taskstart_r` (`:5769-5901`) is one self-contained function, paid once per command × ~3,500 commands at `-O0`. A `dc/` `-O2` replacement calls the untouched `-O0` handlers through the same table. | ~~7-14 ms~~ → **2-4 ms** [ESTIMATED], hard cap ~8.3 ms | ✅ signed off 2026-08-04 and BUILT (`dc_emu64_shadow.cpp`); +0.8 FPS whole-run, town not separated out |
-| G3 | **`-O2` shadow handlers for the VTX/TRI path, with a runtime batch AABB cull built in.** | ~~25-35 ms~~ → the cull half is **4.5-7.0 ms** [ESTIMATED]; the `-O2` half sits inside G2's ~8.3 ms cap | ✅ signed off 2026-08-04, unbuilt. **Build the cull half alone** (queue item 3) — that is where the whole win is |
-| — | **`dc_gx_backend_submit`** (`dc/src/dc_pvr.c:2448`) | the block is **12.2 ms = 15.6 % of the draw phase**; the win in it is unmeasured | **no gate — it is `dc/` code already at `-O2`** |
-
-**Why both shrank, in one measurement.** `GXEnd` is live at `emu64.c:4935`, so
-the 152 µs/call charged to `G_TRIN_INDEPEND` already includes
-`dc_gx_flush_vertices` → the AABB cull (~15 µs) and `dc_gx_backend_submit`
-(~81 µs). **Only ~53 µs of it is `src/` at `-O0`** — i.e. 65 % of the "emu64"
-bucket the G-series proposed to attack is code this project owns and compiles at
-`-O2` today. Interposing on emu64's dispatch table buys much less than the
-decision assumed, and item 4 of the table costs nothing politically.
-
-~~**The honesty flag.** G2 and G3 do not violate the letter of the rules —
-`src/` unedited, `src/` still `-O0`, `dc/` already `-O2`, kill switch trivial.
-But they reimplement `src/` logic in optimised `dc/` code, which walks near the
-*spirit* of the `-O0` directive. The distinction from what failed before is
-real: the armhf failures were global `-O1`/`-O2` miscompiles of 3,917 TUs, where
-this is a hand-vetted rewrite of 2-6 functions behind the screenshot and
-regression gates. Real, but not engineering's to decide.~~
-
-🔴 **[MOOT 2026-08-06] There is no `-O0` directive left to walk near the spirit
-of.** The user reversed it. Note also that this paragraph's own defence —
-"the armhf failures were global `-O1`/`-O2` miscompiles of 3,917 TUs" —
-turned out to be the belief that needed auditing, not the premise that could be
-leaned on: the armhf `-O1` SIGBUS was never isolated from
-`-mcpu=cortex-a53 -mfpu=neon-vfpv4`, was never reproduced on SH-4, and was
-attributed to unaligned LDRD/VFP, **which cannot occur on SH-4**. The global
-`-Os` build of all 3,926 TUs walks the whole town with `crashes=0`,
-`ASSERT 0`, `ptdrop 0` and frame-matched screenshots. See `kb/closed.md`'s
-`-O0` post-mortem.
-
-G3's specific technical risk beyond the political one: the decal-Z path in
-`set_position` (`emu64.c:2724-2783`) is genuinely hairy, and divergence there
-would present as z-fighting weeks later. Mitigation is to keep the decal path
-calling the original `-O0` code and shadow only the common path.
-
-⚠️ ~~**G3 is the only idea on this page large enough to reach ~20 FPS in the
-town on its own.**~~ **FALSIFIED 2026-08-05.** That claim rested on the ~48 ms
-`G_VTX` figure, which G1 measured at 5.40 ms. Re-costed, **nothing on this page
-reaches 20 FPS in the town on its own**: G3's cull half is 4.5-7.0 ms and its
-`-O2` half is inside an ~8.3 ms cap, against a 78.3 ms frame. Reaching 20 FPS
-needs several of these together, or content work (`kb/levers.md` L5).
-
-✅ **[2026-08-06] 20 FPS in the town was reached — by none of them.** The town
-is at **20.6 FPS** on a **45.4 ms** `draw`, from `DC_OPT_PROFILE=perf` alone: no
-idea on this page was built to get there. Two things follow. First, every
-estimate above is now denominated in the wrong frame and must be re-costed
-against 45.4 ms, where each one is worth proportionally *more* of the remaining
-budget than it was of 78.3 ms. Second — the honest one — **this page's ranking
-process failed at its stated job**, which is to surface the unbanked idea with
-the best win/(risk×effort). The winner was excluded from consideration by a
-`kb/closed.md` entry nobody re-audited. Evidence: `kb/state-log.md`,
-2026-08-06.
-
----
-
-## What the 3DS port's perf commit does and does not give us
-
-`AnimalCrossing-3ds-Port/ACGC-3ds` commit `cef117e` — "Skip VBlank waits on
-frameskip ticks, add frame pacing, state caching". Read 2026-08-04. Four
-changes, and **the two biggest are already banked here**:
-
-| their change | our status |
-|---|---|
-| `VIWaitForRetrace` discards batched geometry and returns immediately without `gspWaitForVBlank()` on frameskip ticks — "saving ~33 ms per visual frame" | **already done.** `dc_vi.c`'s `g_pc_frameskip_active` branch returns before the swap and before `dc_pace_frame()`, and `vi=0.5 ms` at the median confirms nothing is waiting. |
-| `GXSetZMode`/`GXSetCullMode`/`GXSetAlphaCompare`/`GXSetBlendMode` compare against current state and bail early | **already done** — `dc_gx_state_dedup`, on ~35 setters, and the early-out is correctly placed *before* `dc_gx_flush_if_begin_complete()` so a repeated setter does not break the batch. |
-| `GXBegin` merges consecutive same-state primitives into one batch; `GXEnd` becomes a no-op when clean | ours is **dead** (`merged=0` in every window). Reviving it is worth ~0.4 ms by our own arithmetic — 228 batches x ~330 instructions of per-batch setup — so it is not where the time is. Kept as a known-small item. |
-| **`acre_render` setting: 0 = 9 acres, 1 = 5 acres, 2 = 1 acre** | **the genuinely new idea, and it is out of reach as they implemented it.** They edited `src/actor/ac_field_draw.c`; we may not. But it attacks `cmds`, which IS the dominant predictor (12.31 µs/cmd in the town), so a draw-scope cut is worth more per byte of change than anything in the renderer. F1 is the reachable version of the same idea. |
-
-### The seam that makes an `acre_render`-shaped lever reachable
+### The `aflags` seam — a surface to sweep, not a result
 
 `emu64_set_aflags(int idx, int value)` / `emu64_get_aflags(int idx)` are
 **ordinary extern C functions** (`emu64.c:6048`, declared in
-`include/libforest/emu64.h:13`) — i.e. `dc/` can write emu64's debug flag array
-at runtime with no `src/` edit at all and no interposition trickery.
+`include/libforest/emu64.h:13`) — `dc/` can write emu64's debug flag array at
+runtime with **no `src/` edit and no interposition trickery at all.**
 
 The flag names are in `include/libforest/emu64/emu64.hpp:75+`. Several are
 work-skipping knobs the original developers used: `AFLAGS_SKIP_TEXTURE_CONV`,
@@ -650,54 +222,76 @@ work-skipping knobs the original developers used: `AFLAGS_SKIP_TEXTURE_CONV`,
 `AFLAGS_FORCE_PIPE_SYNC`, `AFLAGS_SKIP_ALPHA_COMPARE`,
 `AFLAGS_SKIP_PROJECTION_TRANSFORM`, `AFLAGS_SKIP_W_CALCULATION`.
 
-⚠️ These are DEBUG knobs, and most of them will break rendering — that is the
-expected outcome, not a surprise. The value here is that **each is a one-line
-build with a real A/B**, so the whole set can be swept cheaply for the one or
-two that skip work the DC backend does not need. `AFLAGS_MAX_POLYGONS` is
-explicitly NOT one of them: it forces emu64's slow one-triangle-at-a-time path
-(`emu64.c:5073`) and would be slower.
+⚠️ These are DEBUG knobs and most will break rendering — that is the expected
+outcome, not a surprise. The value is that **each is a one-line build with a real
+A/B**, so the whole set can be swept cheaply for the one or two that skip work the
+DC backend does not need. `AFLAGS_MAX_POLYGONS` is explicitly NOT one of them: it
+forces emu64's slow one-triangle-at-a-time path and would be slower.
 
-**Unmeasured. This is a surface to sweep, not a result.**
+**Unmeasured.**
 
-## Measurement hygiene, learned the hard way this session
+### The one idea worth taking from the 3DS port
 
-⚠️ **`DC_FB_PROBE` inflates the 1 % lows and I was quoting them.** The
+`AnimalCrossing-3ds-Port/ACGC-3ds` commit `cef117e`. Three of its four changes are
+already banked here (frameskip VBlank skip → `dc_vi.c`'s `g_pc_frameskip_active`
+branch; state-setter dedup → `dc_gx_state_dedup` on ~35 setters, correctly placed
+*before* `dc_gx_flush_if_begin_complete()`; `GXBegin` batch merging → ours is dead
+and worth ~0.4 ms by our own arithmetic). Full comparison of what the upstream PC
+port does and does not give us: `kb/upstream-pc-port.md`.
+
+**The genuinely new one: the `acre_render` setting — 0 = 9 acres, 1 = 5 acres,
+2 = 1 acre.** They edited `src/actor/ac_field_draw.c`; we may not. But it attacks
+the command count, which is the one lever neither the compiler nor a cache can
+take. F1 was the reachable version and is dead on bytes (`kb/closed.md`); the
+`aflags` seam above and content scoping (`kb/levers.md` L5, the user's call) are
+the remaining routes.
+
+---
+
+## Measurement hygiene, learned the hard way
+
+⚠️ **`DC_FB_PROBE` inflates the 1 % lows and they were being quoted.** The
 framebuffer dump costs **1,506 ms**, smeared over the following 30-frame window,
 and lands in the `vi` bucket. In one run it hit 26 of 358 windows and dragged p1
-from **11.56 FPS to 8.50**. A counter-identical pair proves it: same `cmds=2629
-v=2712 draws=90 culled=137 gx=13.0 draw=60.7`, one window at 8.5 FPS with
-`vi=50.6` and two windows later 14.9 FPS with `vi=0.3`.
+from **11.56 FPS to 8.50**. A counter-identical pair proves it: same
+`cmds=2629 v=2712 draws=90 culled=137 gx=13.0 draw=60.7`, one window at 8.5 FPS
+with `vi=50.6` and two windows later 14.9 FPS with `vi=0.3`.
 
 **Build perf runs WITHOUT `DC_FB_PROBE`.** Screenshot runs and perf runs are
-different experiments again — `DC_SCIF_FAST` fixed the *progression* problem, not
-this one.
+different experiments — `DC_SCIF_FAST` fixed the *progression* problem, not this
+one.
 
-Probe-free numbers for the current build, for future comparison:
-`min 10.70, p1 11.56, p5 12.15, p50 24.30, max 29.90` (capped at `fps_target`).
+⚠️ **And `shot_diff.py` cannot gate an optimization change at all**: probes fire
+per presented frame, so a faster build samples a different point in the same
+camera pan. Judge the SCENE, not the pixels.
+
+⚠️ **`us/v` is the instrument; `draw` and FPS are not.** The town reseeds every
+boot (`sys_math.c:7` seeds from `sqrand(osGetCount())`), so two runs of the same
+build draw different towns. `us/v` normalises for vertex COUNT but **not for
+WHICH vertices** — the lit / textured / punch-through mix moves with the town,
+which is where the ±2 % floor comes from.
 
 ## Where the worst frames are
 
-⚠️ **[STALE 2026-08-06] Every figure in this section, and both within-scene
-fits, are `-O0`.** The headline claim "**the town never exceeds 14.9 FPS**" is
-false as of 2026-08-06: matched town windows read **20.6 FPS**. The
-`12.31 µs/cmd` slope in particular is a per-command cost of `-O0` emu64 and is
-quoted in the 3DS-port table above as the justification for attacking `cmds` —
-that argument survives (fewer commands is still the one lever codegen cannot
-take) but its coefficient does not. **Re-fit both regressions at
-`DC_OPT_PROFILE=perf` before quoting a slope.** Evidence: `kb/state-log.md`,
-2026-08-06.
+⚠️ **The absolute FPS figures in this section are `-O0`** — the headline
+"the town never exceeds 14.9 FPS" is long false, and the `12.31 µs/cmd` slope is a
+per-command cost of `-O0` emu64. **Re-fit both regressions before quoting a
+slope.** What is quoted below is kept for its SHAPE, which has held through every
+re-measurement since.
 
-**14 of the 17 worst probe-free windows are scene 9 — the outdoor town.** Scene
-9 probe-free: min 10.7, p1 11.3, p50 14.9, max 14.9. The town never exceeds
-14.9 FPS, and its worst windows are the run's worst. The 1 % lows are not a
-different problem from the median; they are the same wall, deeper.
+**14 of the 17 worst probe-free windows are scene 9 — the outdoor town.** Its
+worst windows are the run's worst. **The 1 % lows are not a different problem
+from the median; they are the same wall, deeper.** This is the reason there is no
+separate "stutter" workstream on the renderer side.
 
-Within-scene fits (r > 0.95):
-- `emu64_ms = 12.31 µs/cmd x cmds + 9.20 ms` in the town. **The 9.20 ms offset is
-  independent of command count and is suspiciously equal to the `posms=9.15`
-  the GX API census measured** — i.e. it may be the per-vertex GX entry points,
-  which are ours and editable. Confirming that is the cheapest high-value
-  experiment on this page after F0.
-- `gx_ms = 4.56 µs/vertex x v + 0.69 ms`. Essentially linear through the origin.
-- `draws` predicts nothing (r ~ 0.0). Batch count is not the cost; commands and
-  lit vertices are.
+Within-scene fits (r > 0.95), coefficients `-O0`, shapes durable:
+
+- `emu64_ms = 12.31 µs/cmd × cmds + 9.20 ms` in the town. **Command count is the
+  dominant predictor** — which is what makes a draw-scope cut worth more per byte
+  of change than anything in the renderer. The 9.20 ms offset is independent of
+  command count and was suspiciously equal to the GX API census's `posms=9.15`;
+  ⚠️ that coincidence was never confirmed, and `kb/perf-dc.md` §4 later showed
+  `posms=` is mostly the probe measuring itself.
+- `gx_ms = 4.56 µs/vertex × v + 0.69 ms`. Essentially linear through the origin.
+- **`draws` predicts nothing (r ≈ 0.0). Batch count is not the cost; commands and
+  lit vertices are.**

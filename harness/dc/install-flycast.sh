@@ -8,7 +8,7 @@
 #
 # Emits JSON on stdout. Exit 0 = a usable Flycast is on this machine.
 #
-# Facts this encodes (kb/design-harness.md §1, all verified on this host):
+# Facts this encodes (harness/dc/README.md, all verified on this host):
 #   * The cask installs /Applications/Flycast.app (v2.6, bundle 392a429e8,
 #     universal x86_64+arm64, ad-hoc signed with NO Team ID).
 #   * Because it is ad-hoc signed the com.apple.quarantine xattr MUST be

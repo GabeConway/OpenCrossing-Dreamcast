@@ -7,7 +7,7 @@
 #
 # Cold build is ~27 min (stage 1 = 24 min toolchain, stage 2 = 2.5 min SDK).
 # Stage 1 is keyed on KOS_SHA + TOOLCHAIN_PROFILE and is cached forever.
-# See kb/design-toolchain.md §5-§6.
+# See kb/toolchain.md-§6.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -34,7 +34,7 @@ bottleneck is CPU (game logic), not GPU (GL time is only 5.4 ms/frame after
 the batching/culling passes).
 
 > ⚠️ **2026-08-06 — the `-O0` half of that anchor no longer describes this
-> port.** `src/` builds at `-Os` with a 14-TU `-O3` hot list; see §3.2, which
+> port.** `src/` builds at `-Os` with a 18-TU `-O3` hot list; see §3.2, which
 > was rewritten. Every estimate in this document that was derived from an
 > `-O0` measurement is stale in the direction of pessimism. Evidence:
 > `kb/state-log.md`, 2026-08-06 entry.
@@ -82,22 +82,26 @@ in dca3 territory. **Fallback:** the 32 MB RAM mod exists and KOS supports
 it, but "stock 16 MB" is the design constraint; the mod must never become a
 requirement (dca3 holds this line, we hold it too).
 
-**Measured 2026-08-01 — the sketch above is aspiration, these are facts:**
+### ✅ SOLVED 2026-08-06. This section is kept for the reasoning, not the numbers.
 
-| | bytes | note |
-|---|---:|---|
-| linked ELF `.text` | 6,318,568 | at `-O0`, all 3917 TUs, zero exclusions — **[STALE 2026-08-06: `.text` is now 2,753,700 at `-Os` + a 14-TU `-O3` hot list]** |
-| linked ELF `.data` | 2,638,852 | |
-| linked ELF `.bss` | 13,526,548 | classification in flight |
-| **total** | **22,483,968** | ends `0x8d581c14`; `_arch_mem_top` = `0x8d000000` |
+**The image fits and the game runs.** The 2026-08-01 link was 22,483,968 B and
+would not boot; the shipping image is **10,364,764 B of span + 2,576,256 B of
+additive heap against a 16,646,144 B limit**, with the whole town, the
+interiors, the winter set, the gyroids and the music in it. The two terms that
+closed it were **`-Os` + a hot list** (−2,826,288 B of `.text`, and the ban on
+it was the largest thing this project got wrong — `kb/closed.md`) and the
+**`DC_ASSET_STUB` + keep-list system** (S1–S3).
 
-It links; it will not boot.
+**What binds now is RESIDENCY, not fit.** 8,813,054 B of asset destination
+arrays can never all be resident, so the keep list still decides what exists.
+And the opposite extreme is closed by a boot, not by arithmetic: a full
+`DC_ASSET_STUB=0` image prints `margin=-781036 OVER` and comes back with all
+14,495 assets MISSING.
 
-**The cut required is ~14.45 MB.** An earlier pass said 6.5 MB; that figure
-only gets the image under `_arch_mem_top` with ~1.2 MB of heap left, which is
-less than the game's first archive mount. Against the ledger's own 7.61 MB
-heap (`dc/include/dc_mem_budget.h` buckets 6–12) plus KOS's ~1 MB, **the image
-budget is 8,035,072 B.** Measure proposals against that, not against 16 MB.
+⚠️ **Every "the cut required is N MB" figure below is void** — there is no cut
+required. The live inequality is `kb/STATE.md`; the ledger of what was spent and
+what is still live is `kb/levers.md`. The paragraphs that follow are kept
+because their *mechanisms* are still correct.
 
 The reason `.bss` is not free: **KOS's `mm_sbrk()` starts at the ELF `end`
 symbol** — no MMU, no lazy commit, so every `.bss` byte destroys a heap byte.
@@ -105,19 +109,11 @@ This single fact is what makes the problem structural rather than cosmetic,
 and it is why compression and debug-stripping are worth exactly zero here
 (`.bss` is `NOBITS`).
 
-⚠️ ~~`-O0` is mandatory throughout.~~ **[VOID 2026-08-06.]** The sentence that
-opened this paragraph was the premise the whole size plan was built on, and it
-is gone: `src/` builds at `-Os` + a 14-TU `-O3` hot list, worth **2,753,264 B
-of `.text`** on its own. `kb/research-size-reduction.md` and everything derived
-from it were commissioned to close the gap *without* that term — they are still
-correct as layout analysis, but their necessity arithmetic is now conservative
-by ~2.75 MB. **Do not re-derive the budget from this paragraph**; the live
-numbers are in `kb/STATE.md` and the reasoning in `kb/state-log.md` 2026-08-06.
-`kb/research-size-reduction.md` ranks the
-codegen-neutral techniques and totals **−14.77 MB against −14.45 MB required:
-it closes on paper with a 2% margin**, which is "closes on paper", not "safe".
-The dominant term is demand-loading `src/data` (−8.45 MB, 57% of the cut);
-nothing else is within a factor of five. Levers measured rather than guessed:
+⚠️ ~~`-O0` is mandatory throughout.~~ **[VOID 2026-08-06.]** That sentence was
+the premise the whole size plan was built on. The codegen-neutral levers
+commissioned to close the gap *without* it are still correct as layout analysis
+(`kb/levers.md`), but they were never the binding term. Levers measured rather
+than guessed:
 
 - **Resident REL blob, −15.68 MB (solved, tool built).** `pc_assets.c` kept
   the decompressed `foresta.rel` + `main.dol` resident = 16,558,776 B.
@@ -140,13 +136,13 @@ nothing else is within a factor of five. Levers measured rather than guessed:
   budget above, not the 22.5 MB.
 
 **Dead ends, verified — do not re-propose** (details in
-`kb/research-size-reduction.md`): `--gc-sections` is already applied and
+`kb/levers.md`): `--gc-sections` is already applied and
 already spent (29,471 discarded sections recover 522,150 B of allocatable RAM
 and that is all there is — GCC does not emit unreferenced `static`s even at
 `-O0`); `--icf` has no SH implementation in gold, `ld.bfd` or `lld`; SH GCC has
 no small-data model, so the KOS script's `.sdata`/`.sbss` are inert; ~~`-mrelax`
 is a codegen change and is disqualified~~ **[premise VOID 2026-08-06 — `-mrelax`
-is now merely UNEVALUATED; `kb/design-shelf-flags.md` §3.2's real objection is
+is now merely UNEVALUATED; `kb/traps.md` §3.2's real objection is
 that it interacts badly with `--gc-sections` during triage]**; stripping debug info and compressing
 `1ST_READ.BIN` each save exactly 0 RAM; AICA's 2 MB is DMA-only over a 16-bit
 25 MHz G2 bus and cannot hold a C array — budget 0 MB of it.
@@ -169,7 +165,7 @@ really 6 MB, the plan is 2 MB short.
 > ## ⭐ **REVISED AGAIN 2026-08-06 — the `-O0` directive is REVERSED.**
 >
 > The 2026-08-01 directive that used to head this section is quoted in the
-> collapsed block below. It is void. `src/` builds at **`-Os` with a 14-TU
+> collapsed block below. It is void. `src/` builds at **`-Os` with a 18-TU
 > `-O3` hot list** (`DC_OPT_PROFILE=perf`, the default; `size` = `-Os`
 > everywhere, the lever for when the image will not fit; `o0` = a
 > byte-identical revert). `dc/src` moved `-O2` → `-O3`. Per-TU lists live in
@@ -270,7 +266,7 @@ really 6 MB, the plan is 2 MB short.
   leaned on `-O0`→`-O2` for ≥2–3× of that; **that term is gone.**
   *(It was not gone. It was worth ~1.8×.)*
 
-**Why this is kept:** two documents — `kb/design-shelf-flags.md` §9 and §3.4 —
+**Why this is kept:** two documents — `kb/traps.md` §9 and §3.4 —
 had already measured the opposite and were overruled by the anecdote above.
 The failure mode to avoid repeating is not "we chose wrong", it is
 **"a measurement was overruled by a story from a different ISA and the
@@ -442,7 +438,7 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 - **Iteration:** build → `mkdcdisc` → **Flycast** headless/windowed (author
   lineage = dca3's skmp; accuracy proven by dca3 itself). GDB: Flycast's GDB
   server (port 3263) for crash triage; lxdream-nitro when MMIO-level truth is
-  needed. Harness: `harness/smoke.sh dc` boots the CDI in Flycast and greps
+  needed. Harness: `harness/dc/smoke.sh` boots the CDI in Flycast and greps
   serial/console output — same discipline as the base repo, no ROM material
   committed.
 - **Hardware phase:** burned CD-R. **Check console revision first:** MIL-CD
@@ -461,34 +457,32 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
   exits 0 on selftest, 1 on crashtest, `crash.sh` symbolises the fault to
   `crashtest.c:39`, `perf.sh` passes in-band and fails on a shifted baseline.*
 - **M1 — it links. ✅ MET 2026-08-01.** *Gate: ELF links; extractor output
-  complete; save-compression numbers in kb.* **3917/3917 TUs compile for
+  complete; save-compression numbers in kb.* **every TU compiles for
   sh-elf** — the gate originally read "`-O2`+guards", was met at `-O0`+guards
   on 2026-08-01, and **as of 2026-08-06 is met in its original form**: the tree
-  builds at `-Os` + a 14-TU `-O3` hot list with the guard set (§3.2). Zero
+  builds at `-Os` + a 18-TU `-O3` hot list with the guard set (§3.2). Zero
   exclusions, and `src/` was not modified:
   every compat fix lives in `dc/include/dc_prelude.h` as a force-include. It
   links and produces a 27 MB unpadded CDI.
-- **M2 — pixels. ← current milestone. ⚠️ RAM IS NO LONGER THE BLOCKER
-  (2026-08-06).** Real headroom is **~2.05 MB** and the image carries the
-  summer acres, the interiors, the winter set and the gyroids. What binds now
-  is **residency** — 8,813,054 B of asset destination arrays can never all be
-  resident, so the keep list decides what exists — and the opposite extreme is
-  closed by experiment: a full `DC_ASSET_STUB=0` image fails a **15,638,528 B
-  contiguous malloc** and loads **nothing** (`kb/closed.md`). Boots to title
-  screen in Flycast on GLdc stage-A renderer; arena shrunk with boot-time
-  memory ledger; assets load from `/cd`. `tev-map.md` written (all 101 configs
-  classified). *Gate: title screen at any fps; RAM ledger ≤ 16 MB true.*
-  ~~**The linked image is 22.5 MB against a 16 MB machine (§3.1) — it will not
-  boot until ~14.45 MB comes out (§3.1 — the image budget is 8,035,072 B, not
-  16 MB), and `-O0` is mandatory. This is the gate.**~~ **[STALE — this
-  paragraph is 2026-08-01 and both halves moved.]** The port boots on retail
-  hardware and walks the town; and `-O0` is not mandatory (§3.2, reversed
-  2026-08-06 — `.text` alone fell 5,506,964 → 2,753,700 B). Current image and
-  heap numbers live in `kb/STATE.md`, not here.
-- **M3 — vertical slice.** Load/create town, walk, enter buildings, talk,
-  save/load on emulated VMU; audio stage A (rspsim @ 22 kHz). **CPU go/no-go
-  gate:** town-frame game logic ≤ 25 ms. *This is the milestone that decides
-  the project.*
+- **M2 — pixels. ✅ MET 2026-08-06.** *Gate: title screen at any fps; RAM
+  ledger ≤ 16 MB true.* Both met, and passed: the port renders through a real
+  PowerVR backend (`dc/src/dc_pvr.c`), boots on retail hardware, and walks the
+  town. The image carries every summer acre plus the interiors, the winter set
+  and the gyroids. `kb/tev-map.md` classifies all 101 TEV configs.
+  ⚠️ **RAM stopped being the blocker on 2026-08-06** — what binds is
+  **residency**: 8,813,054 B of asset destination arrays can never all be
+  resident, so the keep list decides what exists, and the opposite extreme is
+  closed by experiment (a full `DC_ASSET_STUB=0` image fails a 15,638,528 B
+  contiguous malloc and loads nothing, `kb/closed.md`). Current image and heap
+  numbers live in `kb/STATE.md`, not here.
+- **M3 — vertical slice. ← current milestone.** Load/create town, walk, enter
+  buildings, talk, save/load on emulated VMU; audio stage A (rspsim @ 22 kHz).
+  **CPU go/no-go gate:** town-frame game logic ≤ 25 ms. *This is the milestone
+  that decides the project.*
+  Done: walks the town, enters buildings, talks, and **the music plays**.
+  🔴 **Open, and it is the gate: the VMU save path (N2b).** Nothing writes or
+  reads a save, so the town constructs no villagers and the two villager pools
+  cannot be tested at all.
 - **M4 — make it fast.** Stage-B PVR renderer, FTRV T&L, VQ texture cache,
   AICA offload if needed, read-ahead tuning, VMU LCD. *Gate: 30 fps stable in
   town on Flycast; first real-hardware CD-R boot.*
@@ -501,7 +495,7 @@ VMU LCD: town name / bells on the 48×32 screen — free charm, do it at M4.
 
 | Risk | Sev | Mitigation |
 |---|---|---|
-| ~~RAM doesn't fit even after §3.1~~ | ~~**fatal, and now ACTIVE**~~ → **RETIRED 2026-08-06** | It fits, with **~2.05 MB of real headroom**, and the image now carries the interiors, winter and the gyroids on top of every summer acre. `-Os` on `src/` took `.text` from 5,506,964 to 2,753,700 B — the single largest cut the project has landed — and `DC_OPT_PROFILE=size` (flat `-Os`) is still the reserve lever. **The risk that replaces it is RESIDENCY:** 8,813,054 B of destination arrays cannot all be resident, so content is gated by the keep list, and the fix is per-class demand loading (`kb/levers.md` L10 = T1). ⚠️ Read `margin` minus the libc peak, never `margin` (rule 6) |
+| ~~RAM doesn't fit even after §3.1~~ | ~~**fatal, and now ACTIVE**~~ → **RETIRED 2026-08-06** | It fits — **~649 KB of real headroom as re-derived 2026-08-09**, down from the ~2.05 MB this row used to claim because `DC_ARAM_WINDOW` and `DC_AUDIO=1` were both spent afterwards (`kb/STATE.md`) — and the image now carries the interiors, winter and the gyroids on top of every summer acre. `-Os` on `src/` took `.text` from 5,506,964 to 2,753,700 B — the single largest cut the project has landed — and `DC_OPT_PROFILE=size` (flat `-Os`) is still the reserve lever. **The risk that replaces it is RESIDENCY:** 8,813,054 B of destination arrays cannot all be resident, so content is gated by the keep list, and the fix is per-class demand loading (`kb/levers.md` L10 = T1). ⚠️ Read `margin` minus the libc peak, never `margin` (rule 6) |
 | Game logic too slow on SH-4 | fatal | M3 gate. ~~The `-O2` term is **gone** (§3.2)~~ **[2026-08-06: the term is back, measured at ~1.8× on the town frame — 11.6 → 20.6 FPS — which is less than the 2–3× originally assumed and does not by itself close the gap]**. Remaining: 30 fps target, FTRV/XMTRX, store queues, source-level work on profiled hot functions. **Unmeasured on hardware.** |
 | Source-level hot-path rewrites diverge from upstream | med | keep them minimal and upstreamable. (The old rationale "they're reviewable in a way `-O2` is not" is void — the port ships optimized; the divergence risk is now just ordinary fork drift) |
 | Alignment faults (residual class, now with an optimizing compiler) | high | `-fno-store-merging` in `OPT_GUARDS`; exception-handler triage (installed in `dc_main.c`); per-TU quarantine via `DC_OPT_O0_EXTRA` / `tools/dcopt/bisect_o0.sh`; fix at source |

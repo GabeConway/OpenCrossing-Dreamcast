@@ -5,9 +5,10 @@ A native Sega Dreamcast port of Animal Crossing (GameCube), built on the
 [OpenCrossing-Anbernic](https://github.com/GabeConway/OpenCrossing-Anbernic)
 low-end-hardware port.
 
-**Status: M2/M3 in progress — the port walks the town.** All 3917 TUs build and
-link for sh-elf; the image boots on a retail Dreamcast, and in Flycast it
-reaches the town, walks around it, and meets Tom Nook. `kb/STATE.md` carries
+**Status: M2 met, M3 in progress — the port walks the town, with music.** All
+decomp TUs build and link for sh-elf; the image boots on a retail Dreamcast with
+loading at parity with the emulator, and in Flycast it reaches the town, walks
+around it, meets Tom Nook and plays the BGM. `kb/STATE.md` carries
 the current numbers; [PLAN.md](PLAN.md) is the full technical plan and `kb/`
 the research it rests on.
 

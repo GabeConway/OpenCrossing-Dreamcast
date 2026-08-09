@@ -26,7 +26,7 @@ extern "C" {
 
 /* --- Dirty flags: identical bit assignment to pc_gx_internal.h -------------
  * The bit numbers are load-bearing: pc_gx_flush_reason[] is indexed by them
- * and kb/perf.md quotes "breaks: mv=41 %, tex=30 %" against these indices. */
+ * and kb/perf-dc.md quotes "breaks: mv=41 %, tex=30 %" against these indices. */
 #define DC_GX_DIRTY_PROJECTION  (1u << 0)
 #define DC_GX_DIRTY_MODELVIEW   (1u << 1)
 #define DC_GX_DIRTY_TEV_COLORS  (1u << 2)
@@ -60,7 +60,7 @@ void dc_gx_mark_dirty(unsigned int flag);
  *   emu64.c:4954 dl_G_QUADN  n_faces = ((w0 >> 17) & 0x7F) + 1  <= 128, x4 = 512
  *   emu64.c:4814 dl_G_TRIN   same 7-bit field,                  x3 = 384
  *   everything else (G_TRI1/G_TRI2 singles, sprites, rects)     <= 6
- * kb/perf.md §14 measured merged=0 across a whole session, so GXBegin's
+ * kb/perf-dc.md measured merged=0 across a whole session, so GXBegin's
  * batch-merge path never inflates that in practice.
  *
  * 2040 is a ~4x margin over 512. It is deliberately NOT 1024: the G_TRI1/G_TRI2

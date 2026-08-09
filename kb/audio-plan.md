@@ -8,7 +8,7 @@ Written 2026-08-01 (measure pass). Supersedes the sketch in `PLAN.md` §3.4.
 
 **Every CPU number in this document and in all five parts was modelled or
 measured against `src/` compiled at `-O0`, and `src/` is not `-O0` any more.**
-The ban was reversed on 2026-08-06: `src/` builds at `-Os` with a 14-TU `-O3`
+The ban was reversed on 2026-08-06: `src/` builds at `-Os` with an 18-TU `-O3`
 hot list (`DC_OPT_PROFILE=perf`, the default), and `jaudio_NES` — `rspsim.c`,
 `driver.c`, all of it — is `-Os` along with the rest of the tree.
 

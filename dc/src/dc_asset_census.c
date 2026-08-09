@@ -21,7 +21,7 @@
  * host names the exact destination arrays a scene reached for, and — via each
  * symbol's st_size — how many bytes they are. That is the working-set number
  * S4 has to size its pool against, and it is the measurement
- * kb/research-creative-ram.md T1 ("textures are never pooled") needs before
+ * kb/levers.md L10 T1 ("textures are never pooled") needs before
  * the pool's shape can be decided.
  *
  * IT WORKS IN A STUB BUILD, WHICH IS THE POINT. Under DC_ASSET_STUB the

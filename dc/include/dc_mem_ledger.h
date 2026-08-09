@@ -1,6 +1,6 @@
 /* dc_mem_ledger.h - allocation accounting against the 16 MB budget.
  *
- * Design: kb/mem-budget.md §5. Purpose: make the §4 table a runtime object so
+ * Design: kb/mem-budget-m1-sh4.md Purpose: make the §4 table a runtime object so
  * the budget is ENFORCED rather than hoped, and an overrun is a loud greppable
  * failure rather than a mysterious crash three scenes later.
  *

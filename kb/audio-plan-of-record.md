@@ -10,7 +10,7 @@ Read before scheduling audio work or quoting an audio CPU number.
 ## 🛑 0.0 THE STAGE-A-vs-STAGE-B DECISION IS REOPENED (2026-08-06)
 
 **`src/` is no longer `-O0`.** The directive was reversed on 2026-08-06:
-`-Os` everywhere in `src/` plus a 14-TU `-O3` hot list
+`-Os` everywhere in `src/` plus a 18-TU `-O3` hot list
 (`DC_OPT_PROFILE=perf`, default), with `DC_OPT_PROFILE=o0` kept as a
 byte-identical revert. `jaudio_NES` is `-Os` like the rest of the tree.
 

@@ -47,7 +47,7 @@ docker run --rm --platform linux/arm64 \
 
 `--platform linux/arm64` is not optional. Without it an accidental amd64 pull
 drops the whole build into qemu — slow and flaky
-(`kb/design-toolchain.md` §2).
+(`kb/toolchain.md` §2).
 
 ---
 
@@ -61,18 +61,26 @@ drops the whole build into qemu — slow and flaky
 | `make count` | print TU counts |
 | `make sources` | dump the computed source list — use this when debugging the exclusion filters |
 
-`make count` should print **3917 TUs**:
+`make count` prints a per-bucket breakdown, not one total. The number that
+matters is that **nothing is excluded** — a filter break shows up as a drop in
+the decomp buckets, not as a link error.
 
-| | count |
+Measured from `dc/build/objs.rsp` on 2026-08-09, the link holds **3,936
+objects**:
+
+| bucket | count |
 |---|---|
-| decomp `.c` (after the 35 inherited PC filters) | 3854 |
-| decomp `.cpp` | 46 |
-| `src/static/dolphin/pad/Padclamp.c` (added back) | 1 |
-| `pc/src` files reused verbatim | 3 |
-| `dc/src/*.c` | 13 |
+| decomp `src/` compiled directly | 1,662 |
+| decomp `src/` via the `DC_ASSET_STUB` scratch tree | 2,228 |
+| decomp `src/` via the `DC_SRC_SHRINK` scratch tree | 12 |
+| `dc/src/*.c` + `*.cpp` | 25 |
+| vendored sh4zam | 7 |
+| `pc/src` files reused verbatim | 2 |
 
-3854 + 46 = 3900 is exactly the number `kb/design-shelf-hazards.md` §0
-measured as compiling for sh-elf, so a different number means a filter broke.
+⚠️ **The decomp total (3,902 here) moves with the scratch-tree config**, and
+`dc/src` grows as the platform layer does. Compare against a previous build of
+the *same* config; an absolute number quoted from another config means nothing.
+An older figure of **3917** is quoted in several places in the git history.
 
 Parallel and incremental builds both work: `make -j8`, and re-running `make`
 after touching one file rebuilds only what depends on it (GCC `-MMD -MP`
@@ -81,7 +89,7 @@ colima (4 cores), `-j4`:
 
 | | time |
 |---|---|
-| clean `make all` (3917 TUs + link + CDI) | **97 s** |
+| clean `make all` (the whole tree + link + CDI) | **97 s** |
 | `touch include/m_play.h` → `make objs` (2604 TUs) | 78 s |
 | no-op `make objs` | < 2 s |
 
@@ -96,7 +104,7 @@ colima (4 cores), `-j4`:
 | `DC_CDI_PAD` | `0` | `1` → padded 740 MB CDI (see below) |
 | `DC_ASSET_STUB` | `0` | `1` → the throwaway bring-up image (see below) |
 | `DC_BGTEX_DEMAND` | `1` | **R1** — the 27 acre ground textures are read off `/cd/foresta.rel` on demand (`dc/src/dc_bgtex.c`) instead of living in `.bss`. Worth 80,736 B of keep list, and it is what makes the WINTER town's ground render at all: the keep list could only ever afford one season, so `mFM_grd_w_*` was stubbed and December's ground was black. `0` restores the vendored `bcopy` **and** puts the 27 `mFM_grd_*.c` files back on the keep list. One value drives both `tools/dcstub` generators and the `-D`; the generated `m_field_make.c` `#error`s if they disagree |
-| `DC_NPCTEX_POOL` | `1` | **R2** — the 236 villager texture sets (993,984 B) are served out of 16 static slots read off `/cd/foresta.rel` (`dc/src/dc_npctex.c`) instead of living in `.bss`. A town holds at most `ANIMAL_NUM_MAX`=15 villagers + 1 islander, so 16 slots is the provable ceiling; the keep list was paying 90,464 B for the 21 sets a census saw and leaving the other 215 species untextured. ⚠️ The SPECIAL NPCs (rows ≥ `ALL_NPC_NUM` — Tom Nook, Rover, K.K., Porter, the raccoons) are **not** pooled and stay on the keep list. `0` restores those 21 keep-list entries and inserts no calls. One value drives both `tools/dcstub` generators and the `-D`; all three generated TUs `#error` if they disagree |
+| `DC_NPCTEX_POOL` | `0` | **R2** — the 236 villager texture sets (993,984 B) are served out of 16 static slots read off `/cd/foresta.rel` (`dc/src/dc_npctex.c`) instead of living in `.bss`. A town holds at most `ANIMAL_NUM_MAX`=15 villagers + 1 islander, so 16 slots is the provable ceiling; the keep list was paying 90,464 B for the 21 sets a census saw and leaving the other 215 species untextured. ⚠️ The SPECIAL NPCs (rows ≥ `ALL_NPC_NUM` — Tom Nook, Rover, K.K., Porter, the raccoons) are **not** pooled and stay on the keep list. `0` restores those 21 keep-list entries and inserts no calls. One value drives both `tools/dcstub` generators and the `-D`; all three generated TUs `#error` if they disagree |
 | `DC_NPCTEX_SLOTS` | `16` | R2's slot count, 4,832 B of `.bss` each. Raise it only against a `[DC/NPCTEX] POOL FULL` line — that is an event/mask NPC borrowing a villager row, which the 15+1 ceiling does not count |
 | `DC_DISC_ROOT` | unset | a directory whose files go on the disc **flat** |
 | `DC_OPT_PROFILE` | `perf` | `perf` = `-Os` + `-O3` on `dc/opt-lists.mk`'s hot list · `size` = `-Os` everywhere · **`o0` = byte-identical revert to the pre-2026-08-06 build**. See the optimization section below |
@@ -106,7 +114,7 @@ colima (4 cores), `-j4`:
 | `DC_AUTOVAR_INIT` | unset | `zero` → `-ftrivial-auto-var-init=zero`. The A/B for the 99 uninitialised reads the warnscan found |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
 | `DC_ARENA_BYTES` | header | arena size (bucket 6). **Shrink, never grow** — it competes with libc |
-| `DC_ARAM_WINDOW` | header (1,048,576) | resident graph-ARAM window. ⚠️ **With the LRU pager ON this is a CACHE, and its size is a DISC-SEEK knob, not just a RAM knob** — the 851,968 "floor" applies only with `DC_ARAM_LRU=0`. **USE 524288 (measured 2026-08-08).** It had been pinned at 131072 since RAM was the binding constraint; RAM stopped binding on 2026-08-06 and nobody revisited it, so instrument samples and archive streaming were still fighting over four 32 KB blocks. Matched 420 s runs, only the window differing: **disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions 4,173 → 336, cache hits unchanged.** On real hardware each avoided read is an avoided 100-200 ms **seek**, which is what a human hears as laser thrash and as the music repeating. Costs 384 KB (`margin` 4,229,708, no OOM) |
+| `DC_ARAM_WINDOW` | header (1,048,576) | resident graph-ARAM window. ⚠️ **With the LRU pager ON this is a CACHE, and its size is a DISC-SEEK knob, not just a RAM knob** — the 851,968 "floor" applies only with `DC_ARAM_LRU=0`. **USE 1048576** — 524288 was the 2026-08-08 recommendation and a third run superseded it: at 1 MB the same 420 s town run does **106** disc reads and 4.3 MB off disc, against 358 / 12.6 MB at 512 KB. It had been pinned at 131072 since RAM was the binding constraint; RAM stopped binding on 2026-08-06 and nobody revisited it, so instrument samples and archive streaming were still fighting over four 32 KB blocks. Matched 420 s runs, only the window differing: **disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions 4,173 → 336, cache hits unchanged.** On real hardware each avoided read is an avoided 100-200 ms **seek**, which is what a human hears as laser thrash and as the music repeating. Costs 384 KB (`margin` 4,229,708, no OOM) |
 | `DC_DIAG` | `0` | `1` → `PC_DIAG()` bring-up tracing inside `graph_proc` |
 | `DC_FB_PROBE` | unset | `<N>` → guest-side screenshot every N presented frames. Needs `smoke.sh --fb-writeback` to see anything |
 | `DC_ARENA_PROBE` | unset | `<N>` → arena touched/used + libc break every N presented frames |
@@ -353,7 +361,7 @@ a non-stub image with disc content is not.
 
 ## Padded vs unpadded CDI
 
-Measured (`kb/design-toolchain.md` §5.2):
+Measured (`kb/toolchain.md` §5.2):
 
 | | size | time |
 |---|---|---|
@@ -372,7 +380,7 @@ Streaming numbers measured against an unpadded image are optimistic.
 
 ⚠️ **REVERSED 2026-08-06 by user decision.** This section used to say raising
 `DECOMP_OPT` was banned. It is not. Measured on this tree, `-Os` cut `.text`
-by **2,826,288 B** and took the town from **11.6 to 18.5 FPS**; a 14-TU `-O3`
+by **2,826,288 B** and took the town from **11.6 to 18.5 FPS**; an 18-TU `-O3`
 hot list took it to **20.0**. The post-mortem on why the ban stood — armhf
 evidence, never reproduced on SH-4, never isolated from a simultaneous NEON
 change, most likely a link bug — is in `kb/closed.md`.
@@ -391,8 +399,10 @@ DC_OPT_PROFILE=o0   bash dc/build-dc.sh    # THE KILL SWITCH: byte-identical rev
 
 **The two lists live in `dc/opt-lists.mk`**, each entry with its evidence:
 
-* `OPT_HOT_SRC` — 14 TUs at `-O3`. Costs **+48,476 B** of `.text` over flat
-  `-Os` and buys 3.5 ms. It is short on purpose: `emu64.c` is most of the
+* `OPT_HOT_SRC` — 18 TUs at `-O3`. ⚠️ **The +48,476 B / 3.5 ms figure was
+  measured at 14 entries** (2026-08-06); the four jaudio TUs were added the
+  same day to fix a measured stutter and their `.text` cost was never broken
+  out. It is short on purpose: `emu64.c` is most of the
   frame, and **every other `src/` TU shares the ~2.8 ms logic tick**, so a
   perfect 2× on all of them together is worth well under 1 FPS.
 * `OPT_QUARANTINE_SRC` — TUs forced to `-O0` because they are *measured* to
@@ -478,7 +488,7 @@ src/static/boot.c                         -Dmain=boot_main
 UB guards on all decomp code: `-fno-strict-aliasing -fwrapv
 -fno-delete-null-pointer-checks -fno-lifetime-dse
 -fno-aggressive-loop-optimizations -fno-strict-overflow -fno-stack-protector
--fsigned-char`. Each is justified per-flag in `kb/design-shelf-hazards.md`
+-fsigned-char`. Each is justified per-flag in `kb/traps.md`
 §3.1 — with one correction: **`-fno-builtin` is deliberately not used.** §3.1
 calls it "KOS convention (`KOS_CFLAGS`, VERIFIED)", but this image's
 `$KOS_CFLAGS` does not contain it, and it breaks the link: it stops GCC
@@ -567,7 +577,7 @@ past the top of RAM before any heap is touched.
 
 `harness/dc/smoke.sh dc/build/OpenCrossing.cdi` returns `timeout` with **zero
 bytes of console output** — no KOS banner at all. Attributed by experiment
-(`kb/mem-budget.md` §8.7): a KOS hello-world containing nothing but a 21 MB
+(`kb/mem-budget-m1-sh4.md` §8.7): a KOS hello-world containing nothing but a 21 MB
 `.bss` array fails identically at essentially the same image end, while the
 same hello-world with 4.7 MB (end under `_arch_mem_top`) passes in 3.08 s, and
 the harness's own `selftest.cdi` passes in 3.10 s. **The guest never executes
@@ -605,7 +615,7 @@ platform file needs no Makefile edit.
 it to `DC_EXCLUDE_C` / `DC_EXCLUDE_CXX` in `dc/Makefile` with a reason and a
 date — do not hack `src/` in place. Prefer a shim in `dc/include/` over an
 exclusion; every one of the 12 known sh-elf failures
-(`kb/design-shelf-hazards.md` §2) is handled by a shim, not an exclusion.
+(`kb/traps.md` §2) is handled by a shim, not an exclusion.
 
 ---
 
@@ -621,6 +631,6 @@ absolute. Ask for `/work/dc/build/obj/src/foo.c.o`, not a relative path.
 **Crash on hardware / in Flycast** — build keeps `-g` (free at runtime, and the
 ELF never ships on the disc; only `1ST_READ.BIN` does). Feed the reported PC to
 `sh-elf-addr2line -f -e dc/build/AnimalCrossing.elf <pc>`. For alignment faults
-specifically see `kb/design-shelf-hazards.md` §4 — SH-4 traps every misaligned
+specifically see `kb/traps.md` §4 — SH-4 traps every misaligned
 16/32-bit access, a bug class no previous port of this codebase has ever
 exercised.

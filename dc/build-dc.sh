@@ -41,11 +41,11 @@
 #     bash dc/build-dc.sh clean           # rm -rf dc/build
 #
 # The image opencrossing-dc:sdk is built once by dc/build-dc-image.sh; this
-# script never rebuilds it (24 min for stage 1 — see kb/design-toolchain.md §6).
+# script never rebuilds it (24 min for stage 1 — see kb/toolchain.md).
 #
 # --platform linux/arm64 is explicit on purpose: without it an accidental amd64
 # pull would silently drop the whole build into qemu, which is slow AND flaky
-# (kb/design-toolchain.md §2).
+# (kb/toolchain.md).
 # =============================================================================
 set -euo pipefail
 
