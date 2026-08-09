@@ -1,0 +1,393 @@
+# dc/section-order.txt — GNU ld --section-ordering-file (F5, i-cache packing)
+#
+# GENERATED — do not hand-edit. Regenerate with:
+#   docker run --rm --platform linux/arm64 -v $PWD:/work opencrossing-dc:sdk \
+#       bash -c 'sh-elf-nm -S --defined-only /work/dc/build/AnimalCrossing.elf' > /tmp/nm.txt
+#   python3 tools/dcopt/icache_map.py /tmp/nm.txt --emit-order dc/section-order.txt
+#
+# ld ignores '#' comments in an ordering file (verified, sh-elf-ld 2.45.1),
+# and silently ignores a section name that matches nothing — so a stale entry
+# here degrades to a no-op rather than breaking the link.
+#
+# PROVENANCE
+#   generated      : 2026-08-09 (UTC) by tools/dcopt/icache_map.py
+#   nm input       : /private/tmp/claude-501/-Users-gabe-Documents-GitHub-OpenCrossing-Dreamcast/50c51f80-00a9-446c-bd83-f886d8581f56/scratchpad/nm.txt
+#   elf            : dc/build/AnimalCrossing.elf
+#   --hot patterns : ^_emu64_taskstart ^__ZN5emu64 ^_dl_G_ ^_dc_gx_ ^_GX[A-Z] ^_dc_pvr_ ^__ZL10cull_batchP5emu64 ^__ZL7cu_trinPv ^__ZL13cu_trin_indepPv ^_dc_emu64_cull ^_emit_projected$ ^_emit_triangle_raw$ ^_fog_program$ ^_PSMTX ^_C_MTX ^_Nas_ ^_pc_audio_
+#
+# THE NUMBER THIS RESTS ON
+#   icache             : 8192 B, direct-mapped, 32 B lines
+#   sized .text        : 2469026 B (2.35 MB)
+#   hot set            : 336 symbols, 134382 B (131.2 KB) = 16.40x the 8192 B cache
+#   tier 1 (inner loop): 33 symbols, 21424 B = 2.62x the 8192 B cache
+#
+#   ⚠️ The hot set does not fit, so this file cannot remove capacity misses.
+#   It removes CONFLICT misses inside the inner loop by making it contiguous.
+#   ⚠️ Flycast models no instruction cache: this is UNMEASURABLE in the
+#   emulator. dc/src/dc_pmcr.c's istall event on a real burn is the only
+#   instrument (kb/research-fps-ideas.md §F5).
+
+.text : {
+  # ---- tier 0: the startup MUST stay first ----
+  #
+  # _kos_startup.o's plain .text holds `start`, the ELF entry, and the
+  # Dreamcast loader enters 1ST_READ.BIN at its first byte. Anything
+  # hoisted in front of it does not boot. Do not delete this line.
+  *(.text) ;
+
+  # ---- tier 1: the innermost draw loop, in call order ----
+  *(.text._ZN5emu6417emu64_taskstart_rEP3Gfx) ;  # emu64 dispatch loop
+  *(.text.emu64_taskstart) ;  # its C entry
+  *(.text._ZN5emu6418dl_G_TRIN_INDEPENDEv) ;  # TRIN_INDEPEND: 73.7% of the draw
+  *(.text._ZN5emu649dl_G_TRINEv) ;  # the TRIN body
+  *(.text._ZN5emu649dl_G_TRI1Ev) ;  # TRI1
+  *(.text._ZN5emu649dl_G_TRI2Ev) ;  # TRI2
+  *(.text._ZN5emu649dl_G_QUADEv) ;  # QUAD
+  *(.text._ZN5emu6410dl_G_QUADNEv) ;  # QUADN
+  *(.text._ZN5emu648dl_G_VTXEv) ;  # VTX: the other big opcode
+  *(.text._ZL13cu_trin_indepPv) ;  # G3's TRIN-entry cull trampoline
+  *(.text._ZL7cu_trinPv) ;  # G3's TRIN cull trampoline
+  *(.text._ZL10cull_batchP5emu64) ;  # G3's AABB cull proper
+  *(.text._ZN5emu6412set_positionEj) ;  # per-vertex transform entry
+  *(.text.GXBegin) ;  # batch open
+  *(.text.GXPosition3f32) ;  # per-vertex setters, hottest first
+  *(.text.GXPosition2f32) ;
+  *(.text.GXPosition2u16) ;
+  *(.text.GXNormal3f32) ;
+  *(.text.GXColor4u8) ;
+  *(.text.GXColor1u32) ;
+  *(.text.GXTexCoord2f32) ;
+  *(.text.GXTexCoord2s16) ;
+  *(.text.GXTexCoord2u8) ;
+  *(.text.dc_gx_commit_vertex) ;  # dc_gx's per-vertex commit
+  # (no match: ^_dc_gx_flush_if_begin_complete$)
+  *(.text.dc_gx_flush_vertices) ;
+  # (no match: ^_dc_gx_mark_dirty$)
+  *(.text.dc_gx_vtxid_arm) ;  # G-B's vertex-index side channel
+  *(.text.dc_gx_vtxid_disarm) ;
+  *(.text.GXEnd) ;  # batch close
+  *(.text.dc_gx_aabb_is_offscreen) ;  # the late cull GXEnd still runs
+  *(.text.dc_gx_backend_submit) ;  # the PVR backend's vertex loop
+  *(.text.emit_projected) ;
+  *(.text.emit_triangle_raw) ;
+  *(.text.fog_program) ;
+
+  # ---- tier 2: the rest of the hot set, grouped by --hot pattern ----
+  # ^__ZN5emu64
+  *(.text._ZN5emu6411dl_G_SPNOOPEv) ;
+  *(.text._ZN5emu6414dl_G_RDPHALF_1Ev) ;
+  *(.text._ZN5emu6410dl_G_ENDDLEv) ;
+  *(.text._ZN5emu6413dl_G_LOADTILEEv) ;
+  *(.text._ZN5emu6414dl_G_LOADBLOCKEv) ;
+  *(.text._ZN5emu6416dl_G_SETTILESIZEEv) ;
+  *(.text._ZN5emu6419dl_G_SETOTHERMODE_HEv) ;
+  *(.text._ZN5emu6420dl_G_RDPSETOTHERMODEEv) ;
+  *(.text._ZN5emu6412dl_G_SETCIMGEv) ;
+  *(.text._ZN5emu6412dl_G_SETZIMGEv) ;
+  *(.text._ZN5emu6416dl_G_SETENVCOLOREv) ;
+  *(.text._ZN5emu6418dl_G_SETBLENDCOLOREv) ;
+  *(.text._ZN5emu6416dl_G_SETFOGCOLOREv) ;
+  *(.text._ZN5emu6417dl_G_SETFILLCOLOREv) ;
+  *(.text._ZN5emu6420dl_G_SETTEXEDGEALPHAEv) ;
+  *(.text._ZN5emu6417dl_G_SETPRIMDEPTHEv) ;
+  *(.text._ZN5emu6417dl_G_SETPRIMCOLOREv) ;
+  *(.text._ZN5emu6416dl_G_RDPFULLSYNCEv) ;
+  *(.text._ZN5emu6416dl_G_RDPPIPESYNCEv) ;
+  *(.text._ZN5emu6416dl_G_RDPTILESYNCEv) ;
+  *(.text._ZN5emu6416dl_G_RDPLOADSYNCEv) ;
+  *(.text._ZN5emu6412dl_G_TEXTUREEv) ;
+  *(.text._ZN5emu6411dl_G_POPMTXEv) ;
+  *(.text._ZN5emu6414dl_G_SPECIAL_1Ev) ;
+  *(.text._ZN5emu6412dl_G_SETTILEEv) ;
+  *(.text._ZN5emu6420dl_G_SETTILE_DOLPHINEv) ;
+  *(.text._ZN5emu6415dl_G_SETSCISSOREv) ;
+  *(.text._ZN5emu649dl_G_NOOPEv) ;
+  *(.text._ZN5emu6411combine_tevEv.part.0) ;
+  *(.text._ZN5emu6411dl_G_CULLDLEv) ;
+  *(.text._ZN5emu6412dl_G_SETTIMGEv) ;
+  *(.text._ZN5emu646seg2k0Em) ;
+  *(.text._ZN5emu6414dl_G_MODIFYVTXEv) ;
+  *(.text._ZN5emu6411dl_G_LINE3DEv) ;
+  *(.text._ZN5emu6413dl_G_BRANCH_ZEv) ;
+  *(.text._ZN5emu6413dl_G_MOVEWORDEv) ;
+  *(.text._ZN5emu6412dl_G_MOVEMEMEv) ;
+  *(.text._ZN5emu6415dl_G_LOAD_UCODEEv) ;
+  *(.text._ZN5emu6419dl_G_SETCOMBINE_TEVEv) ;
+  *(.text._ZN5emu648dl_G_MTXEv) ;
+  *(.text._ZN5emu6417dl_G_GEOMETRYMODEEv) ;
+  *(.text._ZN5emu646segchkEm) ;
+  *(.text._ZN5emu647dl_G_DLEv) ;
+  *(.text._ZN5emu6411show_renderEm) ;
+  *(.text._ZN5emu6419dl_G_SETOTHERMODE_LEv) ;
+  *(.text._ZN5emu648show_vtxEP3Vtxii) ;
+  *(.text._ZN5emu6413print_combineEy) ;
+  *(.text._ZN5emu6421dl_G_SETCOMBINE_NOTEVEv) ;
+  *(.text._ZN5emu6410emu64_initEv) ;
+  *(.text._ZN5emu6412texconv_tileEPhS0_jjjjjjjj) ;
+  *(.text._ZN5emu6416texconv_tile_newEPhjjjjjjjj) ;
+  *(.text._ZN5emu6418setup_texture_tileEi.part.0) ;
+  *(.text._ZN5emu6412tlutconv_newEPtjj) ;
+  *(.text._ZN5emu6413dl_G_LOADTLUTEv) ;
+  *(.text._ZN5emu6422replace_combine_to_tevEP3Gfx) ;
+  *(.text._ZN5emu6415dl_G_SETCOMBINEEv) ;
+  *(.text._ZN5emu6412combine_autoEv) ;
+  *(.text._ZN5emu6414combine_manualEv) ;
+  *(.text._ZN5emu647combineEv) ;
+  *(.text._ZN5emu6410blend_modeEv) ;
+  *(.text._ZN5emu645zmodeEv) ;
+  *(.text._ZN5emu6411texture_genEi) ;
+  *(.text._ZN5emu6421setup_1tri_2tri_1quadEj) ;
+  *(.text._ZN5emu6420draw_1tri_2tri_1quadEjz) ;
+  *(.text._ZN5emu6414fill_rectangleEffff) ;
+  *(.text._ZN5emu6414draw_rectangleEP9Gtexrect2) ;
+  *(.text._ZN5emu6411dirty_checkEiii) ;
+  *(.text._ZN5emu6412dl_G_TEXRECTEv) ;
+  *(.text._ZN5emu6413dl_G_FILLRECTEv) ;
+  # ^_dc_gx_
+  *(.text.dc_gx_frame_timing_snapshot) ;
+  *(.text.dc_gx_init) ;
+  *(.text.dc_gx_backend_start) ;
+  *(.text.dc_gx_shutdown) ;
+  *(.text.dc_gx_end_frame) ;
+  *(.text.dc_gx_backend_init) ;
+  *(.text.dc_gx_backend_shutdown) ;
+  *(.text.dc_gx_backend_frame_begin) ;
+  *(.text.dc_gx_backend_frame_end) ;
+  *(.text.dc_gx_backend_set_viewport) ;
+  *(.text.dc_gx_backend_set_scissor) ;
+  *(.text.dc_gx_backend_texture_upload) ;
+  # ^_GX[A-Z]
+  *(.text.GXSetTevColorIn.part.0) ;
+  *(.text.GXSetTevAlphaIn.part.0) ;
+  *(.text.GXSetVtxDesc) ;
+  *(.text.GXClearVtxDesc) ;
+  *(.text.GXSetVtxAttrFmt) ;
+  *(.text.GXInvalidateVtxCache) ;
+  *(.text.GXSetProjection) ;
+  *(.text.GXLoadPosMtxImm) ;
+  *(.text.GXLoadNrmMtxImm) ;
+  *(.text.GXLoadTexMtxImm) ;
+  *(.text.GXSetCurrentMtx) ;
+  *(.text.GXSetViewport) ;
+  *(.text.GXSetScissor) ;
+  *(.text.GXSetScissorBoxOffset) ;
+  *(.text.GXSetClipMode) ;
+  *(.text.GXSetNumTevStages) ;
+  *(.text.GXSetTevOp) ;
+  *(.text.GXSetTevColorIn) ;
+  *(.text.GXSetTevAlphaIn) ;
+  *(.text.GXSetTevColorOp) ;
+  *(.text.GXSetTevAlphaOp) ;
+  *(.text.GXSetTevOrder) ;
+  *(.text.GXSetTevColor) ;
+  *(.text.GXSetTevKColorSel) ;
+  *(.text.GXSetTevKAlphaSel) ;
+  *(.text.GXSetTevSwapMode) ;
+  *(.text.GXSetTevSwapModeTable) ;
+  *(.text.GXSetAlphaCompare) ;
+  *(.text.GXSetBlendMode) ;
+  *(.text.GXSetZMode) ;
+  *(.text.GXSetColorUpdate) ;
+  *(.text.GXSetAlphaUpdate) ;
+  *(.text.GXSetZCompLoc) ;
+  *(.text.GXSetDither) ;
+  *(.text.GXSetDstAlpha) ;
+  *(.text.GXSetFieldMask) ;
+  *(.text.GXSetFieldMode) ;
+  *(.text.GXSetPixelFmt) ;
+  *(.text.GXSetCullMode) ;
+  *(.text.GXSetCoPlanar) ;
+  *(.text.GXSetFog) ;
+  *(.text.GXSetFogRangeAdj) ;
+  *(.text.GXSetNumChans) ;
+  *(.text.GXSetChanCtrl) ;
+  *(.text.GXSetChanAmbColor) ;
+  *(.text.GXSetChanMatColor) ;
+  *(.text.GXInitLightPos) ;
+  *(.text.GXInitLightDir) ;
+  *(.text.GXInitLightColor) ;
+  *(.text.GXInitLightAttn) ;
+  *(.text.GXLoadLightObjImm) ;
+  *(.text.GXSetNumTexGens) ;
+  *(.text.GXSetTexCoordGen2) ;
+  *(.text.GXSetLineWidth) ;
+  *(.text.GXSetPointSize) ;
+  *(.text.GXEnableTexOffsets) ;
+  *(.text.GXSetCopyClear) ;
+  *(.text.GXCopyDisp) ;
+  *(.text.GXSetDispCopyGamma) ;
+  *(.text.GXSetDispCopySrc) ;
+  *(.text.GXSetDispCopyDst) ;
+  *(.text.GXSetDispCopyYScale) ;
+  *(.text.GXSetCopyFilter) ;
+  *(.text.GXSetTexCopySrc) ;
+  *(.text.GXSetTexCopyDst) ;
+  *(.text.GXCopyTex) ;
+  *(.text.GXSetCopyClamp) ;
+  *(.text.GXInit) ;
+  *(.text.GXFlush) ;
+  *(.text.GXAbortFrame) ;
+  *(.text.GXSetDrawDone) ;
+  *(.text.GXDrawDone) ;
+  *(.text.GXPixModeSync) ;
+  *(.text.GXSetDrawDoneCallback) ;
+  *(.text.GXInitFifoBase) ;
+  *(.text.GXInitFifoPtrs) ;
+  *(.text.GXSaveCPUFifo) ;
+  *(.text.GXGetGPStatus) ;
+  *(.text.GXSetCurrentGXThread) ;
+  *(.text.GXBeginDisplayList) ;
+  *(.text.GXEndDisplayList) ;
+  *(.text.GXCallDisplayList) ;
+  *(.text.GXSetTevDirect) ;
+  *(.text.GXSetNumIndStages) ;
+  *(.text.GXSetIndTexCoordScale) ;
+  *(.text.GXSetZTexture) ;
+  *(.text.GXReadXfRasMetric) ;
+  *(.text.GXInitTexObj) ;
+  *(.text.GXInitTexObjCI) ;
+  *(.text.GXInitTexObjLOD) ;
+  *(.text.GXInvalidateTexAll) ;
+  *(.text.GXInitTlutObj) ;
+  *(.text.GXLoadTlut) ;
+  *(.text.GXLoadTexObj) ;
+  # ^_dc_pvr_
+  *(.text.dc_pvr_report) ;
+  *(.text.dc_pvr_fb_dump_surface) ;
+  *(.text.dc_pvr_texture_init) ;
+  *(.text.dc_pvr_texture_shutdown) ;
+  *(.text.dc_pvr_texture_report) ;
+  *(.text.dc_pvr_tex_aprof) ;
+  *(.text.dc_pvr_tex_get) ;
+  # ^_dc_emu64_cull
+  *(.text.dc_emu64_cull_init) ;
+  *(.text.dc_emu64_cull_frame_open) ;
+  *(.text.dc_emu64_cull_report) ;
+  # ^_PSMTX
+  *(.text.PSMTXIdentity) ;
+  *(.text.PSMTXCopy) ;
+  *(.text.PSMTXConcat) ;
+  *(.text.PSMTXInverse) ;
+  *(.text.PSMTXMultVec) ;
+  *(.text.PSMTXScale) ;
+  *(.text.PSMTXTrans) ;
+  # ^_C_MTX
+  *(.text.C_MTXOrtho) ;
+  *(.text.C_MTXLightOrtho) ;
+  # ^_Nas_
+  *(.text.Nas_AddListHead) ;
+  *(.text.Nas_StartVoice) ;
+  *(.text.Nas_StopVoice) ;
+  *(.text.Nas_InitChNode) ;
+  *(.text.Nas_InitChannelList) ;
+  *(.text.Nas_CutList) ;
+  *(.text.Nas_Release_Channel) ;
+  *(.text.Nas_Release_Channel_Force) ;
+  *(.text.Nas_DeAllocAllVoices) ;
+  *(.text.Nas_AllocVoices) ;
+  *(.text.Nas_EntryTrack) ;
+  *(.text.Nas_UpdateChannel) ;
+  *(.text.Nas_AllocationOnRequest) ;
+  *(.text.Nas_ChannelInit) ;
+  *(.text.Nas_LoadAux2nd) ;
+  *(.text.Nas_SaveBufferAuto) ;
+  *(.text.Nas_SaveAuxBuffer) ;
+  *(.text.Nas_DolbySurround) ;
+  *(.text.Nas_Synth_Envelope) ;
+  *(.text.Nas_Synth_Delay) ;
+  *(.text.Nas_SynthMain) ;
+  *(.text.Nas_DriveRsp) ;
+  *(.text.Nas_smzAudioFrame) ;
+  *(.text.Nas_MainCtrl) ;
+  *(.text.Nas_ChannelModulation) ;
+  *(.text.Nas_ChannelModInit) ;
+  *(.text.Nas_SweepInit) ;
+  *(.text.Nas_EnvInit) ;
+  *(.text.Nas_EnvProcess) ;
+  *(.text.Nas_ResetIDtable) ;
+  *(.text.Nas_ForceStopChannel) ;
+  *(.text.Nas_ForceStopSeq) ;
+  *(.text.Nas_CacheOff) ;
+  *(.text.Nas_HeapAlloc) ;
+  *(.text.Nas_2ndHeapAlloc) ;
+  *(.text.Nas_NcHeapAlloc) ;
+  *(.text.Nas_HeapAlloc_CL) ;
+  *(.text.Nas_2ndHeapAlloc_CL) ;
+  *(.text.Nas_NcHeapAlloc_CL) ;
+  *(.text.Nas_HeapInit) ;
+  *(.text.Nas_SzAutoClear) ;
+  *(.text.Nas_SzHeapReset) ;
+  *(.text.Nas_SzHeapDivide) ;
+  *(.text.Nas_SzDataDivide) ;
+  *(.text.Nas_SzStayDivide) ;
+  *(.text.Nas_SzAutoDivide) ;
+  *(.text.Nas_SetLPFilter) ;
+  *(.text.Nas_SetBPFilter) ;
+  *(.text.Nas_SzCacheCheck) ;
+  *(.text.Nas_Init_Single) ;
+  *(.text.Nas_Alloc_Single) ;
+  *(.text.Nas_SzStayDelete) ;
+  *(.text.Nas_SzHeapAlloc) ;
+  *(.text.Nas_SetDelayLine) ;
+  *(.text.Nas_SpecChange) ;
+  *(.text.Nas_SetDelayLineParam) ;
+  *(.text.Nas_InitGAudio) ;
+  *(.text.Nas_GetSyncDummy) ;
+  *(.text.Nas_MapHeaderReadByte) ;
+  *(.text.Nas_WaveDmaFrameWork) ;
+  *(.text.Nas_WaveDmaCallBack) ;
+  *(.text.Nas_WaveDmaNew) ;
+  *(.text.Nas_CheckIDbank) ;
+  *(.text.Nas_CheckIDseq) ;
+  *(.text.Nas_WriteIDbank) ;
+  *(.text.Nas_WriteIDseq) ;
+  *(.text.Nas_PreLoad_BG) ;
+  *(.text.Nas_PreLoadSeq_BG) ;
+  *(.text.Nas_PreLoadWave_BG) ;
+  *(.text.Nas_PreLoadBank_BG) ;
+  *(.text.Nas_FlushBank) ;
+  *(.text.Nas_SetExtPointer) ;
+  *(.text.Nas_FastCopy) ;
+  *(.text.Nas_LoadVoice) ;
+  *(.text.Nas_InitAudio) ;
+  *(.text.Nas_BgCopyInit) ;
+  *(.text.Nas_BankOfsToAddr) ;
+  *(.text.Nas_StartMySeq) ;
+  *(.text.Nas_StartSeq_Skip) ;
+  *(.text.Nas_BgCopyMain) ;
+  *(.text.Nas_PreLoadBank) ;
+  *(.text.Nas_PreLoadSeq) ;
+  *(.text.Nas_CheckBgWave) ;
+  *(.text.Nas_BgDmaFrameWork) ;
+  *(.text.Nas_ReadWordData) ;
+  *(.text.Nas_ReadLengthData) ;
+  *(.text.Nas_PriorityChanger) ;
+  *(.text.Nas_InitSubTrack) ;
+  *(.text.Nas_ReleaseNoteTrack) ;
+  *(.text.Nas_AddList) ;
+  *(.text.Nas_CloseNoteTrack) ;
+  *(.text.Nas_ReleaseSubTrack) ;
+  *(.text.Nas_ReleaseGroup) ;
+  *(.text.Nas_ReleaseGroup_Force) ;
+  *(.text.Nas_OpenSub) ;
+  *(.text.Nas_GetList) ;
+  *(.text.Nas_EntryNoteTrack) ;
+  *(.text.Nas_GroupSeq) ;
+  *(.text.Nas_MySeqMain) ;
+  *(.text.Nas_SeqSkip) ;
+  *(.text.Nas_InitMySeq) ;
+  *(.text.Nas_AssignSubTrack) ;
+  *(.text.Nas_InitPlayer) ;
+  # ^_pc_audio_
+  *(.text.pc_audio_process_frame) ;
+  *(.text.pc_audio_mq_init) ;
+  *(.text.pc_audio_mq_shutdown) ;
+  *(.text.pc_audio_shutdown) ;
+  *(.text.pc_audio_start_producer_thread) ;
+  *(.text.pc_audio_update_volumes) ;
+
+  # ---- tier 3: everything else is DELIBERATELY NOT NAMED ----
+  # ld leaves unnamed input sections in their default order behind the
+  # named ones, so the rest of .text is untouched. Verified on a toy
+  # link with sh-elf-ld 2.45.1; the whole design rests on it.
+}

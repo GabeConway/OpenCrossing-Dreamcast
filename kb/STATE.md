@@ -5,9 +5,9 @@ and the measurement rules are `kb/RESUME.md`; the evidence and the narrative for
 every figure here are `kb/state-log.md`, newest first. If a section here starts
 growing a history, that history belongs in the log.
 
-Last flush: **2026-08-09 (session 13)**. Audited 2026-08-09 — every number below
-was re-derived or re-sourced; the pre-session-9 material that used to sit in this
-file is in `kb/state-log.md`.
+Last flush: **2026-08-09 (session 14, batch S14)**. Audited 2026-08-09 — every
+number below was re-derived or re-sourced; the pre-session-9 material that used
+to sit in this file is in `kb/state-log.md`.
 
 ---
 
@@ -62,10 +62,27 @@ different probe set. It is the number to quote for "how does it play".
 
 ### The trajectory, for context
 
-| | 2026-08-06 | session 11b | session 12 | **session 13** |
-|---|---:|---:|---:|---:|
-| `us/v` | 3.06 | 3.24 | 2.65 | **2.51** |
-| `xform` ms | 8.8 | 8.9 | 7.2 | **6.9** |
+| | 2026-08-06 | session 11b | session 12 | session 13 | **session 14 (S14)** |
+|---|---:|---:|---:|---:|---:|
+| `us/v` | 3.06 | 3.24 | 2.65 | 2.51 | **2.48** |
+| `xform` ms | 8.8 | 8.9 | 7.2 | 6.9 | **7.0** |
+
+⚠️ **S14 is a WASH in Flycast and that was predicted** — four of its eight
+changes pay in cache misses and Flycast models no cache. −1.2 % on `us/v` is
+inside the ±2 % floor. **Do not read the 2.51 → 2.48 column as a result in
+either direction; the batch's verdict is a burn.** `kb/batch-s14.md` §2a.
+
+### Where G3's cull time actually goes — measured 2026-08-09, first time ever
+
+| bucket | wraps | ms/frame | share |
+|---|---|---:|---:|
+| `cus=` | all of `cull_batch()` | 3.05 | 100 % |
+| **`cds=`** | emu64's `dirty_check` + `setup_1tri_2tri_1quad` | **2.23** | **73 %** |
+| **`fus=`** | `dc_gx_aabb_is_offscreen()` — the frustum test | **0.139** | **4.5 %** |
+
+⭐ **The frustum test is under 0.5 % of the frame. G-F is retired in both
+shapes.** The cost is emu64 state work G3 must trigger to get a live matrix.
+Ranked action 2.
 
 ---
 
@@ -76,8 +93,13 @@ arithmetic. The memory-shaped stages (`memo 1.20 + emit 1.40 + shade 1.82`) are
 **4.42 ms — 70 % of the 6.31 ms the split accounts for**; the two
 floating-point stages (`lit 0.54 + xf 0.22`) are **0.76 ms of a ~29 ms frame,
 2.6 %.** Corroborated from the other end by
-`tools/dcopt/icache_map.py`: the 12-symbol inner draw loop is **1.4×** an 8 KB
-direct-mapped icache, and the whole frame's hot set is **11.9×** it.
+`tools/dcopt/icache_map.py`: the inner draw loop is **2.62×** an 8 KB
+direct-mapped icache, and the whole frame's hot set is **16.40×** it.
+⚠️ **The 1.4× / 11.9× pair quoted here until 2026-08-09 is FALSIFIED** — the
+tool's hot-set regexes missed every emu64 handler, because emu64 is C++ and they
+are all mangled (`.text._ZN5emu64*` = 105 sections in the map, `.text.dl_G_*` =
+0). The interpreter was absent from the measurement of its own cache pressure.
+`kb/batch-s14.md` §5.
 
 **Consequence: every matrix-unit / FTRV / FIPR idea is aimed at ~2.6 % of the
 frame.** `kb/research-sh4zam-gap.md` is ranked around this.
@@ -134,30 +156,45 @@ contiguous malloc, and comes back with all 14,495 assets MISSING
 
 ## Ranked next actions
 
-1. ⭐ **The decal-Z arming lift — WRITTEN, GATE PASSED, PERF NOT MEASURED.**
-   `-DDC_GX_VTXID_DECAL`, **default OFF**. Decal-Z is 58 % of `dc_emu64_cull`'s
-   punts (`pdec=900` of `punt=1560`); arming needs only "same index ⇒
-   byte-identical staged vertex in this submit", which decal-Z meets and
-   `G_TEXTURE_GEN` / mixed `MTX_NONSHARED` do not. Gate with it ON:
-   `vidchk=15,835,845 vidbad=0 over=0`; reach `vid=1800/61920 → 2670/72810`
-   (+48 % batches, +18 % refs).
-   ⚠️ Refs only +18 % because decal batches are small, so the expected `us/v`
-   effect sits **at** the ±2 % noise floor — it needs 2-3 runs per arm
-   (rule 11), not one pair.
-   ⚠️ `-DDC_EMU64_CULL_VERIFY` **cannot** certify it (a decal batch never
-   culls); `-DDC_GX_VTXID_VERIFY` is the gate.
-2. 🔴 **The full indexed-submit rewrite — the 13.31 ms block.** Transform each
+⭐ **2026-08-09 — batch S14 landed eight changes, all ON by default, each with a
+kill switch: `kb/batch-s14.md` (the rollback contract).** It collected the old
+item 1 (decal-Z arming), G-J's unlit-`GXNormal` skip, G-F's cheap shape
+(Gribb-Hartmann), F5 (linker section ordering), and three cache-layout /
+store-removal fixes in `dc_pvr.c`. ⚠️ **Part of it — F5 above all — is
+UNMEASURABLE in Flycast by construction, so item 3 below is now load-bearing
+rather than optional.**
+
+1. 🔴 **The full indexed-submit rewrite — the 13.31 ms block.** Transform each
    unique vertex once, index into it, delete the setters. Unstarted,
    multi-session, and still the largest single block in the project.
-   `kb/research-sh4zam-gap.md` G-B.
-3. **The hardware PMCR burn** — `AC-DC-20260808g-pmcr.cdi`, built and unburned.
-   Every number in this file is a Flycast floor and **Flycast structurally
-   cannot answer the hardware gap**: it implements no PMCR (all 8 events read 0)
-   and models no instruction cache. The three numbers to photograph off the TV
-   are `cyc`, `istall`, `dstall`. `kb/RESUME.md`.
-4. **The G3 screenshot pair** (`DC_EMU64_CULL=0` vs `=1`). The VERIFY gate is
-   the stronger instrument and it passed, but measurement rule 2 is not formally
-   satisfied.
+   `kb/research-sh4zam-gap.md` G-B. ⚠️ S14 deliberately did **not** touch it —
+   a multi-session rewrite inside a bundled A/B tells you nothing about the
+   other seven changes.
+2. 🔴 **`cds=` — 2.2 ms/frame of emu64 state work inside G3's cull, and NOBODY
+   HAS EVER COSTED IT.** Found 2026-08-09 by S14-8's split bracket:
+   `cull_batch()` is 3.05 ms/frame, of which the frustum test is **0.139** and
+   emu64's `dirty_check` + `setup_1tri_2tri_1quad` are **2.23 (73 %)**. They are
+   there because the frustum test reads `g_gx.projection_mtx` and
+   `g_gx.current_mtx` **live**, so G3 must make emu64 refresh them before it can
+   test anything — and in a typical window only **175 of 2,572** TRIN batches
+   are culled, so ~93 % of that cost is on batches whose original handler then
+   calls the same two functions again. The in-file comment asserts the second
+   call is "idempotent"; **idempotent is not cheap and it has never been
+   measured.** Measure the handler's second call first, then decide whether the
+   ordering rule can be satisfied without a full `dirty_check`.
+   ⭐ **This retired G-F entirely** — see `kb/research-sh4zam-gap.md`.
+3. 🔴 **The S14 PMCR burn.** Was "the hardware PMCR burn"
+   (`AC-DC-20260808g-pmcr.cdi`); rebuild it on the S14 tree instead, because
+   **F5 has no verdict at all without it**. Every number in this file is a
+   Flycast floor and **Flycast structurally cannot answer the hardware gap**: it
+   implements no PMCR (all 8 events read 0) and models no cache of either kind.
+   The three numbers to photograph off the TV are `cyc`, `istall`, `dstall` —
+   and `istall` is what prices F5. `kb/RESUME.md` §6 carries the burn's traps
+   (`DC_CONSOLE_MUTE=1` is not optional; muting at `main()` stops the boot).
+4. **Screenshot pairs still owed** — for G3 (`DC_EMU64_CULL=0` vs `=1`) and now
+   for S14-4 / S14-5, the two S14 changes that can alter what is drawn. Their
+   VERIFY gates are the stronger instrument, but measurement rule 2 is not
+   formally satisfied by a counter.
 5. **TEV P3 / `oargb`** — in the tree since session 7, compile-verified, still
    never run. `-DDC_PVR_TEVP3`. Fixes the black name-entry keyboard and 27 of
    the 101 TEV configs. Free falsification: `[DC/PVR] tevp3 batches=0` on a run

@@ -74,8 +74,9 @@
  * KILL SWITCH AND VERDICT
  * =============================================================================
  * DC_EMU64_CULL=0 (the default) compiles this file to nothing — byte-identical
- * image. `-DDC_GX_VTXID_DECAL` (also default off) is a second, narrower switch
- * that only widens G-B's side channel; see its own section below the includes.
+ * image. `-DDC_GX_NO_VTXID_DECAL` is a second, narrower switch that only
+ * NARROWS G-B's side channel back to its pre-S14 reach; see its own section
+ * below the includes.
  * The verdict on a run is `[EMU64C] falsecull=0` under
  * -DDC_EMU64_CULL_VERIFY, which needs no screenshot: in verify mode every
  * batch we would cull is ALSO handed to the original handler, and we count any
@@ -168,12 +169,22 @@ void dc_emu64_cull_report(void);
 } /* extern "C" */
 
 /* =============================================================================
- * DC_GX_VTXID_DECAL — G-B REACH: ARM THE DECAL-Z BATCHES, STILL NEVER CULL THEM
+ * DECAL-Z ARMING — G-B REACH: ARM THE DECAL-Z BATCHES, STILL NEVER CULL THEM
  * =============================================================================
- * DEFAULT OFF. There is no Makefile variable on purpose — this is an A/B knob,
- * reached with DC_XDEFS='-DDC_GX_VTXID_DECAL'. With it off, every line it
- * guards disappears and this file behaves exactly as it did before, down to the
- * [EMU64C] log format.
+ * ⭐ DEFAULT ON since 2026-08-09 (batch S14). Kill switch:
+ * -DDC_GX_NO_VTXID_DECAL, which restores the old behaviour exactly, down to
+ * the [EMU64C] log format. The old opt-IN spelling -DDC_GX_VTXID_DECAL is
+ * still accepted and is now a no-op on top of the default.
+ *
+ * WHY THE DEFAULT FLIPPED. The gate had already passed on the OFF-by-default
+ * build — `vidchk=15,835,845 vidbad=0 over=0` — and the reach it buys is
+ * `vid=1800/61920 -> 2670/72810`, +48 % batches and +18 % refs. What kept it
+ * off was that the expected `us/v` movement sits AT the ±2 % Flycast noise
+ * floor. That is an argument about the EMULATOR's resolving power, not about
+ * the change: what the side channel deletes is a random read into verts[] that
+ * MISSES THE OPERAND CACHE, and Flycast models no cache at all. On hardware
+ * the same change is worth strictly more than the floor Flycast can see, and
+ * hardware is the target. Shipped ON; the kill switch is the retreat.
  *
  * THE ARGUMENT, PRESERVED HERE BECAUSE IT IS THE WHOLE JUSTIFICATION:
  *
@@ -223,7 +234,10 @@ void dc_emu64_cull_report(void);
 #if defined(DC_GX_VTXID_DECAL) && !defined(DC_GX_VTXID)
 #error "DC_GX_VTXID_DECAL widens the G-B side channel, but DC_GX_NO_VTXID or DC_GX_FAT_VERTEX has compiled that channel out of this build. Drop one of the two."
 #endif
-#ifdef DC_GX_VTXID_DECAL
+/* Arming is a property OF the side channel, so it can only exist where the
+ * channel does: -DDC_GX_NO_VTXID / -DDC_GX_FAT_VERTEX take this with them,
+ * silently and correctly, because DC_GX_VTXID is not defined in that build. */
+#if defined(DC_GX_VTXID) && !defined(DC_GX_NO_VTXID_DECAL)
 #define CU_DECAL_ARM 1
 #endif
 
@@ -298,6 +312,72 @@ static unsigned int s_vid_decal;
 #endif
 #ifdef DC_EMU64_CULL_VERIFY
 static unsigned int s_falsecull, s_gfxp_bad, s_skipped;
+#endif
+
+/* ==========================================================================
+ * CU_TIMED — the bracket this file has never had
+ * ==========================================================================
+ * ⚠️ THE GAP THIS CLOSES, STATED PLAINLY: until now this file contained ZERO
+ * dc_time_us() reads. G3 does not REPLACE the late cull in dc_gx.c, it ADDS a
+ * second one — a punted or visible batch falls through to GXEnd and is tested
+ * again — and only the SECOND set is inside [PHASE]'s `cull=` bracket. So the
+ * project's only published cull cost (0.70 ms of a ~30 ms draw) was the *late*
+ * cull alone, and every re-costing of a frustum-test idea against it was
+ * measuring the smaller half. Anything that changes dc_gx_aabb_is_offscreen()
+ * — Gribb-Hartmann, an FTRV form, a plane cache — has to be judged against
+ * `cus=`, not against `cull=`.
+ *
+ * "visible" is also this test's MOST expensive answer, because it is the one
+ * with no early-out: every plane has to fail before the box is declared inside.
+ * A cull-heavy view is therefore CHEAPER here than a cull-light one, and
+ * comparing `cus=` across two different towns is comparing two different
+ * workloads. Read it against `trin=` on the same line, never on its own.
+ *
+ * Under -DDC_PERF_PHASE only, which is the same gate dc_gx.c's `xform` bracket
+ * uses; a shipping build compiles this to the bare call and the accumulator
+ * away. Two dc_time_us() reads per TRIN batch is real overhead inside the
+ * interval it is reporting — that is what makes it a perf-build instrument and
+ * not a default. */
+/* THE SPLIT, AND WHY IT IS NOT OPTIONAL. The first version of this bracket
+ * timed cull_batch() whole and read 6.8 ms/frame — 23 % of a 29.4 ms draw —
+ * which reads as "the frustum test is enormous" and is NOT what it says.
+ * cull_batch() also makes two emu64 member calls (dirty_check,
+ * setup_1tri_2tri_1quad) that are emu64's own state work, and the cross-check
+ * that caught it is [PHASE]'s `cull=`: the SAME frustum test, wrapped in the
+ * SAME two-dc_time_us pattern on the late path, costs 4.74 us a batch against
+ * this site's 27.2. A bracket around a compound is a number nobody can act on.
+ *
+ *   cus= total inside cull_batch()      (the old, ambiguous number)
+ *   cds= dirty_check + setup_1tri...    emu64 state work, NOT the cull
+ *   fus= dc_gx_aabb_is_offscreen()      the frustum test alone
+ *
+ * cus - cds - fus is the index walk, the AABB build and the punts.
+ *
+ * ⚠️ THREE NESTED BRACKETS MEANS UP TO SIX dc_time_us() READS PER BATCH, and
+ * the inner two are charged to the outer one. `fus=` and `cds=` are therefore
+ * OVERSTATED by one read-pair each and `cus=` by three. That is acceptable for
+ * apportioning a 6.8 ms block and is NOT acceptable for costing a change worth
+ * a few hundred microseconds — for that, bracket one thing at a time. */
+#ifdef DC_PERF_PHASE
+static unsigned int s_cull_us;      /* per window, microseconds inside cull_batch */
+static unsigned int s_setup_us;     /* ...of which: emu64's dirty_check + setup   */
+static unsigned int s_frustum_us;   /* ...of which: the frustum test alone        */
+#define CU_TIMED(expr)                                                        \
+    ({                                                                        \
+        u64 cu_t0_ = dc_time_us();                                            \
+        int cu_r_ = (expr);                                                   \
+        s_cull_us += (unsigned int)(dc_time_us() - cu_t0_);                   \
+        cu_r_;                                                                \
+    })
+#define CU_SPLIT(acc, body)                                                   \
+    do {                                                                      \
+        u64 cs_t0_ = dc_time_us();                                            \
+        body;                                                                 \
+        (acc) += (unsigned int)(dc_time_us() - cs_t0_);                       \
+    } while (0)
+#else
+#define CU_TIMED(expr) (expr)
+#define CU_SPLIT(acc, body) do { body; } while (0)
 #endif
 
 /* ==========================================================================
@@ -591,8 +671,17 @@ static int cull_batch(emu64 *self)
      * These are exactly the two calls the original handler makes first
      * (emu64.c:4812-4813); on the punt path it simply makes them again, which
      * is idempotent (all dirty flags cleared, GXSetCurrentMtx dedups). */
-    self->dirty_check(self->texture_gfx.tile, self->texture_gfx.level, TRUE);
-    self->setup_1tri_2tri_1quad((unsigned int)first_vtx);
+    /* ⚠️ BRACKETED SEPARATELY, BECAUSE `cus=` WITHOUT THIS SPLIT IS AN
+     * UNREADABLE NUMBER. These two are emu64's OWN state work, not the cull:
+     * on a batch we cull they REPLACE the handler's copies, and on a batch we
+     * do not cull the handler makes them again (the comment above says that is
+     * idempotent — `cds=` is the first measurement of whether idempotent also
+     * means cheap). Charging them to the frustum test made the cull look ~6x
+     * more expensive than the identical test costs on the late path. */
+    CU_SPLIT(s_setup_us, {
+        self->dirty_check(self->texture_gfx.tile, self->texture_gfx.level, TRUE);
+        self->setup_1tri_2tri_1quad((unsigned int)first_vtx);
+    });
 
     /* ---- the box, over the DISTINCT referenced vertices ------------------
      * ⚠️ MIXED-FLAG BATCHES PUNT. A batch's matrix is chosen from the FIRST
@@ -650,7 +739,12 @@ static int cull_batch(emu64 *self)
         mn[0] = n0; mn[1] = n1; mn[2] = n2;
         mx[0] = x0; mx[1] = x1; mx[2] = x2;
 
-        if (!dc_gx_aabb_is_offscreen(mn, mx)) {
+        /* The frustum test ALONE — the thing G-F and S14-5 actually change.
+         * Compare `fus=` against [PHASE]'s `cull=`: same test, same 2-read
+         * bracket pattern, two different call sites. */
+        int off_screen;
+        CU_SPLIT(s_frustum_us, { off_screen = dc_gx_aabb_is_offscreen(mn, mx); });
+        if (!off_screen) {
             s_vis++;
 #ifdef DC_GX_VTXID
             /* G-B. THE ONLY PLACE THE SIDE CHANNEL IS ARMED, and every
@@ -757,12 +851,12 @@ static void cu_trin_indep(void *p) { cu_verify((emu64 *)p, s_orig[CU_TRIN_INDEP]
  * a link-time const, so this folds away in every normal build. */
 static void cu_trin(void *p) {
     emu64 *self = (emu64 *)p;
-    if (s_active && dc_gx_batch_cull && cull_batch(self)) return;
+    if (s_active && dc_gx_batch_cull && CU_TIMED(cull_batch(self))) return;
     s_orig[CU_TRIN].fn(p);
 }
 static void cu_trin_indep(void *p) {
     emu64 *self = (emu64 *)p;
-    if (s_active && dc_gx_batch_cull && cull_batch(self)) return;
+    if (s_active && dc_gx_batch_cull && CU_TIMED(cull_batch(self))) return;
     s_orig[CU_TRIN_INDEP].fn(p);
 }
 #endif
@@ -833,6 +927,12 @@ void dc_emu64_cull_report(void)
      * the run and must read zero. `nocmp=` is not a fault — it is the number
      * of culls taken on a frameskipped tick, where dc_gx.c cannot answer. */
     DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u"
+#ifdef DC_PERF_PHASE
+            /* Microseconds spent INSIDE cull_batch() this window — G3's own
+             * frustum test, which [PHASE]'s `cull=` has never included. Read
+             * it against trin= on the same line. */
+            " cus=%u cds=%u fus=%u"
+#endif
 #ifdef DC_GX_VTXID
             " vid=%u/%u over=%u pdec=%u"
 #ifdef CU_DECAL_ARM
@@ -849,6 +949,9 @@ void dc_emu64_cull_report(void)
 #endif
             "\n",
             s_trin, s_cull, s_vis, s_punt, s_refs,
+#ifdef DC_PERF_PHASE
+            s_cull_us, s_setup_us, s_frustum_us,
+#endif
 #ifdef DC_GX_VTXID
             s_vid_armed, s_vid_refs, s_vid_over,
             s_punt_dec,
@@ -863,6 +966,9 @@ void dc_emu64_cull_report(void)
 #endif
            );
     s_trin = s_cull = s_vis = s_punt = s_refs = 0;
+#ifdef DC_PERF_PHASE
+    s_cull_us = s_setup_us = s_frustum_us = 0;
+#endif
 #ifdef DC_GX_VTXID
     s_vid_armed = s_vid_refs = 0;
     s_punt_dec = s_punt_tgen = s_punt_mix = 0;

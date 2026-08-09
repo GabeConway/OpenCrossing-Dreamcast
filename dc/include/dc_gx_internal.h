@@ -409,6 +409,20 @@ extern const int dc_gx_draw_merge;    /* DC_NO_DRAW_MERGE    */
 void dc_gx_flush_vertices(void);
 void dc_gx_flush_if_begin_complete(void);
 
+/* The [GXVERIFY] print for the two correctness gates in dc_gx.c:
+ * -DDC_GX_NRMSKIP_VERIFY (the unlit-normal skip) and -DDC_GX_GHCULL_VERIFY
+ * (the Gribb-Hartmann frustum test against the 8-corner oracle).
+ *
+ * ⚠️ IT ONLY EXISTS IN A GATE BUILD. dc_gx.c defines it under
+ * DC_GX_VERIFY_REPORT, i.e. when either VERIFY macro or -DDC_PERF_GXAPI is on;
+ * a shipping build has no such symbol and must not reference one. dc_gx.c
+ * already calls it itself every 60 frames, so nothing else needs to — this
+ * declaration exists so the definition is not a missing-prototype warning.
+ *
+ * ⚠️ BOTH GATE BUILDS ARE SLOWER BY CONSTRUCTION. GHCULL_VERIFY runs both
+ * frustum implementations on every batch. Correctness runs, never perf runs. */
+void dc_gx_nrmskip_report(void);
+
 /* ==========================================================================
  * PVR BACKEND SEAM — the ONLY place the renderer attaches.
  * ==========================================================================

@@ -18,12 +18,23 @@ Dreamcast with loading **at parity with the emulator** (human verdict, the
 and is taken to the houses. All 3,936 objects in the link compile and link for
 sh-elf with zero exclusions.
 
-⚠️ **Parity on I/O is not parity on compute.** The only hardware FPS figure the
-project has ever had is "~11 FPS in the town", and the human verdict on the
-current build is *"on hardware the game runs super stable, fps and audio is
-worse for sure … the emulator runs buttery smooth."* **Every FPS number in this
-kb is Flycast's, and Flycast models no instruction cache, no operand cache and
-no disc seek time.** See §6.
+⭐⭐⭐ **AND SINCE THE S14 BURN (2026-08-09) IT RUNS BETTER ON HARDWARE THAN THE
+EMULATOR MEASURED.** Human verdict on `AC-DC-20260809b.cdi`: *"definitely runs
+better on real hardware"*, *"sound is perfect, no skipping"* — against
+`[STUTTER] 65 / 900 s` in Flycast, which had scored the same batch as a **wash**
+(`us/v` 2.51 → 2.48, inside the noise floor). **That is measurement rule 12**:
+four of S14's seven changes pay only in cache misses and Flycast models no
+cache, so its number was the floor, not the result. `kb/batch-s14.md` §7.
+
+⚠️ **This SUPERSEDES the older verdict** *"on hardware the game runs super
+stable, fps and audio is worse for sure … the emulator runs buttery smooth"* —
+that was the pre-S14 build. The only hardware FPS FIGURE the project has ever
+had is still the old "~11 FPS in the town": **the new verdict is a direction,
+not a magnitude, and nothing has attributed it to a specific change.**
+`AC-DC-20260809c-nof5.cdi` isolates F5 (same objects, only the link order
+differs); `AC-DC-20260809a-pmcr.cdi` gives `istall`. **Every FPS number in this
+kb is still Flycast's, and Flycast models no instruction cache, no operand cache
+and no disc seek time.** See §6.
 
 Current numbers: `kb/STATE.md`.
 
@@ -44,7 +55,14 @@ DC_CDI_PAD=1 bash dc/build-dc.sh
 ⭐ **Everything else that matters is a DEFAULT and needs no flag**:
 `DC_EMU64_CULL=1` (G3), the vertex-index side channel, `pvr_dr_*` emit,
 `DCGXVertex` `aligned(32)`, the branch-free memo compare, the shade-predicate
-hoist; and inside the `DC_AUDIO=1` block `DC_ARAM_AUDIO_DROP=0`,
+hoist; **and since 2026-08-09 the S14 batch** — the 32-byte memo stride, the
+dropped `oargb` store, the source-vertex `pref`, the Gribb-Hartmann cull,
+decal-Z arming, and F5's `DC_SECTION_ORDER`
+(**`kb/batch-s14.md` is the rollback contract — one line reverts all of it**).
+⚠️ **`-DDC_GX_NRMSKIP` is the one S14 item that is OFF**: its own gate proved it
+a strict no-op on day one, because emu64 already guards the `GXNormal*` call on
+`G_LIGHTING` (`kb/batch-s14.md` §2b). Do not turn it on.
+And inside the `DC_AUDIO=1` block `DC_ARAM_AUDIO_DROP=0`,
 `DC_AUDIO_MIXRATE=24000`, `DC_AUDIO_SUBDELAY=0`, `DC_AUDIO_MAX_FRAMES=6`. Every
 one is `?=`, so naming it explicitly still wins, and each has a documented
 revert. **This was deliberate: a result that lives only in a command line is one
@@ -80,7 +98,7 @@ Add to the prefix above, then run the harness:
 
 ---
 
-## 3. THE MEASUREMENT RULES — eleven, each paid for
+## 3. THE MEASUREMENT RULES — twelve, each paid for
 
 1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
    any visual comparison.
@@ -136,6 +154,22 @@ Add to the prefix above, then run the harness:
     12's wins were 8-18 % and were safe on one run each; that does not license a
     2 % claim.
 
+12. ⭐⭐⭐ **A FLYCAST "NO CHANGE" IS NOT EVIDENCE AGAINST A CHANGE WHOSE
+    MECHANISM IS CACHE — PROVEN 2026-08-09.** Batch S14 measured as a **wash**
+    in Flycast (`us/v` 2.51 → 2.48, inside the ±2 % floor, every `[VTXSPLIT]`
+    bucket within 0.03 ms) and came back from a burned CD-R as *"definitely runs
+    better on real hardware"* with *"sound perfect, no skipping"* against
+    `[STUTTER] 65 / 900 s` in the emulator. Flycast models **no instruction
+    cache and no operand cache**, so a change made of locality is invisible
+    there BY CONSTRUCTION. **The emulator can falsify an instruction-count
+    claim; it can NEVER falsify a locality claim** — and the converse trap is
+    that a Flycast *win* on such a change is understated, not absent.
+    ⭐ **The audio half is not a second opinion, it is the same measurement**:
+    `DC_AUDIO_MAX_FRAMES` caps production at `MAX_FRAMES × 17.49 ms × 2 ticks`
+    **per PRESENTED frame** (§5 audio rule 4), so synthesis budget per second is
+    proportional to frame rate and stutter is the first thing a faster build
+    fixes. `kb/batch-s14.md` §7.
+
 ---
 
 ## 4. The instruments
@@ -145,7 +179,7 @@ Add to the prefix above, then run the harness:
 | `[PHASE]` | `-DDC_PERF_PHASE` | presented frame | `draw`/`skip`/`vi`, `cull`/`xform`, `v`/`vlit`/`vcull`/`us/v` |
 | `[VTXSPLIT]` | `-DDC_PVR_VTXSPLIT=<N>` | **mixed — rule 10** | splits `xform` into 7 stages, sampling 1 primitive in N |
 | `[EMU64H]` | `DC_EMU64_HIST=<N>` | **logic tick — rule 9** | per-opcode timing; the only thing allowed to price an opcode |
-| `[EMU64C]` | `DC_EMU64_CULL=1` | 30-frame window | G3's own counters: `trin`/`cull`/`vis`/`punt`/`pdec`/`ptgen`/`pmix` |
+| `[EMU64C]` | `DC_EMU64_CULL=1` | 30-frame window | G3's own counters: `trin`/`cull`/`vis`/`punt`/`pdec`/`ptgen`/`pmix`; and under `-DDC_PERF_PHASE` the **S14 timing split `cus`/`cds`/`fus`** — total `cull_batch()`, emu64's `dirty_check`+`setup` inside it, and the frustum test alone. ⚠️ **The three NEST**, so `cds`/`fus` carry one extra `dc_time_us()` pair each and `cus` three: fine for apportioning 3 ms, not for costing a 200 µs change |
 | `[PMCR]` | `DC_PMCR=1`, `DC_PMCR_HUD=1` | presented frame | ⚠️ **burn-only — Flycast returns 0 for all 8 events** |
 | framebuffer | `DC_FB_PROBE` / `DC_FB_IMAGE` | — | ⚠️ never in a perf run (rule 4) |
 | `icache_map.py` | host-side | — | sizes icache pressure; only `istall` on a burn prices it |
@@ -251,9 +285,17 @@ re-cost everything that was sized under it.**
 **Expected in DIRECTION, unmeasured in MAGNITUDE.** Flycast models no
 instruction cache; the SH-4's is **8 KB direct-mapped** against a 2,876,648 B
 `.text`+`.rodata`. `tools/dcopt/icache_map.py` sizes the pressure host-side:
-the town frame's hot symbols are **11.9×** the icache, the 12-symbol innermost
-draw loop **1.4×**, and `dc_gx_backend_submit` shares cache lines with six of
-the `GX*` setters it calls per vertex.
+the town frame's hot symbols are **16.40×** the icache and the innermost draw
+loop **2.62×**.
+⚠️ **The 11.9× / 1.4× pair quoted here until 2026-08-09 is FALSIFIED**: the
+tool's hot-set regexes matched `^_dl_G_` / `^_emu64`, but emu64 is C++ and every
+handler is mangled, so the interpreter — most of the draw — was never in the
+measurement (`.text._ZN5emu64*` = 105 map sections, `.text.dl_G_*` = 0).
+The pressure is worse than believed AND F5's ceiling is lower: at 2.62× the
+inner loop can be made contiguous but never resident. `kb/batch-s14.md` §5.
+⭐ **F5 SHIPPED 2026-08-09** (`dc/section-order.txt`, `DC_SECTION_ORDER=0` to
+kill): `dc_gx_backend_submit` moved `0x8c221118 → 0x8c022c20`, i.e. from 2 MB
+away from the interpreter to directly behind it. **No emulator can price this.**
 
 ⚠️ **NO AMOUNT OF FLYCAST WORK CAN ANSWER THIS.** Same trap as the disc-timing
 refutation, one layer up: do not "A/B it in the emulator".

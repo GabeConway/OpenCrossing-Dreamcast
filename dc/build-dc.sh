@@ -282,6 +282,21 @@ ENVARGS=(
 # The uninitialised-local diagnostic. DC_AUTOVAR_INIT=zero when an optimized
 # image misbehaves; if the symptom goes away the bug is an uninitialised read.
 [ -n "${DC_AUTOVAR_INIT+x}" ] && ENVARGS+=(-e DC_AUTOVAR_INIT="$DC_AUTOVAR_INIT")
+# F5 — i-cache packing by linker section ordering (dc/Makefile's
+# DC_SECTION_ORDER block, dc/section-order.txt). Forward-only, same reason as
+# the block above: dc/Makefile takes the tracked file with ?=, and an unset-vs-
+# empty distinction is what keeps that default alive.
+#
+#   bash dc/build-dc.sh                        # ON, the tracked ordering file
+#   DC_SECTION_ORDER=0 bash dc/build-dc.sh     # the kill switch, argv-identical
+#                                              # to the pre-F5 link line
+#   DC_SECTION_ORDER=/work/dc/other.txt ...    # a CONTAINER path — the repo is
+#                                              # bind-mounted at /work, so a
+#                                              # host path will not resolve
+#
+# ⚠️ NOT MEASURABLE IN FLYCAST: it models no instruction cache. dc/src/dc_pmcr.c
+# istall on a real burned CD-R is the only instrument (BUILDING-DC.md).
+[ -n "${DC_SECTION_ORDER+x}" ] && ENVARGS+=(-e DC_SECTION_ORDER="$DC_SECTION_ORDER")
 
 # DC_DISC_ROOT=<dir> puts real game data on the disc. The directory is mounted
 # read-only at /discroot and handed to mkdcdisc with -d, so its contents land at

@@ -415,6 +415,53 @@ ifeq ($(DC_GC_PRINT),1)
   GC_LDFLAGS += -Wl,--print-gc-sections
 endif
 
+# =============================================================================
+# DC_SECTION_ORDER — F5, i-cache packing by linker section ordering
+# =============================================================================
+# The SH7750's instruction cache is 8 KB, DIRECT-MAPPED, 32-byte lines, and
+# `.text` is ~2.4 MB. Two hot functions whose addresses are congruent mod 8192
+# evict each other on every call, however much cache is free elsewhere.
+# -ffunction-sections is already on (above), so the fix is pure layout: hand ld
+# an ordering file that puts the innermost draw loop in one contiguous run.
+#
+#   DC_SECTION_ORDER=<path>   use that ordering file  (default: the tracked one)
+#   DC_SECTION_ORDER=0        KILL SWITCH — the link's argv goes back to exactly
+#                             what it was before F5 (the recipe text keeps one
+#                             collapsed space; no argument is added or removed)
+#   DC_SECTION_ORDER=         same as 0
+#
+# ⚠️ The flag is --section-ordering-file (GNU ld 2.45.1). --symbol-ordering-file
+# is LLD's and does NOT exist here.
+# ⚠️ ld ERRORS OUT if the file is missing ("cannot open linker script file"),
+# so a missing file is skipped with a warning rather than being passed through.
+# ⚠️ FLYCAST MODELS NO INSTRUCTION CACHE. This cannot be A/B'd in the emulator
+# at all; dc/src/dc_pmcr.c's istall event on a real burned CD-R is the only
+# instrument. See BUILDING-DC.md and kb/research-fps-ideas.md §F5.
+#
+# Regenerate the file with tools/dcopt/icache_map.py --emit-order (its header
+# carries the exact command). It is a linker-script SECTIONS fragment, not a
+# list of names, and it opens with a bare *(.text) so that _kos_startup.o's
+# `start` stays at 0x8c010000 — without that the image does not boot.
+DC_SECTION_ORDER ?= $(DC_DIR)/section-order.txt
+ORDER_LDFLAGS :=
+ORDER_DEP     :=
+ifeq ($(strip $(DC_SECTION_ORDER)),)
+  # empty: kill switch, no flag
+else ifeq ($(strip $(DC_SECTION_ORDER)),0)
+  # 0: kill switch, no flag
+else
+  ORDER_FILE := $(abspath $(DC_SECTION_ORDER))
+  ifeq ($(wildcard $(ORDER_FILE)),)
+    $(warning DC_SECTION_ORDER='$(ORDER_FILE)' does not exist — linking \
+WITHOUT --section-ordering-file (F5 is OFF for this build))
+  else
+    ORDER_LDFLAGS := -Wl,--section-ordering-file,$(ORDER_FILE)
+    # Only a file that exists becomes a prerequisite: a missing one must warn
+    # and be skipped, not turn into "No rule to make target".
+    ORDER_DEP     := $(ORDER_FILE)
+  endif
+endif
+
 # UB guards. Same set as pc/CMakeLists.txt lines 9-31 plus the two KOS/SH-4
 # additions justified in design-shelf-hazards §3.1.
 UB_GUARDS := \
@@ -1719,6 +1766,18 @@ $(shell mkdir -p $(BUILD))
 $(file >$(FLAGSTAMP),$(FLAGSTATE))
 endif
 
+# A SECOND stamp, for flags that only reach the LINK. DC_SECTION_ORDER is
+# deliberately NOT in $(FLAGSTATE): it changes no object, and keying it there
+# would recompile all ~3,900 TUs to relink one ELF. Keyed here instead so that
+# flipping the kill switch still relinks — a kill switch that silently does
+# nothing is worse than no kill switch (CLAUDE.md §1).
+LINKSTAMP  := $(BUILD)/link.stamp
+LINKSTATE  := ORDER=$(strip $(ORDER_LDFLAGS))
+ifneq ($(LINKSTATE),$(strip $(shell cat $(LINKSTAMP) 2>/dev/null)))
+$(shell mkdir -p $(BUILD))
+$(file >$(LINKSTAMP),$(LINKSTATE))
+endif
+
 # =============================================================================
 # Rules
 # =============================================================================
@@ -1728,6 +1787,10 @@ endif
 all: $(TARGET)
 
 $(OBJS) $(TARGET): $(FLAGSTAMP)
+$(TARGET): $(LINKSTAMP) $(ORDER_DEP)
+
+$(LINKSTAMP):
+	@mkdir -p $(@D) && printf '%s' '$(LINKSTATE)' > $@
 
 # Fallback so the stamp is never a missing prerequisite. The $(file …) above
 # is what normally writes it; this rule covers a wiped build dir, and make
@@ -1753,6 +1816,7 @@ optreport:
 	@echo "DC_OPT         = $(DC_OPT)     (dc/src, $(words $(DC_C_OBJS) $(DC_CXX_OBJS)) TUs)"
 	@echo "UB_GUARDS      = $(UB_GUARDS)"
 	@echo "OPT_GUARDS     = $(OPT_GUARDS)"
+	@echo "F5 order file  = $(if $(ORDER_LDFLAGS),$(ORDER_FILE),OFF (DC_SECTION_ORDER=$(DC_SECTION_ORDER)))"
 
 # See the WARNSCAN block near the top. Recursive because it needs DECOMP_QUIET
 # empty at PARSE time, and because its objects must not pollute $(OBJDIR).
@@ -1808,7 +1872,7 @@ $(TARGET): $(OBJS)
 	$(foreach _o,$(OBJS),$(file >>$(RSP),$(_o)))
 	@echo "  LD  $@"
 	$(Q)$(KCXX) -o $@ @$(RSP) -lGL -lz \
-		-Wl,--allow-multiple-definition $(GC_LDFLAGS) \
+		-Wl,--allow-multiple-definition $(GC_LDFLAGS) $(ORDER_LDFLAGS) \
 		-Wl,-Map,$(BUILD)/AnimalCrossing.map
 	@sh-elf-size $@ || true
 

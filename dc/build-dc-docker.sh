@@ -149,4 +149,32 @@ fi
 
 SIZE=$(wc -c < "$CDI")
 echo "-- CDI: $CDI  ${SIZE} bytes  ($((END - START))s)"
+
+# --- 3. The ELF provenance sidecar -------------------------------------------
+# REQUIRED OF EVERY CDI PRODUCER, and this one did not write it until 2026-08-09
+# (S14). harness/dc/README.md §"ELF provenance sidecars" states the rule and
+# says in terms "This binds dc/build-dc-docker.sh too. Without the sidecar,
+# crash triage on the game build is dead on arrival" — and it was: a CDI holds a
+# scrambled, stripped 1ST_READ.BIN, so a register dump out of one is just hex,
+# and harness/dc/crash.sh REFUSES to guess which ELF goes with an image or to
+# symbolise against one whose sha256 no longer matches. Every game crash on a
+# burn has therefore been un-triageable, silently, for the whole project.
+#
+# The sha256 is the load-bearing field, not the path: the ELF at that path is
+# overwritten by the next build, and a confidently wrong line number is worse
+# than no answer.
+ELF_SHA=$(sha256sum "$ELF" | cut -d' ' -f1)
+ELF_SIZE=$(wc -c < "$ELF")
+cat > "${CDI}.src.json" <<EOF
+{
+  "image": "$CDI",
+  "elf": "$ELF",
+  "elf_sha256": "$ELF_SHA",
+  "elf_size": $ELF_SIZE,
+  "built_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "toolchain_image": "opencrossing-dc:sdk",
+  "producer": "dc/build-dc-docker.sh"
+}
+EOF
+echo "-- sidecar: ${CDI}.src.json  (elf sha256 ${ELF_SHA:0:12}...)"
 echo "-- done."

@@ -7,6 +7,155 @@ of it and no longer do. Entries are dated snapshots: a number here was true when
 it was written and is **not** a claim about today. For what is true now, read
 `kb/STATE.md`.
 
+## ⭐⭐⭐ 2026-08-09 (session 14) — BATCH S14: EIGHT CHANGES IN ONE PASS, A WASH
+## IN FLYCAST BY CONSTRUCTION, AND THE FRUSTUM TEST TURNED OUT TO BE 0.14 ms
+
+Full write-up and the rollback contract: **`kb/batch-s14.md`**. Runs:
+`smoke-s14-20260809-130522` (600 s) and `smoke-s14b-20260809-131916` (240 s,
+the split-bracket build). Build line as session 13, plus `-DDC_PERF_PHASE` and
+`DC_PVR_VTXSPLIT=16`.
+
+**The directive was "focus sh4zam".** It was re-costed first and does not
+survive: every FP stage of the vertex path is ~0.76 ms of a ~29 ms frame, `xf`
+is 0.22 ms, and sh4zam already contributes zero instructions to the image while
+we emit FTRV/FIPR/FSRRA through KOS. The batch was aimed at memory traffic,
+cache layout and removed work instead — above all at the **instruction cache**,
+which is the one plausible explanation for "hardware is much worse than the
+emulator" that no emulator run can ever see.
+
+### What shipped, all ON by default, each with a kill switch
+
+32-byte memo stride · `oargb` store dropped · source-vertex `pref` ·
+`GXNormal*` skipped on unlit batches · Gribb-Hartmann frustum cull ·
+decal-Z arming default ON · **F5 linker section ordering** · a timing bracket on
+G3's cull. Table, switches and the one-line revert: `kb/batch-s14.md` §2/§4.
+
+### ⭐⭐⭐ THE HARDWARE VERDICT — IT RUNS BETTER, AND THE AUDIO PROVES IT MECHANICALLY
+
+Human verdict on a burned CD-R of `AC-DC-20260809b.cdi`, same day:
+***"definitely runs better on real hardware"*** and ***"sound is perfect. no
+skipping"*** (the comparable Flycast run booked `[STUTTER] 65 / 900 s`).
+
+⭐⭐⭐ **FIRST WIN THIS PROJECT HAS EVER BANKED THAT THE EMULATOR COULD NOT SEE.**
+Flycast measured the same batch as a wash (below). The two do not conflict —
+four of the seven changes pay only in cache misses and **Flycast models neither
+cache**, so `us/v` 2.48 was never the result, it was the floor.
+
+⭐ **The audio is not a second opinion, it is the same measurement.**
+`DC_AUDIO_MAX_FRAMES` is an FPS constant (`kb/RESUME.md` §5 audio rule 4):
+production is capped at `MAX_FRAMES × 17.49 ms × 2 ticks` **per PRESENTED
+frame**, so synthesis budget per second is proportional to frame rate and the
+stutter is what disappears first. "No skipping" is therefore a derived
+consequence of "runs better" — two observations of one cause, one of them
+structural rather than perceptual.
+
+⚠️ **Direction, not magnitude, and NO attribution.** It does not say which of
+the seven did it, and cannot rule out one of them being a small regression
+masked by the others. `AC-DC-20260809c-nof5.cdi` exists for exactly that: same
+objects, same flags, **only the linker's section order differs**
+(`DC_SECTION_ORDER=0` is keyed to `link.stamp`, so it relinked with **0**
+recompiles). Burning it isolates F5 alone — the cleanest A/B this project has
+ever had. `AC-DC-20260809a-pmcr.cdi` gives the number, via `istall`.
+
+⭐ **NEW MEASUREMENT RULE EARNED: a Flycast "no change" is not evidence against
+a change whose mechanism is CACHE.** The emulator can falsify an
+instruction-count claim; it can never falsify a locality claim.
+
+### The Flycast verdict: NO RESOLVABLE CHANGE
+
+`us/v` **2.51 → 2.48** (inside the ±2 % floor, rule 11); every `[VTXSPLIT]`
+bucket within 0.03 ms; memo hit 53.7 → **54.2 %**; arming reach
+`vid=1800/61920 → 2670/73080` against a prediction of `2670/72810`.
+
+**That is the expected result for four of the eight** — S14-1/-3/-6/-7 all pay
+in cache misses and **Flycast models no cache of either kind**. The two counters
+an emulator *can* move both moved, in the right direction, by the predicted
+amount. ⚠️ **It is not evidence for the batch either.** The verdict is a burn.
+
+### 🔴 THE REAL FINDING: `cull_batch()` IS 3.05 ms/frame AND THE FRUSTUM TEST IS 0.14
+
+`dc_emu64_cull.cpp` had **zero** `dc_time_us()` reads, so G3's own cull had never
+been timed — only `dc_gx.c`'s *late* cull (0.70 ms) ever had. The first bracket
+read **6.8 ms/frame, 23 % of the draw**, which reads as "the frustum test is
+enormous" and is not what it says. Splitting it three ways (176 windows):
+
+| bucket | wraps | ms/frame | cull-heavy | share |
+|---|---|---:|---:|---:|
+| `cus=` | all of `cull_batch()` | 3.05 | 7.26 | 100 % |
+| **`cds=`** | **emu64's `dirty_check` + `setup_1tri_2tri_1quad`** | **2.23** | **5.26** | **73 %** |
+| **`fus=`** | **`dc_gx_aabb_is_offscreen()`** | **0.139** | 0.292 | **4.5 %** |
+
+⭐ **G-F IS RETIRED IN BOTH SHAPES** — the cheap Gribb-Hartmann one shipped as
+S14-5 and the FTRV one will never be worth writing: the whole test is under
+0.5 % of the frame.
+⭐ **`cds=` is the new lever: 2.2 ms/frame that nobody has costed.** It is the
+price of the ordering rule — the frustum test reads `projection_mtx` and
+`current_mtx` live, so G3 must make emu64 refresh them before it can test
+anything. In a typical window only **175 of 2,572** TRIN batches are culled, so
+~93 % of it is spent on batches whose original handler then calls the same two
+functions again. The in-file comment calls the second call "idempotent";
+**idempotent is not cheap, and that has never been measured.**
+
+### 🔴 THE GATE KILLED ONE OF THE EIGHT — S14-4 IS A STRICT NO-OP
+
+`-DDC_GX_NRMSKIP_VERIFY`, 360 s town (`smoke-gate-20260809-132911`):
+
+```
+[GXVERIFY] nrmskip=0 nrmskipchk=427327 nrmskipbad=0 ghcullchk=1576071 ghcullbad=0
+[EMU64C]   ... vidchk=14065122 vidbad=0 over=0 ... reinst=0
+```
+
+`ghcullbad=0` over **1,576,071** checks and `vidbad=0` over **14,065,122**
+certify S14-5 and S14-6 on target. But **`nrmskip=0`**: the unlit-`GXNormal`
+skip never fired once in 427,327 batches that offered a normal. The reason,
+found in the decomp only after the counter said so — **emu64 already guards the
+call** (`emu64.c:2785-2787`, `if ((this->geometry_mode & G_LIGHTING) != 0)`).
+An unlit batch never reaches `GXNormal*` at all; the work had been removed
+upstream in `src/` by the original developers years ago.
+
+**Default flipped to OFF the same day** (now opt-in `-DDC_GX_NRMSKIP`); the code
+and its gate are kept as the evidence. `kb/research-sh4zam-gap.md` G-J ranked it
+as *"work removal, and it outranks every arithmetic idea in this table"* without
+checking the call site. **Check the CALLER before costing a callee's skip** — and
+note the two predicates were not even the same one (emu64's `G_LIGHTING`
+geometry-mode bit vs `dc_gx`'s channel-control state).
+
+⭐ **This is the gate doing its job on the first day, which is the argument for
+building the gate at all.** The change was harmless, compiled, passed every
+correctness check, and did nothing — the only instrument that could tell the
+difference was a counter that says how often the fast path was taken.
+
+### Three kb figures falsified
+
+1. **i-cache pressure was quoted as 11.9× / inner loop 1.4×.** The tool's
+   hot-set regexes (`^_dl_G_`, `^_emu64`, `^_cu_trin`) matched **nothing** —
+   emu64 is C++ and every handler is mangled. Map check: `.text._ZN5emu64*` =
+   **105** sections, `.text.dl_G_*` = **0**. The interpreter, most of the draw,
+   was absent from the measurement of its own cache pressure. Real:
+   **16.40× / 2.62×**. Worse pressure, *lower* F5 ceiling — at 2.62× the inner
+   loop can be made contiguous but never resident.
+2. **`--section-ordering-file` takes a linker-script `SECTIONS` fragment**, not
+   a list of names, and it **must open with a bare `*(.text)`** or `start` is
+   hoisted off `0x8c010000` and the image does not boot.
+3. **"a skipped normal is stale"** — no, it is **zero**: `GXPosition3f32` clears
+   `normal[0..2]` per vertex. Safer, and it should raise the memo hit rate.
+
+### And a denominator nobody had checked
+
+`vlit/v` — the reach of the unlit-`GXNormal` skip — is **view-dependent**:
+p50 **93.4 %** lit on one run, **54.4 %** on another, mean 75.7 % / 61.3 %.
+Quote it as a distribution or not at all. The 600 s `us/v` run sat in a 93.4 %
+view, which is exactly why it could not see S14-4.
+
+### Not bundled, deliberately
+
+**G-B(2), the indexed-submit rewrite (13.31 ms)** — a multi-session
+architectural change inside a bundled A/B tells you nothing about the other
+seven. Also TEV P3 (a correctness fix that would *add back* the `oargb` store
+S14-2 removed), §0a/G-D, KOS at `-O3 -flto`, and F6/OCRAM.
+
+---
+
 ## ⭐⭐⭐ 2026-08-09 (session 13) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED
 ## (`us/v` 2.68 → 2.51), THE SHADE HOIST IS NEUTRAL, AND THE SHORTCUTS ARE DEAD
 ## FOR A REASON THAT IS NOW UNDERSTOOD

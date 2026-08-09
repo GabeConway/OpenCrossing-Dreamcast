@@ -348,7 +348,53 @@ truncated file. `od -c dc/build/objs.rsp | head` is the tell.
 - **When in doubt, `rm dc/build/AnimalCrossing.elf`** and re-link. A missing ELF
   cannot be stale.
 
+## Burns and crash triage
+
+**🔴 EVERY CRASH ON EVERY BURN THIS PROJECT EVER DID WAS UN-TRIAGEABLE, AND
+NOBODY NOTICED (found and fixed 2026-08-09, S14).** `harness/dc/README.md`
+§"ELF provenance sidecars" requires every CDI producer to write
+`<image>.src.json` beside the image, and says in terms *"This binds
+`dc/build-dc-docker.sh` too."* **It did not.** `dc/build-dc.sh` /
+`dc/build-dc-docker.sh` wrote the CDI and stopped. A CDI holds a scrambled,
+stripped `1ST_READ.BIN`, so a register dump out of one is hex; `crash.sh`
+refuses to guess which ELF goes with an image, and refuses to symbolise against
+one whose sha256 no longer matches — correctly, because a confidently wrong line
+number is worse than no answer. So every burn-side crash report was dead on
+arrival, silently, and the failure mode looks like "crash.sh is broken".
+
+`dc/build-dc-docker.sh` now emits it. **The sha256 is the load-bearing field,
+not the path** — `dc/build/AnimalCrossing.elf` is overwritten by the next build,
+so a burn you keep needs its ELF kept beside it. **When you archive a CDI, copy
+the `.elf` and the `.src.json` with it.**
+
+⚠️ **General shape, and it is the third instance in this file: a rule written in
+one document and never enforced by the code it binds.** Same as the
+`DC_PERF_GXAPI` nesting below and the `DC_EMU64_HIST` forwarding trap. **If a
+README says "every X must do Y", grep that every X actually does.**
+
 ## Knobs and flags
+
+**🔴 AN INSTRUMENT WHOSE COUNT SITES AND PRINT SITE ARE GATED DIFFERENTLY ARMS,
+PAYS FOR ITSELF, AND PRINTS NOTHING — AND `dc/src/dc_gx.c` HAS THIS BUG TODAY
+(found 2026-08-09, S14; NOT FIXED).** The `#ifdef DC_PERF_PHASE` opened at
+`dc_gx.c:141` does not close until `:296`, so the `DC_PERF_GXAPI` block
+(`:162-172`) **and the whole `DC_PERF_GXSPLIT` block** (`:229-285`) are nested
+inside it. Consequences, both silent until you hit them:
+
+- `-DDC_PERF_GXAPI` **without** `-DDC_PERF_PHASE` fails to LINK — `dc_vi.c:188`
+  externs `dc_gx_api_pos` and friends, which are then never defined.
+- `-DDC_PERF_GXSPLIT=1` without it fails to COMPILE (`s_gxs_pos` is referenced
+  in `dc_gx_frame_timing_snapshot`).
+- ⚠️ **`dc_vi.c:199` explicitly documents the GXSPLIT block as being "in its OWN
+  `#if`, not inside the DC_PERF_PHASE block". That is true of `dc_vi.c` and
+  FALSE of `dc_gx.c`** — so the comment reads as a checked guarantee and is not
+  one.
+
+Same shape as the `DC_EMU64_HIST` trap below. **When adding a counter, put its
+`#if` and its print site's `#if` on the same condition and check the nesting by
+eye** — S14's `[GXVERIFY]` counters are in an independent `#if` for exactly this
+reason. Line numbers here are pre-S14 and will drift; grep
+`DC_PERF_GXAPI` and count the `#endif`s.
 
 **⚠️ A knob that `dc/build-dc.sh` does not FORWARD is silently off (2026-08-04).**
 `DC_EMU64_HIST` was never in the docker `-e` list, so G1 was unreachable from the

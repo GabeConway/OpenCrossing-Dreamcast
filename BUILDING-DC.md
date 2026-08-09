@@ -113,6 +113,7 @@ colima (4 cores), `-j4`:
 | `DC_OPT_O0_EXTRA` | unset | extra sources forced to `-O0` without editing `dc/opt-lists.mk`. The bisecting knob (`tools/dcopt/bisect_o0.sh`) |
 | `DC_AUTOVAR_INIT` | unset | `zero` → `-ftrivial-auto-var-init=zero`. The A/B for the 99 uninitialised reads the warnscan found |
 | `DC_OPT` | `-O2` | optimization level for `dc/src` platform code |
+| `DC_SECTION_ORDER` | `dc/section-order.txt` | **F5** — the GNU ld `--section-ordering-file` that packs the innermost draw loop into contiguous i-cache lines. `0` or empty is the kill switch; a missing file is skipped with a warning. ⚠️ **Flycast models no instruction cache, so this is unmeasurable in the emulator** — `dc/src/dc_pmcr.c`'s `istall` on a burn is the only instrument. See the section below |
 | `DC_ARENA_BYTES` | header | arena size (bucket 6). **Shrink, never grow** — it competes with libc |
 | `DC_ARAM_WINDOW` | header (1,048,576) | resident graph-ARAM window. ⚠️ **With the LRU pager ON this is a CACHE, and its size is a DISC-SEEK knob, not just a RAM knob** — the 851,968 "floor" applies only with `DC_ARAM_LRU=0`. **USE 1048576** — 524288 was the 2026-08-08 recommendation and a third run superseded it: at 1 MB the same 420 s town run does **106** disc reads and 4.3 MB off disc, against 358 / 12.6 MB at 512 KB. It had been pinned at 131072 since RAM was the binding constraint; RAM stopped binding on 2026-08-06 and nobody revisited it, so instrument samples and archive streaming were still fighting over four 32 KB blocks. Matched 420 s runs, only the window differing: **disc reads 4,183 → 358, bytes off disc 137.9 MB → 12.6 MB, evictions 4,173 → 336, cache hits unchanged.** On real hardware each avoided read is an avoided 100-200 ms **seek**, which is what a human hears as laser thrash and as the music repeating. Costs 384 KB (`margin` 4,229,708, no OOM) |
 | `DC_DIAG` | `0` | `1` → `PC_DIAG()` bring-up tracing inside `graph_proc` |
@@ -462,6 +463,74 @@ the symptom, the run directory and the date — not back into a tree-wide `-O0`.
 **Gate on any raise, unchanged from the old section:** a full new-game intro
 (K.K. → train → town arrival), and a screenshot pair. `run_report.py` is the
 floor and cannot see colour.
+
+---
+
+## `DC_SECTION_ORDER` — i-cache packing by linker section ordering (F5)
+
+The SH7750's instruction cache is **8 KB, direct-mapped, 32-byte lines** (256
+lines, index = address bits [12:5]) and `.text` is ~2.4 MB. Two hot functions
+whose addresses are congruent mod 8192 evict each other every time control
+passes between them, however much cache is free elsewhere. `-ffunction-sections`
+is already on, so the fix is pure layout — no codegen argument, no `src/` edit.
+
+`dc/section-order.txt` is a GNU ld **`--section-ordering-file`** that names the
+innermost draw loop, in call order, so it occupies one contiguous run of lines:
+emu64's dispatch → the `dl_G_TRI*`/`TRIN`/`QUAD`/`VTX` handlers → G3's cull →
+`emu64::set_position` → the `GX*` per-vertex setters → `dc_gx_commit_vertex` →
+`dc_gx_backend_submit` and `emit_projected`/`emit_triangle_raw`. The rest of the
+hot set follows; **everything else is deliberately not named** and ld leaves it
+in its default order behind the named sections.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `DC_SECTION_ORDER` | `dc/section-order.txt` | path to the ordering file. `0` or empty is the **kill switch**: the link line goes back to argv-identical to the pre-F5 one. A path that does not exist is **skipped with a `make` warning**, not an error |
+
+```bash
+bash dc/build-dc.sh                     # F5 ON — the default is the good build
+DC_SECTION_ORDER=0 bash dc/build-dc.sh  # the kill switch
+```
+
+The knob keys `dc/build/link.stamp`, **not** `flags.stamp`: it changes no object
+file, so flipping it relinks without recompiling ~3,900 TUs.
+
+⚠️ **THIS CANNOT BE MEASURED IN FLYCAST.** Flycast models no instruction cache at
+all, so an emulator A/B of this flag is guaranteed to show nothing and means
+nothing. `dc/src/dc_pmcr.c`'s **`istall`** event (`DC_PMCR=1`, `DC_PMCR_HUD=1`,
+and `DC_CONSOLE_MUTE=1` is not optional on a measuring burn) on a real burned
+CD-R is the only instrument. See `kb/research-fps-ideas.md` §F5.
+
+### Regenerating the file
+
+It is generated from a linked ELF, so regenerate it after any change that moves
+the hot set (a new `-O3` entry, an inlining change, a renamed handler):
+
+```bash
+docker run --rm --platform linux/arm64 -v "$PWD":/work opencrossing-dc:sdk \
+    bash -c "sh-elf-nm -S --defined-only /work/dc/build/AnimalCrossing.elf" > /tmp/nm.txt
+python3 tools/dcopt/icache_map.py /tmp/nm.txt \
+    --emit-order dc/section-order.txt --order-elf dc/build/AnimalCrossing.elf
+```
+
+The generated header records the ELF, the `--hot` patterns and the hot-set bytes
+against the 8192-byte cache. `--order-note "…"` adds a free-text line.
+
+### Four facts about the format, all verified against `sh-elf-ld` 2.45.1
+
+- **It is a linker-script `SECTIONS` fragment, not a list of names.** One name
+  per line is a syntax error. `--symbol-ordering-file` is an **LLD** flag and
+  does not exist here.
+- **The section name has no leading underscore, the symbol does.** sh-elf sets
+  `USER_LABEL_PREFIX="_"`, so `nm` prints `_dc_gx_backend_submit` while the
+  section is `.text.dc_gx_backend_submit`. Getting this backwards makes the flag
+  a **silent** no-op, because ld ignores an unmatched section name without a
+  word of warning.
+- **`#` comments are accepted**, whole-line and trailing.
+- ⚠️ **The file must open with a bare `*(.text)`.** `_kos_startup.o`'s plain
+  `.text` holds `start`, the ELF entry, and the Dreamcast loader enters
+  1ST_READ.BIN at its first byte. A fragment that begins with any
+  `*(.text.something)` hoists that function in front of `start` and **the image
+  does not boot**. The generator always emits it; do not hand-edit it out.
 
 ---
 

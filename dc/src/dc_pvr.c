@@ -2520,7 +2520,37 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
         dv->u = c->u;
         dv->v = c->v;
         dv->argb = c->argb;
+        /* S14 — THE EIGHTH STORE THE HARDWARE THROWS AWAY.
+         *
+         * `oargb` is the PVR's OFFSET (specular) colour, and the hardware reads
+         * it ONLY when PVR_TA_CMD_SPECULAR is set in the poly header's PCW.
+         * That bit is written in exactly one place in this file —
+         * `cxt.gen.specular = s_p3_specular` — which lives inside
+         * `#ifdef DC_PVR_TEVP3`. So in the DEFAULT build the bit is never set,
+         * every `oargb` this function has ever written was discarded by the
+         * TA, and the store was one eighth of the per-vertex store-queue
+         * traffic spent on nothing. In a TEVP3 build the bit is per batch, and
+         * `s_p3_specular` is decided in dc_gx_backend_submit() BEFORE
+         * ensure_header() (same contract as s_pt_route), so it is constant for
+         * every vertex that reaches here and the test cannot disagree with the
+         * header the TA is parsing against.
+         *
+         * ⚠️ THIS DOES NOT VIOLATE "ALL 32 BYTES ARE WRITTEN EVERY TIME". That
+         * rule exists because the store queue RETAINS the previous primitive's
+         * words, so a skipped field emits stale geometry rather than a zero —
+         * and it is still true of the seven fields above. It does not bind
+         * here: with the specular bit clear the TA does not read this word at
+         * all, so what it retains is unobservable. Turn TEVP3 on and the store
+         * comes back for exactly the batches whose header asks for it.
+         *
+         * Kill switch: -DDC_PVR_NO_OARGB_SKIP restores the unconditional
+         * store. Under it the `oargb` local below is used on both arms exactly
+         * as before, so the killed build is byte-identical. */
+#ifdef DC_PVR_NO_OARGB_SKIP
         dv->oargb = oargb;
+#elif defined(DC_PVR_TEVP3)
+        if (s_p3_specular) dv->oargb = oargb;
+#endif
         pvr_dr_commit(dv);
         s_dr_verts++;
 #endif
@@ -2641,7 +2671,48 @@ static void emit_projected(const ClipVtx* c, unsigned int flags) {
 static int          s_vmemo_src[VMEMO_SLOTS];   /* index into verts[] */
 static unsigned int s_vmemo_tag[VMEMO_SLOTS];   /* the batch it belongs to */
 static unsigned int s_vmemo_gen = 0;
+
+/* ==========================================================================
+ * S14 — THE MEMO VALUE'S STRIDE IS A CACHE-LINE BUG, AND IT IS THE SAME BUG
+ * DCGXVertex's aligned(32) FIXED
+ * ==========================================================================
+ * ClipVtx is 28 bytes (x,y,z,w,u,v + argb; 32 under -DDC_PVR_TEVP3) and its
+ * members are floats, so `ClipVtx s_vmemo_val[128]` has alignment 4 and a
+ * stride of 28. The SH-4's operand cache has 32-BYTE LINES. At a 28-byte
+ * stride, entry k begins at byte 28k, and 28k mod 32 cycles 0,28,24,20,…: only
+ * one entry in eight starts on a line boundary and SEVEN IN EIGHT STRADDLE TWO
+ * LINES. The lookup index is a vertex id, i.e. effectively random within the
+ * batch, so this is two line fills per memo HIT — on the path that exists to
+ * be cheap, in a frame this project has measured as memory-bound.
+ *
+ * Rounding the stride to 32 makes every entry exactly one line, always. It
+ * costs 128 * 4 = 512 B of .bss (3,584 -> 4,096) and changes no field offset
+ * inside ClipVtx, so it cannot alter a single emitted byte — only how many
+ * line fills reading one costs.
+ *
+ * ⚠️ THE SoA LAYOUT STAYS, DELIBERATELY. Folding tag/vid/val into one struct
+ * looks like the bigger version of this fix and is NOT: s_vmemo_tag is 512 B
+ * and s_vmemo_vid 256 B — 24 lines between them, in a 16 KB (512-line) operand
+ * cache — so both are effectively always resident and cost nothing to touch.
+ * Only the 3.5 KB value array is big enough to miss. An AoS at a 64-byte
+ * stride would make the table 8 KB, quadruple the tag array's footprint, and
+ * still straddle two lines per value. Measured reasoning, not taste.
+ *
+ * ⚠️ Under -DDC_PVR_TEVP3 ClipVtx is already 32 B and this is a no-op on
+ * stride — it still fixes the ARRAY BASE alignment, which is 4 without it.
+ *
+ * Kill switch: -DDC_PVR_NO_MEMO_ALIGN restores the bare array verbatim. */
+#ifndef DC_PVR_NO_MEMO_ALIGN
+typedef struct { ClipVtx v; } __attribute__((aligned(32))) DCVMemoVal;
+/* A hard error rather than a silent regression if ClipVtx ever outgrows a
+ * line: at 33+ bytes this would round to 64 and quietly double the table. */
+typedef char dc_vmemo_stride_check[(sizeof(DCVMemoVal) == 32) ? 1 : -1];
+static DCVMemoVal   s_vmemo_valv[VMEMO_SLOTS];
+#define VMEMO_VAL(s) (s_vmemo_valv[(s)].v)
+#else
 static ClipVtx      s_vmemo_val[VMEMO_SLOTS];
+#define VMEMO_VAL(s) (s_vmemo_val[(s)])
+#endif
 #ifdef DC_GX_VTXID
 /* G-B. The (epoch<<8 | emu64 index) this slot was published for, or
  * DC_GX_VTXID_NONE when the hash path published it. 256 B, and it is the
@@ -3511,8 +3582,44 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
         VS_SAMPLE_BEGIN;
         for (k = 0; k < per_prim; k++) {
             const DCGXVertex* v = &verts[i + k];
-            float ox = v->position[0], oy = v->position[1], oz = v->position[2];
+            float ox, oy, oz;
             float eye[3], nrm[3], nl;
+
+            /* S14 — pull the NEXT source vertex in while this one is being
+             * transformed. The SH-4 has no hardware prefetcher, so a
+             * sequentially walked array still takes a full miss per line; the
+             * only defence is the `pref` instruction, issued far enough ahead
+             * to overlap something. Since session 12 DCGXVertex is exactly 32
+             * bytes and 32-byte aligned, so verts[n+1] is exactly the next
+             * cache line and one `pref` covers the whole vertex.
+             *
+             * ONE LINE AHEAD, NOT FOUR. The only quantitative memory statement
+             * in the sh4zam repo is that the SH-4 has ONE prefetch in flight at
+             * a time, ~10-12 cycles to complete, and that overlapping
+             * prefetches STALL the pipeline. This loop body is hundreds of
+             * cycles on a memo miss and tens on a hit, so a single line of
+             * lookahead is already covered and a deeper distance would only
+             * issue prefetches that collide with each other.
+             *
+             * ⚠️ UNCONDITIONAL, INCLUDING ONE PAST THE LAST VERTEX. `pref`
+             * cannot fault: the MMU is off (CLAUDE.md hard rule), all of RAM is
+             * mapped, and verts is g_gx.vertex_buffer — a static object — so
+             * &verts[count] is an address in .bss either way. Paying a compare
+             * and a branch per vertex to avoid one harmless line fill per
+             * PRIMITIVE would cost more than it saves.
+             *
+             * The asm is deliberately NOT sh4zam's SHZ_PREFETCH even though it
+             * is the identical instruction: sh4zam's headers carry alignment
+             * and FP-mode assert()s that are only killed by the -DNDEBUG the
+             * Makefile scopes to sh4zam's own TUs ($(SHZ_OBJS): TU_DEFS), so
+             * including one HERE would compile those asserts into the vertex
+             * loop. That trap is written up in kb/research-sh4zam-gap.md G-A.
+             *
+             * Kill switch: -DDC_PVR_NO_PREFETCH. */
+#if !defined(DC_PVR_NO_PREFETCH) && (defined(__SH4__) || defined(__sh__))
+            __asm__ __volatile__("pref @%0" : : "r" (&verts[i + k + 1]));
+#endif
+            ox = v->position[0]; oy = v->position[1]; oz = v->position[2];
 #ifndef DC_PVR_NO_VTXMEMO
             unsigned int slot;
             int memo_hit;
@@ -3560,7 +3667,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
 
             dc_pvr_vmemo_total++;
             if (memo_hit) {
-                cv[k] = s_vmemo_val[slot];
+                cv[k] = VMEMO_VAL(slot);
                 dc_pvr_vmemo_hit++;
                 VS_MARK(VS_MEMO);
                 VS_HIT;
@@ -3861,7 +3968,7 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
              * earlier would memoise a half-built vertex. */
             s_vmemo_src[slot] = i + k;
             s_vmemo_tag[slot] = s_vmemo_gen;
-            s_vmemo_val[slot] = cv[k];
+            VMEMO_VAL(slot) = cv[k];
 #ifdef DC_GX_VTXID
             /* An unarmed vertex publishes NONE, so a later id lookup landing
              * on this slot cannot mistake it for its own; the armed case

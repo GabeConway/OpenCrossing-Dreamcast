@@ -57,6 +57,15 @@ status narrative**: for where the port is, read `kb/RESUME.md`; for the numbers,
 - **Every optimization gets a kill switch** (compile-time or settings flag), and
   **the default is the good build**: a result that lives only in a command line
   is one unset environment variable away from being lost.
+- ⭐ **A CHANGE WHOSE MECHANISM IS CACHE IS JUDGED ON HARDWARE, AND A FLYCAST
+  "NO CHANGE" IS NOT EVIDENCE AGAINST IT** (2026-08-09, batch S14 — the standard
+  from here on). Flycast models **no instruction cache and no operand cache**, so
+  a locality change is invisible there *by construction*. S14 scored a **wash**
+  in the emulator (`us/v` 2.51 → 2.48, inside the ±2 % noise floor) and came back
+  from a burned CD-R as *"definitely runs better on real hardware"* with the
+  audio stutter gone. **The emulator can falsify an instruction-count claim; it
+  can never falsify a locality claim.** Full rule: `kb/RESUME.md` §3 rule 12;
+  evidence: `kb/batch-s14.md` §7.
 - **The MMU stays off.** `dc/src/` depends on QACR for the store-queue emit path,
   and any MMU use taxes the store queues on SH7750 silicon.
 
@@ -74,7 +83,7 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 
 | order | file | why |
 |---|---|---|
-| 0 | **`kb/RESUME.md`** | **fresh context: start here.** Where the port is, the build lines, the **eleven measurement rules**, the instruments, what is still broken |
+| 0 | **`kb/RESUME.md`** | **fresh context: start here.** Where the port is, the build lines, the **twelve measurement rules**, the instruments, what is still broken |
 | 1 | **`kb/STATE.md`** | the current numbers, the fit inequality, the ranked queue. Short by design |
 | 2 | `kb/closed.md` | **read before proposing any RAM / size / architecture idea** — what is already dead, and why |
 | 3 | `kb/traps.md` | read before touching the build, harness, prelude, or instrumentation |
@@ -108,6 +117,7 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 |---|---|
 | `kb/research-sh4zam-gap.md` | the ranked renderer gaps G-A…G-J, re-ranked around the memory-bound reading. ⚠️ **"G-B" is two things** — the shipped vertex-index side channel and the unstarted indexed-submit rewrite (the 13.31 ms block). Do not read one as the other |
 | `kb/perf-dc.md` | where the town frame goes: the method, the applied optimizations with their kill switches, and what is ruled out. ⚠️ Its absolute numbers are historical — live ones are in `kb/STATE.md` |
+| `kb/batch-s14.md` | **the S14 batch and its ROLLBACK CONTRACT** — seven hardware-shaped changes landed in one pass, each with its kill switch, its gate counter, and the one-line full revert. Read it before bisecting a visual fault in the renderer. ⭐ **§7 is the first hardware win this project banked that Flycast could not see**; §5 carries four kb figures this batch falsified, and §2b an eighth change its own gate proved a no-op |
 | `kb/research-fps-ideas.md` | unbanked FPS concepts, each with a failure mode and a cheapest experiment |
 | `kb/research-ram-tiers.md` | second-tier memory concepts (VRAM/AICA as eviction tiers, cold `.text` relocation, `--wrap=malloc`) |
 | `dc/src/dc_emu64_cull.cpp` | **G3** — the AABB cull at `G_TRIN_INDEPEND` entry, ON by default, and the source half of the vertex-index side channel. `kb/RESUME.md` §5 |
@@ -115,7 +125,7 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | `dc/include/dc_gx_internal.h` | `DCGXVertex` (`aligned(32)`, `vtxid` in bytes 30-31) and the light-array layout |
 | `dc/src/dc_pmcr.c` | **P1** — SH7750 performance counters, `DC_PMCR=1`. ⚠️ **Burn-only: Flycast reports zero for every event** |
 | `dc/src/dc_emu64_hist.c` | **G1** — the per-opcode emu64 timing histogram. ⚠️ **Per LOGIC TICK — double it** |
-| `tools/dcopt/icache_map.py` | host-side icache pressure: hot-symbol bytes vs the 8 KB direct-mapped cache, and which hot functions share a line |
+| `tools/dcopt/icache_map.py` | host-side icache pressure: hot-symbol bytes vs the 8 KB direct-mapped cache, and which hot functions share a line. `--emit-order` writes **F5**'s `dc/section-order.txt`; its docstring is the verified reference for the `--section-ordering-file` format |
 
 ### Build & test
 
@@ -123,6 +133,7 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 |---|---|
 | `BUILDING-DC.md` | **the DC build**: entry points, make targets, env knobs, flag assembly, include-path order, prelude, troubleshooting |
 | `dc/opt-lists.mk` | the `-O3` hot list and the `-O0` quarantine list, each entry with the measurement or symptom that earned it |
+| `dc/section-order.txt` | **F5** — the generated GNU ld `--section-ordering-file` that packs the innermost draw loop into contiguous i-cache lines. Kill switch `DC_SECTION_ORDER=0`; regenerate with `tools/dcopt/icache_map.py --emit-order`. ⚠️ **Unmeasurable in Flycast** (no i-cache model) — `dc_pmcr.c`'s `istall` on a burn is the only instrument |
 | `kb/toolchain.md` | why the toolchain is built from source, and the host facts that cost something. `dc/Dockerfile` is the recipe |
 | `tools/dcopt/` | `warnscan_report.py` (UB classes an optimizer can act on); `bisect_o0.sh` + `predicate_town.sh` (binary-search a miscompiling TU) |
 | `harness/dc/README.md` | the Flycast harness: setup, scripts, guest-side protocol, env overrides, known limits |

@@ -295,6 +295,159 @@ static unsigned int s_batch_src_verts = 0;
 static unsigned int s_phase_src_verts = 0;
 #endif
 
+/* ==========================================================================
+ * THE LIGHTING PREDICATE, AND THE TWO CORRECTNESS GATES THAT WATCH IT
+ * ==========================================================================
+ * ⚠️ ONE PREDICATE, THREE COPIES, AND THEY MUST NOT DRIFT. This is the same
+ * expression as the `lit` computed at the flush seam below (search
+ * `int lit =`) and as `need_light` in dc_pvr.c's dc_gx_backend_submit()
+ * (search `need_light =`, which is itself documented as having to agree with
+ * shade_batch_mode()'s SHADE_PASSTHRU). dc_pvr.c reads
+ * DCGXVertex::normal[] in exactly one place — the `if (need_light)` block that
+ * builds nrm[] — so this expression is precisely "does the normal of a staged
+ * vertex ever get read". Change it here and it has to change there.
+ *
+ * The two OTHER readers of normal[] were checked before this was written:
+ *   - vmemo_same() in dc_pvr.c byte-compares whole staged vertices. A normal
+ *     that is skipped is not stale, it is ZERO: GXPosition3f32 clears
+ *     normal[0..2] on every vertex (§3.6 behaviour 2) and only GXNormal* ever
+ *     writes anything else. A constant field cannot manufacture a false memo
+ *     hit — position, texcoord and colour are in the same compare.
+ *   - apply_texgen_n() reads v->texcoord only. NOT the normal, despite GX
+ *     having GX_TG_NRM texgens: that source falls through to the raw texcoord
+ *     (see its own comment).
+ */
+static inline int dc_gx_normal_needed(void) {
+    return (g_gx.num_chans > 0) &&
+           (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
+}
+
+/* ---- CHANGE 1: skip GXNormal* stores on unlit batches ---------------------
+ * Kill switch: -DDC_GX_NO_NRMSKIP restores the unconditional stores.
+ *
+ * emu64 calls GXNormal3f32/3s16 once per vertex REFERENCE — the same ~9,485
+ * calls a town frame that GXPosition3f32 sees — to fill three shorts that an
+ * unlit batch never reads. On the unlit path the whole of GXNormal3f32 (three
+ * multiplies, six clamps, three float->short converts, three stores) is dead,
+ * and so is GXNormal1x16's indexed LOAD from the game's normal array.
+ *
+ * ⚠️ WHY THIS IS NOT THE 2026 MICRO-OPT THAT WAS REVERTED. The note on
+ * GXNormal3f32 below records a "one magnitude test instead of six clamps" fast
+ * path that measured as nothing across 215 counter-matched windows. That
+ * change kept the call, the argument setup and the three stores and only
+ * reshuffled the clamps — it moved work rather than removing it, the same
+ * failure mode as the shade shortcuts in dc_pvr.c. This one deletes the call
+ * body outright, including a per-vertex 6-byte WRITE, which is the shape that
+ * has paid on a frame this project has measured as memory-bound.
+ *
+ * ⚠️ AUTO-DISABLED under -DDC_PVR_NO_LIGHTING / -DDC_PVR_NO_SHADEFAST, and
+ * this is not defensive: in dc_pvr.c the whole `need_light` variable lives
+ * inside `#if !defined(DC_PVR_NO_LIGHTING) && !defined(DC_PVR_NO_SHADEFAST)`,
+ * so in those builds the normal-transform block is compiled WITHOUT its guard
+ * and reads normal[] on every vertex of every batch. Skipping the stores there
+ * would light geometry off a zero normal. Both are reachable through DC_XDEFS,
+ * which lands in the global DEFINES, so this file does see them. */
+/* 🔴 DEFAULT FLIPPED TO **OFF** 2026-08-09, THE DAY IT SHIPPED, BECAUSE THE GATE
+ * PROVED IT IS A STRICT NO-OP. Opt in with -DDC_GX_NRMSKIP; there is no reason
+ * to.
+ *
+ * THE MEASUREMENT: `-DDC_GX_NRMSKIP_VERIFY`, 360 s town run
+ * (`smoke-gate-20260809-132911`), read
+ *
+ *     [GXVERIFY] nrmskip=0 nrmskipchk=427327 nrmskipbad=0
+ *
+ * — **427,327 batches offered a normal and NOT ONE of them was skippable.**
+ *
+ * THE REASON, found in the decomp after the counter said so — emu64 ALREADY
+ * GUARDS THE CALL (`src/static/libforest/emu64/emu64.c:2785-2787`):
+ *
+ *     // If geometry mode lighting is enabled, write vertex normals
+ *     if ((this->geometry_mode & G_LIGHTING) != 0) {
+ *         GXNormal3f32(emu_vtx->normal.x, ...);
+ *     }
+ *
+ * So an unlit batch never reaches GXNormal* at all, and the work this was
+ * written to remove had already been removed upstream, in `src/`, by the
+ * original developers. All the switch can do is add three g_gx loads and a
+ * branch per call to reach a `return` that never happens.
+ *
+ * ⚠️ **THE KB RANKED THIS WRONG, NOT BY DEGREE BUT ENTIRELY.**
+ * `kb/research-sh4zam-gap.md` G-J said: *"emu64 calls GXNormal3f32 thousands of
+ * times a frame to fill a field the backend discards when need_light is false.
+ * Skipping it for unlit batches is legal — that is a work-removal idea and it
+ * outranks every arithmetic idea in this table."* The premise was never checked
+ * against the call site. **Check the CALLER before costing a callee's skip.**
+ *
+ * The code and its gate are kept, not deleted: they are the evidence, and the
+ * counter is what anyone re-proposing this should be shown first.
+ *
+ * ⚠️ It also auto-disables under -DDC_PVR_NO_LIGHTING / -DDC_PVR_NO_SHADEFAST,
+ * and that arm is NOT redundant with the default above — it is what keeps an
+ * explicit -DDC_GX_NRMSKIP from lighting geometry off a zero normal, because in
+ * those builds dc_pvr.c's normal-transform block compiles WITHOUT its
+ * `need_light` guard. */
+#if !defined(DC_GX_NRMSKIP) && !defined(DC_GX_NO_NRMSKIP)
+#define DC_GX_NO_NRMSKIP 1
+#endif
+#if (defined(DC_PVR_NO_LIGHTING) || defined(DC_PVR_NO_SHADEFAST)) && \
+    !defined(DC_GX_NO_NRMSKIP)
+#define DC_GX_NO_NRMSKIP 1
+#endif
+
+/* ---- The gates ------------------------------------------------------------
+ * -DDC_GX_NRMSKIP_VERIFY and -DDC_GX_GHCULL_VERIFY. BOTH ARE SLOWER BY
+ * CONSTRUCTION — the first adds a static write per GXNormal call, the second
+ * runs both frustum implementations on every batch. They are correctness runs.
+ * NEVER quote a us/v or an FPS off a build carrying either.
+ *
+ * WHAT THE NORMAL GATE IS FOR. The skip above is only sound if the channel
+ * state that was live when a vertex was STAGED is the state that is live when
+ * the batch is SUBMITTED. §3.6 behaviour 3 makes that true — GXSetChanCtrl and
+ * GXSetNumChans call dc_gx_flush_if_begin_complete() before every write — but
+ * "if_begin_COMPLETE" is the loophole: a setter reached with a half-built
+ * batch open does NOT flush it, and would change the predicate underneath
+ * vertices already staged with skipped normals. So the gate watches both
+ * windows: dc_gx_normal_dead() flags a disagreement between two GXNormal calls
+ * inside one batch, and dc_gx_flush_vertices() flags a disagreement between
+ * what was staged and what is live at the seam.
+ *
+ * Counters are file-static and printed by dc_gx_nrmskip_report() below, called
+ * from dc_gx_frame_timing_snapshot(). They are NOT published as globals the
+ * way dc_gx_api_* are, because the [GXAPI] print lives in dc_vi.c and this
+ * work is scoped to this file; a self-contained reporter needs no second TU. */
+#if defined(DC_GX_NRMSKIP_VERIFY) || defined(DC_GX_GHCULL_VERIFY) || \
+    defined(DC_PERF_GXAPI)
+#define DC_GX_VERIFY_REPORT 1
+static unsigned int s_nrmskip = 0;      /* GXNormal* calls whose body was cut */
+#endif
+#ifdef DC_GX_NRMSKIP_VERIFY
+static unsigned int s_nrmskip_chk = 0;  /* batches the seam compared          */
+static unsigned int s_nrmskip_bad = 0;  /* ...and disagreed on. MUST BE 0     */
+/* -1 = no normal has been offered for the batch currently staging. */
+static int s_nrmskip_staged = -1;
+#endif
+#ifdef DC_GX_GHCULL_VERIFY
+static unsigned int s_ghcull_chk = 0;
+static unsigned int s_ghcull_bad = 0;   /* MUST BE 0 before change 2 ships    */
+#endif
+
+/* Returns 1 when the GXNormal* body can be skipped. Everything under the
+ * VERIFY ifdefs vanishes in a shipping build, leaving the predicate and a
+ * branch the caller was going to take anyway. */
+#ifndef DC_GX_NO_NRMSKIP
+static inline int dc_gx_normal_dead(void) {
+    int skip = !dc_gx_normal_needed();
+#ifdef DC_GX_NRMSKIP_VERIFY
+    if (s_nrmskip_staged < 0) s_nrmskip_staged = skip;
+    else if (s_nrmskip_staged != skip) s_nrmskip_bad++;
+#endif
+#ifdef DC_GX_VERIFY_REPORT
+    if (skip) s_nrmskip++;
+#endif
+    return skip;
+}
+#endif
+
 /* Set when a flush actually broke a batch; the next state change claims it,
  * attributing the break to its cause. */
 static int s_flush_pending_attr = 0;
@@ -546,9 +699,11 @@ void dc_gx_flush_if_begin_complete(void) {
  * draw. Merged batches share one matrix by construction (merging requires
  * dirty == 0).
  */
-/* THE CLIP HALF, SPLIT OUT FOR G3 (2026-08-08). Body verbatim from what used
- * to be the tail of dc_gx_batch_is_offscreen; nothing about the arithmetic
- * changed, and the batch entry point below still calls it.
+/* THE CLIP HALF, SPLIT OUT FOR G3 (2026-08-08). It was the tail of
+ * dc_gx_batch_is_offscreen and the batch entry point below still calls it.
+ * ⚠️ THE ARITHMETIC IS NO LONGER THE 2026-08-08 ONE: change 2 replaced the
+ * 8-corner test with Gribb-Hartmann planes (see below). The 8-corner body is
+ * kept verbatim as the -DDC_GX_NO_GHCULL fallback and as the VERIFY oracle.
  *
  * WHY IT IS EXPORTED. G3 (dc/src/dc_emu64_cull.cpp) needs the SAME test one
  * command earlier — at G_TRIN_INDEPEND entry, over emu64's own vertex array,
@@ -567,8 +722,23 @@ void dc_gx_flush_if_begin_complete(void) {
  * ⚠️ PURE SCALAR, ON PURPOSE — it touches no matrix unit, so it needs no
  * dc_mtx_xmtrx_invalidate(). If RESUME §5 item 4 ever converts these 200 mults
  * to FTRV, the invalidate becomes mandatory (precedent: dc_pvr.c:2812) and
- * that change must not be landed in the same build as G3. */
-int dc_gx_aabb_is_offscreen(const float* mn, const float* mx) {
+ * that change must not be landed in the same build as G3. THE GRIBB-HARTMANN
+ * FORM BELOW HONOURS THIS: it folds P*MV with ordinary FMULs and never touches
+ * XMTRX, so the "no invalidate needed" property is preserved, not spent.
+ *
+ * ⚠️ NOTHING IS CACHED ACROSS CALLS. Both g_gx.current_mtx and
+ * g_gx.projection_mtx change between calls (that is the whole content of the
+ * ordering warning above) and there is no cheap validity token for either — a
+ * static fold would need one, and getting it wrong culls visible geometry. The
+ * fold is recomputed per call and is still ~4x cheaper than what it replaced.
+ */
+
+/* ---- The 8-corner form: the reference, and the -DDC_GX_NO_GHCULL fallback --
+ * Body verbatim from what shipped before change 2. Do not "tidy" it: under
+ * -DDC_GX_GHCULL_VERIFY it is the oracle the new form is scored against, and
+ * an oracle that has been edited proves nothing. */
+#if defined(DC_GX_NO_GHCULL) || defined(DC_GX_GHCULL_VERIFY)
+static int dc_gx_aabb_offscreen_corners(const float* mn, const float* mx) {
     float (*mv)[4];
     float (*pr)[4];
     int outside[6];
@@ -599,6 +769,119 @@ int dc_gx_aabb_is_offscreen(const float* mn, const float* mx) {
     for (p = 0; p < 6; p++)
         if (outside[p] == 8) return 1;
     return 0;
+}
+#endif
+
+#ifndef DC_GX_NO_GHCULL
+/* ---- CHANGE 2: Gribb-Hartmann planes + the positive-vertex test ------------
+ * Kill switch: -DDC_GX_NO_GHCULL restores the 8-corner form above verbatim.
+ *
+ * THE COST. The old form pushed all 8 corners through BOTH matrices — 8 x
+ * (3 + 4) dot products, ~200 multiplies — with no early-out whatsoever: it
+ * always did all 8 corners and always then scanned all 6 planes. This one
+ * folds P*MV once (48 multiplies; the same fold dc_pvr.c already does per
+ * batch) and then spends 3 multiplies per plane on ONE point, returning the
+ * instant a plane rejects. A batch behind the camera or off the left edge —
+ * the common rejection, and this cull rejects 60-80 % of what it sees —
+ * costs 48 + 3 or 48 + 6.
+ *
+ * WHY IT IS THE SAME TEST, NOT AN APPROXIMATION. "all 8 corners are strictly
+ * outside plane p" is, for a linear functional over a box, exactly "the corner
+ * that MAXIMISES that functional is outside p" — the positive vertex, chosen
+ * componentwise by the sign of the plane normal. No corner can beat it, so if
+ * it fails the whole box fails. The 6 planes are Gribb-Hartmann: with
+ * F = P*MV and c = F*(x,y,z,1), the old `cx < -cw` is `(F3+F0)·v < 0` and
+ * `cx > cw` is `(F3-F0)·v < 0`, and likewise for y and z. The plane ORDER is
+ * kept identical to the old outside[] indices so a VERIFY disagreement can be
+ * read against the same numbering.
+ *
+ * MV IS 3x4 AFFINE. GX stores the modelview row-major with an implicit fourth
+ * row of (0,0,0,1), which is why the fold's fourth column picks up pr[i][3]
+ * directly and columns 0-2 have only three terms.
+ *
+ * THE ONLY EXPECTED DIFFERENCE is float rounding: (P*MV)*v and P*(MV*v)
+ * associate differently, so a batch resting exactly on a plane can flip. That
+ * flips a batch between "drawn" and "not drawn" at the pixel where it
+ * contributes nothing, and -DDC_GX_GHCULL_VERIFY exists to show how often it
+ * happens at all.
+ *
+ * ⚠️ NaN STAYS CONSERVATIVE, AND THE COMPARISON IS WRITTEN FOR IT. The old
+ * form culls nothing containing a NaN, because a NaN takes neither `<` nor
+ * `>` so outside[p] can never reach 8. Here the reject is `dist < 0.0f`,
+ * which a NaN also fails to take — so a NaN box is drawn, exactly as before.
+ * The positive-vertex SELECT is the one place the two forms could have
+ * diverged: if mn[c] were NaN while mx[c] was finite, this form could pick the
+ * finite one and cull where the old form would not. It cannot arise — both
+ * producers of these boxes (dc_gx_batch_is_offscreen() below and cull_batch()
+ * in dc_emu64_cull.cpp) seed mn[c] and mx[c] from the SAME vertex and then use
+ * the `if (a < n) ... else if (a > x)` form, under which a NaN updates neither
+ * extremum. So mn[c] and mx[c] are NaN together or not at all. */
+static int dc_gx_aabb_offscreen_gh(const float* mn, const float* mx) {
+    float (*mv)[4];
+    float (*pr)[4];
+    float f[4][4];
+    int i, p;
+
+    mv = g_gx.pos_mtx[g_gx.current_mtx];
+    pr = g_gx.projection_mtx;
+
+    /* F = P * MV, with MV's implicit fourth row (0,0,0,1). */
+    for (i = 0; i < 4; i++) {
+        float p0 = pr[i][0], p1 = pr[i][1], p2 = pr[i][2];
+        f[i][0] = p0 * mv[0][0] + p1 * mv[1][0] + p2 * mv[2][0];
+        f[i][1] = p0 * mv[0][1] + p1 * mv[1][1] + p2 * mv[2][1];
+        f[i][2] = p0 * mv[0][2] + p1 * mv[1][2] + p2 * mv[2][2];
+        f[i][3] = p0 * mv[0][3] + p1 * mv[1][3] + p2 * mv[2][3] + pr[i][3];
+    }
+
+    /* p even = row3 + row(p/2), the old `< -w` half; p odd = row3 - row(p/2),
+     * the old `> +w` half. Same 6 planes, same order. */
+    for (p = 0; p < 6; p++) {
+        int r = p >> 1;
+        float a, b, c, d, px, py, pz;
+        if (p & 1) {
+            a = f[3][0] - f[r][0]; b = f[3][1] - f[r][1];
+            c = f[3][2] - f[r][2]; d = f[3][3] - f[r][3];
+        } else {
+            a = f[3][0] + f[r][0]; b = f[3][1] + f[r][1];
+            c = f[3][2] + f[r][2]; d = f[3][3] + f[r][3];
+        }
+        /* The positive vertex: the corner that maximises a*x + b*y + c*z. */
+        px = (a >= 0.0f) ? mx[0] : mn[0];
+        py = (b >= 0.0f) ? mx[1] : mn[1];
+        pz = (c >= 0.0f) ? mx[2] : mn[2];
+        if (a * px + b * py + c * pz + d < 0.0f)
+            return 1;               /* NaN does not take this branch */
+    }
+    return 0;
+}
+#endif /* !DC_GX_NO_GHCULL */
+
+/* The one entry point. dc_gx_batch_is_offscreen() below, dc_emu64_cull.cpp's
+ * cull_batch() and the declaration in dc_platform.h all bind to this name and
+ * this signature; nothing outside this file changes.
+ *
+ * ⚠️ -DDC_GX_NO_GHCULL WINS over -DDC_GX_GHCULL_VERIFY: with the new form
+ * compiled out there is nothing to verify, and a build carrying both gets the
+ * plain old cull rather than a comparison of the oracle with itself. */
+int dc_gx_aabb_is_offscreen(const float* mn, const float* mx) {
+#if defined(DC_GX_NO_GHCULL)
+    return dc_gx_aabb_offscreen_corners(mn, mx);
+#elif defined(DC_GX_GHCULL_VERIFY)
+    /* ⚠️ SLOWER THAN EITHER BUILD BY CONSTRUCTION — it runs both. This is a
+     * correctness run and never a perf run; do not quote us/v off it. Returns
+     * the OLD answer, so a disagreement is counted without changing what is
+     * drawn, and `ghcullbad=` must read 0 before change 2 ships. */
+    {
+        int old_ans = dc_gx_aabb_offscreen_corners(mn, mx);
+        int new_ans = dc_gx_aabb_offscreen_gh(mn, mx);
+        s_ghcull_chk++;
+        if (old_ans != new_ans) s_ghcull_bad++;
+        return old_ans;
+    }
+#else
+    return dc_gx_aabb_offscreen_gh(mn, mx);
+#endif
 }
 
 static int dc_gx_batch_is_offscreen(int count) {
@@ -669,6 +952,22 @@ void dc_gx_flush_vertices(void) {
 
     if (count == 0) return;
     t0 = dc_time_us();
+#ifdef DC_GX_NRMSKIP_VERIFY
+    /* THE SEAM THE NORMAL SKIP RESTS ON. Placed before the frameskip and cull
+     * early-returns on purpose: every path out of this function drains the
+     * staging buffer, so this is the only point that sees every staged batch,
+     * and leaving s_nrmskip_staged set past a culled batch would carry one
+     * batch's decision into the next one's check.
+     *
+     * A batch that offered no normal at all (staged == -1) is not scored: it
+     * skipped nothing, so there is nothing to be wrong about. */
+    if (s_nrmskip_staged >= 0) {
+        s_nrmskip_chk++;
+        if (s_nrmskip_staged != !dc_gx_normal_needed())
+            s_nrmskip_bad++;
+    }
+    s_nrmskip_staged = -1;
+#endif
 #ifdef DC_PERF_PHASE
     /* Snapshot-and-clear on EVERY exit path below, so the source count always
      * belongs to the batch whose `count` it is being compared against. A
@@ -758,7 +1057,55 @@ void dc_gx_flush_vertices(void) {
 #undef DC_PH_SRC
 }
 
+/* The verify print. Non-static so a debugger or a future call site can force
+ * it, but it does not need one: dc_gx_frame_timing_snapshot() below calls it
+ * once a second's worth of frames.
+ *
+ * It is its OWN #if and does NOT sit inside the DC_PERF_PHASE block above —
+ * see the same warning in dc_vi.c about [EMU64H]. An instrument whose count
+ * sites and whose print site are gated differently arms, pays for itself, and
+ * prints nothing.
+ *
+ * ⚠️ THE ONLY NUMBERS THAT MATTER ARE THE TWO ENDING `bad`. Both MUST read 0.
+ * nrmskip= and ghcullchk= are population counts, there to prove the gate
+ * actually ran — a `bad=0` next to a `chk=0` says nothing was tested. */
+#ifdef DC_GX_VERIFY_REPORT
+void dc_gx_nrmskip_report(void) {
+    /* ⚠️ THE LOCALS ARE NOT STYLE. DC_LOG is a function-like macro
+     * (dc_platform.h: `#define DC_LOG(...)`), and a #if inside a macro
+     * argument list is undefined behaviour — the gating has to happen before
+     * the call, not inside it.
+     *
+     * ⚠️ DC_LOGE, NOT DC_LOG: DC_LOG is swallowed unless g_pc_verbose is set,
+     * and a correctness gate that silently prints nothing is worse than no
+     * gate. This line is a handful of characters once every 60 frames in a
+     * build that already runs both cull implementations. */
+    unsigned int nchk = 0, nbad = 0, gchk = 0, gbad = 0;
+#ifdef DC_GX_NRMSKIP_VERIFY
+    nchk = s_nrmskip_chk; nbad = s_nrmskip_bad;
+#endif
+#ifdef DC_GX_GHCULL_VERIFY
+    gchk = s_ghcull_chk;  gbad = s_ghcull_bad;
+#endif
+    DC_LOGE("[GXVERIFY] nrmskip=%u nrmskipchk=%u nrmskipbad=%u"
+            " ghcullchk=%u ghcullbad=%u\n",
+            s_nrmskip, nchk, nbad, gchk, gbad);
+}
+#endif
+
 void dc_gx_frame_timing_snapshot(void) {
+#ifdef DC_GX_VERIFY_REPORT
+    /* Once every 60 calls. This runs per frame and DC_LOG is a serial write;
+     * printing it every frame would dominate a build that is already slow by
+     * construction, and the counters are cumulative so no window is lost. */
+    {
+        static unsigned int s_verify_frames = 0;
+        if (++s_verify_frames >= 60u) {
+            s_verify_frames = 0;
+            dc_gx_nrmskip_report();
+        }
+    }
+#endif
     dc_gx_flush_time_us = s_flush_time_acc;
     dc_gx_texload_time_us = dc_gx_texload_acc;
     s_flush_time_acc = 0;
@@ -1235,12 +1582,22 @@ void GXNormal3f32(f32 x, f32 y, f32 z) {
 #ifdef DC_PERF_GXAPI
     DC_GXAPI(s_api_nrm);
 #endif
+    /* CHANGE 1. Counted first, skipped second: s_api_nrm keeps meaning "GX
+     * normal API calls the game made", which is what [GXAPI] is for and what
+     * every earlier number using it assumed. The skipped subset is a SEPARATE
+     * counter (s_nrmskip) so the two can be read side by side. Argument
+     * for soundness: the block above dc_gx_normal_needed(). */
+#ifndef DC_GX_NO_NRMSKIP
+    if (dc_gx_normal_dead()) return;
+#endif
     /* Stored as s16 fixed point; SH-4 lighting consumes it that way.
      *
      * ⚠️ A "one magnitude test instead of six clamps" fast path was written
      * here and REVERTED: measured across 215 counter-matched windows it moved
      * nothing (see the note on GXPosition3f32 above). The six clamps stay
-     * because they are the obvious code and they cost nothing measurable. */
+     * because they are the obvious code and they cost nothing measurable.
+     * Change 1 above is not a second attempt at that: it removes the call,
+     * not part of it. */
     float sx = x * DC_GX_NRM_SCALE, sy = y * DC_GX_NRM_SCALE, sz = z * DC_GX_NRM_SCALE;
     if (sx >  32767.0f) sx =  32767.0f;
     if (sx < -32768.0f) sx = -32768.0f;
@@ -1256,18 +1613,49 @@ void GXNormal3s16(s16 x, s16 y, s16 z) {
 #ifdef DC_PERF_GXAPI
     DC_GXAPI(s_api_nrm);
 #endif
+#ifndef DC_GX_NO_NRMSKIP
+    if (dc_gx_normal_dead()) return;    /* three dead stores */
+#endif
     g_gx.current_vertex.normal[0] = x;
     g_gx.current_vertex.normal[1] = y;
     g_gx.current_vertex.normal[2] = z;
 }
+/* ⚠️ THE SKIP IN THESE TWO IS PLACED SO s_api_nrm STILL COUNTS. Both used to
+ * reach the census only by tail-calling GXNormal3f32, so an unguarded early
+ * return here would have silently DEFLATED [GXAPI]'s nrm= — the counter would
+ * have started meaning "unlit normal calls" halfway through the project's
+ * history. Each therefore does its own DC_GXAPI() on the skip path, and
+ * GXNormal1x16 keeps its array_base test FIRST so the call it does not make
+ * is still the call it did not count before. */
 void GXNormal3s8(s8 x, s8 y, s8 z) {
+#ifndef DC_GX_NO_NRMSKIP
+    if (dc_gx_normal_dead()) {          /* three divides + the call */
+#ifdef DC_PERF_GXAPI
+        DC_GXAPI(s_api_nrm);
+#endif
+        return;
+    }
+#endif
     GXNormal3f32(x / 127.0f, y / 127.0f, z / 127.0f);
 }
 void GXNormal1x16(u16 index) {
     if (g_gx.array_base[GX_VA_NRM]) {
+#ifndef DC_GX_NO_NRMSKIP
+        /* Skips the INDEXED LOAD as well as the stores — a stride multiply and
+         * a 12-byte read out of the game's normal array, i.e. a cache line
+         * this batch then never needed. */
+        if (dc_gx_normal_dead()) {
+#ifdef DC_PERF_GXAPI
+            DC_GXAPI(s_api_nrm);
+#endif
+            return;
+        }
+#endif
+        {
         const u8* base = (const u8*)g_gx.array_base[GX_VA_NRM];
         const f32* nrm = (const f32*)(base + index * g_gx.array_stride[GX_VA_NRM]);
         GXNormal3f32(nrm[0], nrm[1], nrm[2]);
+        }
     }
 }
 void GXNormal1x8(u8 index) { GXNormal1x16(index); }

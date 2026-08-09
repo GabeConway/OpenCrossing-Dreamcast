@@ -287,11 +287,50 @@ position before it's ready, which would cause a pipeline stall."*
 because its mechanism is overlapping latency with *stores*, not doing less
 arithmetic — and G-C already put us on the DR path it assumes.
 
-### G-F 🟢 DEMOTED — four frustum planes in one FTRV
+### G-F 🔴 RETIRED 2026-08-09 — MEASURED AT LAST, AND THE WHOLE TEST IS 0.14 ms
 
-⚠️ **Re-costed and demoted before anyone wrote code.** The late-path cull is
-**0.70 ms of a 30.39 ms draw — 2.3 %** (§3), not the 2.0 ms this was ranked on,
-and G3's own calls are **not timed at all**. Cheap experiment, low value.
+> 🔴 **DO NOT WRITE THE FTRV FORM.** S14-8's `fus=` bracket timed
+> `dc_gx_aabb_is_offscreen()` on its own for the first time: **0.139 ms/frame
+> typical, 0.292 ms in a cull-heavy window — under 0.5 % of a ~29 ms draw.**
+> This section was ranked on 2.0 ms, then re-ranked on 0.70 ms, and both were
+> the wrong quantity: 0.70 ms was `[PHASE]`'s `cull=`, the LATE cull, and the
+> real number for the test itself is five times smaller again. There is nothing
+> here to win by any implementation.
+>
+> ⭐ **What the same bracket DID find is 15x bigger and is not a frustum
+> problem at all: `cds=` — emu64's own `dirty_check` + `setup_1tri_2tri_1quad`,
+> called from inside `cull_batch()` because the frustum test needs
+> `projection_mtx` and `current_mtx` live — is 2.2 ms/frame, 73 % of G3's entry
+> cost, and ~93 % of it lands on batches that are not culled and whose original
+> handler calls the same two functions again.** `kb/batch-s14.md` §5.
+
+The cheap shape shipped anyway, because it was already written and it is
+strictly less work: Gribb-Hartmann planes + the positive-vertex test, ON by
+default, kill switch `-DDC_GX_NO_GHCULL`, gate `-DDC_GX_GHCULL_VERIFY`
+(`ghcullbad=` must read 0). Details below, kept for the record.
+
+#### The shape that shipped (S14-5)
+
+**What shipped:** the second bullet below — Gribb-Hartmann planes extracted from
+a folded `P·MV` plus the **positive-vertex test**, in `dc_gx_aabb_is_offscreen()`
+(`dc/src/dc_gx.c`), **ON by default**, kill switch **`-DDC_GX_NO_GHCULL`**. The
+8-corner form is kept verbatim as the fallback *and* as the oracle for
+**`-DDC_GX_GHCULL_VERIFY`**, which runs both and counts `ghcullbad=`. ~200
+unconditional multiplies with no early-out became one 48-multiply fold plus 3
+multiplies per plane, returning on the first rejecting plane. It stays **pure
+scalar**, so the "no `dc_mtx_xmtrx_invalidate()` needed" property is preserved
+rather than spent. `kb/batch-s14.md`.
+
+**What did NOT ship and is still open:** the FTRV form at the bottom of this
+section. It remains second-order — and now demonstrably so, because the cheap
+shape took the same win without touching XMTRX.
+
+⚠️ **The costing this was demoted on was itself wrong, and S14 fixed the
+instrument.** The late-path cull is 0.70 ms of a 30.39 ms draw, but **G3's own
+calls were not timed at all** — `dc_emu64_cull.cpp` contained zero
+`dc_time_us()` reads, and G3 *adds* a cull rather than replacing one. S14-8
+added the `cus=` bracket to `[EMU64C]`. **Cost G-F against `cus=` + `cull=`,
+never `cull=` alone.**
 
 Three facts the DMS shape does not survive contact with:
 
@@ -386,10 +425,28 @@ established that jaudio's hot path contains an FFT-shaped transform at all.** Re
 | `lerp_vtx` | `dc/src/dc_pvr.c:2725` | clip path only |
 | `GXNormal3f32` | `dc/src/dc_gx.c:1234` | 3 mul + 6 compares + 3 float→short |
 
-⚠️ Note on the last row: emu64 calls `GXNormal3f32` thousands of times a frame to
-fill a field the backend **discards when `need_light` is false**. Skipping it for
-unlit batches is legal (GX state cannot change mid-batch) — that is a
-*work-removal* idea and outranks every arithmetic idea in this table.
+🔴 **STRUCK 2026-08-09. The last row's note said: *"emu64 calls `GXNormal3f32`
+thousands of times a frame to fill a field the backend discards when
+`need_light` is false. Skipping it for unlit batches is legal — that is a
+work-removal idea and outranks every arithmetic idea in this table."* IT WAS
+BUILT AND IT IS A STRICT NO-OP.** `-DDC_GX_NRMSKIP_VERIFY` over a 360 s town run
+read `nrmskip=0 nrmskipchk=427327` — 427,327 batches offered a normal and not one
+was skippable — because **emu64 already guards the call**
+(`src/static/libforest/emu64/emu64.c:2785-2787`):
+
+```c
+/* If geometry mode lighting is enabled, write vertex normals */
+if ((this->geometry_mode & G_LIGHTING) != 0) {
+    GXNormal3f32(emu_vtx->normal.x, ...);
+}
+```
+
+An unlit batch never reaches `GXNormal*`. The work had already been removed
+upstream in `src/` by the original developers, and the premise was never checked
+against the call site. **The general lesson: check the CALLER before costing a
+callee's skip** — and note the two predicates are not even the same one
+(emu64's `G_LIGHTING` geometry-mode bit vs `dc_gx`'s channel state).
+Now opt-in only, `-DDC_GX_NRMSKIP`. `kb/batch-s14.md` §2b.
 
 ---
 
@@ -430,8 +487,13 @@ content; the intermediate tables have been deleted.**
 ⭐⭐⭐ **All the floating-point stages of the vertex path together are ~0.8 ms of
 a ~30 ms frame.** What costs is memory traffic: the memo's read, the per-corner
 store-queue copy, and the shade pass. Corroborated from the other end by
-`tools/dcopt/icache_map.py` (the 12-symbol inner loop is 1.4x an 8 KB
-direct-mapped icache; the whole frame hot set is 11.9x). ⚠️ **Flycast models
+`tools/dcopt/icache_map.py` — the inner loop is **2.62x** an 8 KB direct-mapped
+icache and the whole frame hot set **16.40x**. ⚠️ **The 1.4x / 11.9x figures
+this section used to quote are FALSIFIED (2026-08-09, S14): the tool's hot-set
+regexes matched `^_dl_G_` and `^_emu64`, but emu64 is C++ and every handler is
+mangled, so the interpreter — most of the draw — was absent from the measurement
+of its own cache pressure. Verified in the map: `.text._ZN5emu64*` = 105
+sections, `.text.dl_G_*` = 0.** `kb/batch-s14.md` §5. ⚠️ **Flycast models
 neither cache, so every figure here is an understatement.**
 
 **Current `[VTXSPLIT]` split** (`-DDC_PVR_VTXSPLIT=16`, town, per PRESENTED
@@ -622,30 +684,35 @@ direction found.
 ✅ **G-A — DONE 2026-08-08.** ✅ **G-C — DONE 2026-08-08.**
 ✅ **§3's blocking measurement — DONE; the frame is memory-bound.**
 ✅ **G-B(1), the vertex-index side channel — SHIPPED 2026-08-09.**
+✅ **2026-08-09, batch S14 (`kb/batch-s14.md`)** — the decal-Z arming lift (was
+item 3), G-J's `GXNormal*` skip for unlit batches (was in item 4), G-F's cheap
+shape (was item 5), F5's linker section ordering (was in item 4), and three
+cache-layout/store-removal fixes in `dc_pvr.c`. **All ON by default, each with a
+kill switch.**
 
-1. 🔴 **G-B(2) — the indexed-submit rewrite, 13.31 ms.** Design before coding;
+1. 🔴 **G-B(2) — the indexed-submit rewrite, 13.31 ms.** Now by a wide margin the
+   largest thing left; S14 deliberately did not touch it. Design before coding;
    read §1 G-B(2)'s three `set_position` mutation hazards. Multi-session.
 2. **`shade_vertex` — 1.82 ms**, the largest stage inside `xform` and never on
    any list. ⚠️ Its two written-and-defaulted-OFF shortcuts
    (`-DDC_PVR_SHADE_LAZYRGBA`, `-DDC_PVR_SHADE_ALPHA8`) are **settled-negative
    twice**, hoisted and unhoisted (`kb/closed.md`). A third variant needs a new
-   mechanism, not a new placement.
-3. **The decal-Z arming lift** (`-DDC_GX_VTXID_DECAL`) — written, gate passed,
-   perf **not** measured, and its expected effect sits AT the ±2 % floor, so it
-   needs repeated runs (`kb/RESUME.md` §13).
-4. **G-E** (overlaps latency with stores, the right shape here), then **G-J's
-   `GXNormal3f32` skip for unlit batches** (work removal, not arithmetic), then
-   **F5/F6** in `kb/research-fps-ideas.md` (icache ordering, OCRAM — correct shape
-   for a memory-bound frame, **hardware-only to measure**).
-5. **G-F** — a cheap 0.70 ms experiment, not a valuable one. Run the
-   Gribb-Hartmann + positive-vertex form first, and **add a bracket to
-   `dc_emu64_cull.cpp` before costing anything.**
-6. **§0a + G-D + G-G** — sub-1 ms each. Last, if ever. ⚠️ §0a/G-D needs the pass
-   split because XMTRX holds `comb` across the whole loop, and a 32-vertex block
-   spends more cache than it saves unless measured.
-7. **G-I** — read `kb/audio-cpu-cost.md` before writing anything.
-8. 🔴 **The PMCR burn** (`dc/src/dc_pmcr.c`) — everything above is a Flycast
-   floor, and only `istall`/`dstall` on real hardware prices the gap.
+   mechanism, not a new placement. ⚠️ **S14-4 moved its input**: unlit batches now
+   stage a constant-zero normal, so the memo hit rate — and therefore how often
+   `shade_vertex` is called at all — has changed. Re-measure before ranking.
+3. **G-E** — software-pipeline the submit loop. ⭐ **Now the top surviving sh4zam
+   item**, because its mechanism is overlapping FTRV latency with *stores* rather
+   than doing less arithmetic, and S14-3 already put a `pref` in the same loop.
+4. **G-G** (WXYZ permutation) and the **FTRV** half of G-F — both sub-1 ms, both
+   cheaper to reason about now that S14 took the easy wins around them.
+5. **§0a + G-D** — sub-1 ms. ⚠️ §0a/G-D needs the pass split because XMTRX holds
+   `comb` across the whole loop, and a 32-vertex block spends more cache than it
+   saves unless measured.
+6. **G-I** — read `kb/audio-cpu-cost.md` before writing anything.
+7. 🔴 **The PMCR burn** (`dc/src/dc_pmcr.c`) — everything above is a Flycast
+   floor, and only `istall`/`dstall` on real hardware prices the gap. **S14 raised
+   the stakes on this**: F5 is unmeasurable in the emulator *by construction*, so
+   part of that batch has no verdict at all until a burn happens.
 
 ⚠️ **None of this is a hardware verdict.** **Screenshot rule applies to all of
 it**: `tools/dcqa/run_report.py` is the floor and cannot see colour. Judge any
