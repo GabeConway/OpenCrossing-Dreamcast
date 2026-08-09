@@ -124,14 +124,20 @@ arena 1,200,000, ARAM window 1,048,576):
 ```
 (image span) + (genuinely additive heap) ≤ 16,646,144
 
-  image span        10,364,764   _end 0x8c9f275c − 0x8c010000
-                                 .text 2,475,744 + .rodata 400,904
-                                 + .data 2,224,924 + .bss 5,249,020
+  image span        10,514,524   _end 0x8ca1705c − 0x8c010000   [T1 + keeplist-full]
+                                 .text+.rodata 3,014,196
+                                 + .data 2,225,024 + .bss 5,274,332
   additive heap      2,576,256   KOS 262,144 + arena 1,200,000
                                  + ARAM LRU 1,048,576 + threads 65,536
-  ⇒ margin           3,705,124
-  ⇒ REAL headroom  ≈   648,848   margin − the 3,056,276 B libc peak (rule 6)
+  ⇒ margin           3,555,364
+  ⇒ REAL headroom  ≈   499,088   margin − the 3,056,276 B libc peak (rule 6)
 ```
+
+⭐ **`.bss` MOVED +25,312 B WHILE 650 MODEL FILES BECAME REAL.** T1 paid for
+almost the whole keep-list expansion: it took 885,984 B of texture arrays out
+and the new content put 899,640 B of geometry back. What grew is `.text` +
+`.rodata` (+137,548), which is the 6,068-row map plus 318 more keep-list loader
+calls. The pre-T1 baseline for comparison is `.bss` 5,249,020, span 10,375,116.
 
 ⚠️ **`margin=` is not headroom** — it *is* libc's pool, and `MEMLEDGER FIT … OK`
 does not mean the image boots. `kb/heap-two-pools.md`.
@@ -153,9 +159,63 @@ now PLAYABILITY.** ⚠️ **"Eliminate stub loading" is not the lever** — a fu
 `DC_ASSET_STUB=0` image is refuted by a boot and has LESS content than the
 stubbed one (below). **The stub system already IS the demand loader**
 (`dc_stub_keep_load_one()` / `dc_keep_sweep()`); what limits the game is that
-the **keep list is static — 765 entries chosen at build time.** The goal is to
-stop a build-time list deciding what exists: T1 (action 7), then R2/R3 behind
-N2b, then the 74 `obj_s_*` and 84 `obj_w_*` structures.
+the **keep list is static.**
+
+✅ **T1 LANDED THE SAME DAY (`kb/levers.md` L10).** All 6,068 display-list
+texture arrays are read off `/cd/foresta.rel` at bind time and are no longer in
+`.bss`: **−841,888 B measured on a matched link**, `fail=0`, `evictions=0`,
+`ASSET MISSING 0`, deepest scene 9. The freed bytes were spent on
+`tools/dcstub/keeplist-full.txt` — 650 more `src/data/model/` files, 899,640 B
+of geometry that rendered as NOTHING before, priority-ordered so the shops,
+room interiors, player tools, HUD windows and all 43 winter structures come
+first. Shipping span **10,553,116 B**, ~460 KB under the ceiling.
+
+⚠️ **NOT SIGNED OFF, and the reason is a human report the counters do not
+show.** A matched baseline (T1 off, `keeplist-town`, same probe set) was run and
+the frames compare CLEAN — the "lavender ground" that looked like a regression
+is the paved plaza, identical in both, and the two runs simply seeded different
+towns and walked to different places. ⚠️ **That mistake was made twice in one
+session: `v=3488` (baseline) vs `v=3001` (T1) also looks like a 16 % win and is
+not one.** Rule 11 applies to SCREENSHOTS as much as to `us/v`.
+
+What the counters DO show, matched runs, same probe set:
+
+| | baseline | T1 + `keeplist-full` |
+|---|---:|---:|
+| `us/v` | 2.69 | **2.57** |
+| FPS | 14.6 | **16.4** |
+| `draw` ms | 52.3 | **47.4** |
+| `[STUTTER]` | 90 | **147** |
+
+⭐ **T1 plus 650 extra model files is FASTER than baseline.** The one real
+regression is stutters, and the time is in neither `gx` nor `snd` (mean
+unaccounted 84 ms baseline → 157 ms), i.e. it is the demand reads.
+
+✅ **T1 IS VISUALLY CLEAN — MATCHED-FRAME A/B, RULE 2 SATISFIED.** `t1only`
+(T1 on, `keeplist-town`, everything else identical to baseline) drew
+**v=3507 against baseline's 3488 — 0.5 % apart, i.e. the same town** — and
+frame 90 of each is the same scene, pixel-comparable, with no difference.
+That is the first genuinely matched screenshot pair this session produced;
+every earlier "regression" was two different towns.
+
+| | baseline | t1only | T1 + `keeplist-full` |
+|---|---:|---:|---:|
+| `v` | 3488 | 3507 | 4007 |
+| `us/v` | 2.69 | 2.67 | 2.61 |
+| FPS | 14.6 | 15.5 | 16.2 |
+| `[STUTTER]` | 90 | 110 | 109 |
+
+**T1 costs nothing per vertex and adds ~20 stutters** — the demand reads, 271 of
+them for 325,184 B. That is the whole price.
+
+🔴 **STILL OPEN: a human reports wrong/garbled textures and missing geometry
+that no captured frame reproduces**, including the matched pair above. The
+generator half is proved clean — T1 stubs exactly 1,379 extra symbols, every one
+a T1 texture row, and un-stubs nothing; `keeplist-full` is a strict superset of
+`keeplist-town`. So missing geometry is the **904 model files (1,128,096 B) the
+budget dropped**, equally absent before today. What remains unexplained is a
+class the 900 s autowalk never binds — the shops, house interiors and menus it
+never opens are the obvious candidates.
 
 **RAM is no longer the binding constraint; RESIDENCY is.** 8,813,054 B of asset
 destination arrays can never all be resident, so the keep list still decides what
@@ -167,6 +227,35 @@ contiguous malloc, and comes back with all 14,495 assets MISSING
 ---
 
 ## Ranked next actions
+
+⭐⭐ **USER DIRECTIVE 2026-08-09, end of session 15: the next two are VILLAGERS
+and the TEV FIX. Everything below them is the perf queue and waits.**
+
+**A. 🔴 N2b — wire the VMU save path, then turn R2/R3 on.** This is the whole
+villager problem and it is a SAVE bug, not an asset bug: `mNpc_SetNpcList`
+populates the town from the save's `Animal_c animals[]`
+(`m_start_data_init.c:559`), the VMU path is unwired, so `[PC] No save file
+found` and **not one villager actor is ever constructed** — measured, two 900 s
+runs to scene 9 printed zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines. R2 (236 villager
+texture sets) and R3 (32 species, with its 933-word gsSPVertex relocation table)
+are BUILT, tested to compile, and **defaulted OFF for exactly this reason** —
+nothing on the NPC path can be exercised until a villager exists. Order: save
+path → villager appears → turn R2/R3 on → then their pools can finally be
+measured. `kb/save-plan.md`, `dc/src/dc_card.c`, `dc/src/dc_npctex.c`,
+`dc/src/dc_npcmdl.c`.
+
+**B. 🔴 TEV P3 — the predicate, not the maths.** `-DDC_PVR_TEVP3` was run for
+the first time on 2026-08-09 and printed `tevp3 batches=20305 clamped=6941` in a
+town run that **never opened the name-entry keyboard**, recolouring the town and
+costing ~10 %. 26 display lists in one widget cannot be 20,305 batches. The
+`PRIM − ENV` / `oargb` derivation in `kb/tev-map-hard-cases.md` §6.6 is right;
+the recogniser is matching a shape #037 merely shares. **Log the combine words
+of the first N distinct matches, narrow it, THEN take a screenshot pair** — and
+the free falsification (`is the panel black while the 40 caps are correct?`)
+still needs a run that actually reaches the keyboard, which `DC_AUTOSTART`
+never does. §6.6a.
+
+---
 
 ⭐ **2026-08-09 — batch S14 landed eight changes, all ON by default, each with a
 kill switch: `kb/batch-s14.md` (the rollback contract).** It collected the old
@@ -213,7 +302,18 @@ rather than optional.**
    that reaches the keyboard.
 6. **N2b — wire the VMU save path.** Still the only way to get a villager into
    the town, and therefore still the gate on testing the R2/R3 pools.
-7. ⭐ **T1 — now the head of the PLAYABILITY workstream** (user directive
+0. 🔴 **THE LAVENDER TOWN GROUND — the one thing blocking T1's sign-off.**
+   Reproduce with `scratchpad/t1v2.cdi`, and settle "is it new" with
+   `base.cdi` (T1 off, `keeplist-town.txt`). If new, the discriminator after
+   that is `nowin.cdi` (T1 on, `DC_ASSETWIN_B=0`), which restores the exact
+   pre-change read path for R1 while keeping T1 — the window is the only thing
+   T1 changed about how R1 gets its bytes. ⚠️ **`console.log` appears only when
+   Flycast exits, so "no log yet" is the normal state for most of a 900 s run.
+   Do not infer a dead run from `ps` — `grep "[f]lycast"` is case-sensitive and
+   the binary is `Flycast`; that misreading cost a killed run today.**
+
+7. ✅ **T1 — DONE, see `kb/levers.md` L10 and item 0 above.** Original entry
+   kept below because its numbers were wrong in an instructive way. (user directive
    2026-08-09: *"the FPS is now good enough on hardware … make the full game
    playable"*). Phase 1 frees 579,248 B; phase 2 makes **4,711 stubbed textures
    / 2,132,352 B** loadable — content that renders as nothing today. ⚠️ **The

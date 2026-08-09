@@ -750,6 +750,114 @@ ifneq ($(DC_TEXPOOL_PROBE),0)
 DEFINES += -DDC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE)
 endif
 
+# =============================================================================
+# DC_TEXPOOL_DEMAND — T1, THE LOADER (KILL SWITCH: =0)  ⭐ DEFAULT ON
+# =============================================================================
+# Every texture array the display lists name by ADDRESS — 6,092 symbols,
+# 3,018,336 B — is stubbed to [1] and read off /cd/foresta.rel into ONE staging
+# buffer at the moment the PVR first binds it (dc/src/dc_texpool.c).
+#
+# ⭐ THIS IS THE ONE KEEP-LIST RULE THAT IS PER SYMBOL, NOT PER FILE. R1/R2/R3
+# each removed whole FILES from the list. T1 cannot: a texture array normally
+# shares its TU with the vertex arrays and display lists that must stay
+# resident, so make_stub_data.py's DEMAND_STUB set beats a keep-list entry at
+# the symbol level and pushes ~500 kept files down the partial-keep path.
+#
+# WHAT IT BUYS, both halves measured (kb/levers.md L10):
+#   -885,984 B of .bss   the 1,381 texture rows keeplist-town.txt was keeping
+#   +2,132,352 B         the 4,711 it could never afford, which render as
+#                        NOTHING today, now reachable for the price of a seek
+# Against ~73 KB of .rodata for the map and 12 KB of .bss for its sorted order.
+#
+# WHY IT IS SAFE TO KEY ON IDENTITY: the falsification probe below ran the town
+# and returned `interior=0 mutated=0 oversize=0 aliased=0` over 2,074,009 binds
+# (smoke-texprobe3-20260809-142619). Those four are the whole argument — no bind
+# lands inside a mapped array, no array's content changes between binds, the
+# decoder never reads past a row, and no two rows share an address.
+#
+# ⚠️ THE SEEKS ARE THE RISK, NOT THE CORRECTNESS. ~306 distinct textures a run
+# is ~306 GD-ROM commands = 6-30 s of mid-scene hitching on a CD-R, and Flycast
+# cannot show it (FastGDRomLoad). That is what DC_ASSETWIN_B is for: the number
+# to A/B is `reads=` on the [DC/AWIN] line, never wall clock.
+#
+# Two parts and they must agree, which is why this is ONE number:
+#   tools/dcstub/make_stub_data.py --texpool-demand   stubs them + emits the map
+#   this -D                                           compiles the loader in
+DC_TEXPOOL_DEMAND ?= 1
+ifeq ($(DC_ASSET_STUB),1)
+  ifneq ($(DC_TEXPOOL_DEMAND),0)
+    ifeq ($(wildcard $(STUBDIR)/dc_texpool_map.inc),)
+      $(error DC_TEXPOOL_DEMAND=$(DC_TEXPOOL_DEMAND) but \
+              $(STUBDIR)/dc_texpool_map.inc is missing — the stub tree was \
+              generated without --texpool-demand. Run: python3 \
+              $(ROOT)/tools/dcstub/make_stub_data.py --texpool-demand=1)
+    endif
+  endif
+DEFINES += -DDC_TEXPOOL_DEMAND=$(DC_TEXPOOL_DEMAND)
+else
+# No stub tree means no [1]-sized arrays and no generated map: every texture is
+# already resident and there is nothing to demand-load. Forced rather than left
+# to the ?= so a DC_ASSET_STUB=0 build cannot try to #include a file that was
+# never written.
+DEFINES += -DDC_TEXPOOL_DEMAND=0
+endif
+
+# =============================================================================
+# DC_ASSETWIN_B — the shared mid-scene read-ahead window (KILL SWITCH: =0)
+# =============================================================================
+# dc/src/dc_assetwin.c. Every demand load in the port reads through it: T1's
+# textures, R1's acre ground textures, R2/R3's villager fetches, and
+# dc_stub_keep_load_one()'s mid-scene path. They all issue small reads at
+# clustered offsets, one at a time, so dc_keep_sweep()'s sort-then-replay cannot
+# apply — but a window that simply stays where it was can, and it collapses
+# T1's ~306 seeks to ~40 on the measured offset distribution (median gap 512 B,
+# 863 of 905 gaps under 32 KB).
+#
+# ⚠️ IT IS A LOSS ON A RANDOM REQUEST STREAM. A refill moves up to this many
+# bytes to satisfy one ~1 KB request; at ~500 KB/s, 32 KB is ~64 ms against a
+# seek this project prices at 20-100 ms. Both clients were measured clustered
+# before the file was written. Give a third one 0 rather than shrinking this.
+#
+# Costs exactly this many bytes of .bss — a static array, not a malloc, because
+# this runs mid-scene and a malloc here comes out of libc's sbrk share, which is
+# the pool that fails as `Out of memory ... diff 1449984` on a splash screen
+# rather than as an allocation failure at the call site (kb/heap-two-pools.md).
+#
+# 0 restores a plain seek+read per request, byte-for-byte what each caller did
+# before this existed.
+# ⭐ DEFAULT 0 — OFF — AND THAT IS A MEASURED DECISION, NOT A FAILURE TO FINISH.
+# Four configurations of one 900 s town run, same build otherwise:
+#
+#   refill policy        reads   bytes off disc   [STUTTER]   (baseline: 90)
+#   32 KB always           148        4,849,664       94
+#   sectors + sequential   218        2,177,024      147
+#   OFF (this default)     271          325,184      109
+#
+# 325,184 B is the TRUE PAYLOAD. Every window variant paid 6.7x to 15x that to
+# collapse ~120 GD-ROM commands, and none of them beat OFF by enough to justify
+# it. The premise the window was built on — kb/levers.md L10's "median gap
+# 512 B, 863 of 905 gaps under 32 KB" — describes those offsets SORTED, and a
+# loader driven by the renderer's bind order cannot sort.
+#
+# ⚠️ IT IS OFF, NOT DELETED, AND THE REASON IS RULE 12. On a CD-R a seek is
+# 20-100 ms and 271 of them is 5.4-27 s; 4.85 MB of read-ahead is ~9.7 s at
+# ~500 KB/s. Those are the same order, Flycast models neither, and the emulator
+# therefore CANNOT rank them — it only made the byte cost invisible, which is
+# exactly why it preferred the 32 KB variant. **A burn settles this.** Set
+# DC_ASSETWIN_B=32768 (or 8192 with DC_ASSETWIN_MIN) to run that experiment.
+DC_ASSETWIN_B ?= 0
+DEFINES += -DDC_ASSETWIN_B=$(DC_ASSETWIN_B)
+
+# The refill for a SCATTERED request (one that does not continue the previous
+# one). The full window above is reserved for bursts. ⚠️ Its value is a rule-12
+# compromise the emulator cannot settle — measured on one workload, 32 KB-always
+# gave 148 reads / 4,849,664 B / 94 [STUTTER] and sectors-only gave 218 /
+# 2,177,024 / 147. Flycast makes a byte free and a command costly, so it ranks
+# the big refill first; a CD-R at ~500 KB/s does not. 8 KB is chosen to be wrong
+# by less either way. A BURN DECIDES THIS, NOT A SMOKE RUN.
+DC_ASSETWIN_MIN ?= 8192
+DEFINES += -DDC_ASSETWIN_MIN=$(DC_ASSETWIN_MIN)
+
 # DC_DIAG=1 turns on PC_DIAG() — the decomp's own rate-limited bring-up tracer
 # (pc/include/pc_diag.h), which is compiled out unless PC_VERBOSE_DIAG is
 # defined. It is the ONLY way to see inside graph_proc / game_main without

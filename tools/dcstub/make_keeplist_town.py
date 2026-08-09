@@ -226,6 +226,180 @@ def structure_sources(no_winter=False):
 
 
 # ---------------------------------------------------------------------------
+# --full-model — spend T1's freed bytes on the rest of src/data/model
+# ---------------------------------------------------------------------------
+# T1 (dc/src/dc_texpool.c) takes 885,984 B of texture arrays out of .bss and
+# reads them off the disc instead. That money has to go somewhere, and the
+# cheapest content in the tree is the model files this list has never named:
+# 1,545 of them, holding 1,957,224 B of NON-texture residue — vertex arrays and
+# display lists, which cannot be demand-loaded because their pointers are baked
+# into the display lists that reference them (R3 needed a 933-entry relocation
+# table to do it for 32 villager models; there is no such table here).
+#
+# ⚠️ AN UNKEPT MODEL DOES NOT LOSE A TEXTURE, IT LOSES ITS GEOMETRY.
+# make_stub_data.py rewrites its Vtx array to [1], so every triangle in the
+# unstubbed display list collapses to the origin. That is the "black spiky mess"
+# in kb/RESUME.md, and it is why this is worth buying at all: these bytes are
+# not a quality improvement, they are the difference between a building existing
+# and not existing.
+#
+# ⚠️ mFM_grd_* IS EXCLUDED AND MUST STAY EXCLUDED. R1 already demand-loads all
+# 96 ground-texture sources (dc/src/dc_bgtex.c), both seasons, for no .bss.
+# Adding them here costs 150,880 B and buys nothing.
+#
+# THE BUDGET IS NOT OPTIONAL AND IT IS NOT DECORATIVE. Measured 2026-08-09 the
+# fit inequality leaves ~1,413,832 B of headroom after T1 (kb/STATE.md), against
+# 1,806,344 B of eligible residue. The whole tree DOES NOT FIT — it is over by
+# ~392 KB — so something has to be dropped, and the choice is between dropping
+# it deliberately here or discovering it as `margin=-NNN OVER` and a build that
+# does not boot. Files are taken in ASCENDING residue order, which maximises the
+# NUMBER of complete content classes that fit; what did not fit is printed to
+# stderr, because a silent cap reads as "covered everything" when it did not.
+# ⚠️ MEASURED, NOT CHOSEN. At 1,300,000 the linked image came out at
+# _end - 0x8c010000 = 11,012,828 B against a derived ceiling of 11,013,612 —
+# 784 bytes, which is not a margin, it is a coincidence. And the ceiling itself
+# rests on a libc peak measured on 2026-08-04 against a much smaller keep list
+# and never re-derived (kb/STATE.md says so in as many words). 900,000 puts the
+# span near 10.6 MB and leaves ~375 KB, which is enough to absorb being wrong
+# about the peak. RAISE IT ONLY AGAINST AN OOM PAIR, never against arithmetic —
+# `MEMLEDGER FIT ... OK` is not a statement that the image boots (rule 6).
+MODEL_BUDGET_DEFAULT = 900000
+
+# Files that must be kept whatever the budget says, because T1 EXCLUDED symbols
+# they own. make_stub_data.py's scan_pointer_table_symbols() drops 24 texture
+# symbols out of the loader's map — they are reached through a pointer table and
+# then gSPSegment, so an address-keyed loader cannot vouch for them — which
+# means the only way those textures exist is if their file is resident.
+# Six files, 25,856 B. Four are already covered by a priority prefix; f_tree3.c
+# and obj_s_tree3.c are not, and dropping either turns a tree's leaves into
+# whatever the linker put next.
+MODEL_REQUIRED = (
+    "des_suuji.c", "des_tool.c", "des_tool2.c",
+    "f_tree3.c", "obj_s_tree3.c", "obj_w_tree3.c",
+)
+
+# ⚠️ RANKING BY SIZE ALONE IS THE WRONG OBJECTIVE, AND IT WAS TRIED FIRST.
+# Cheapest-first maximises the NUMBER of content classes that fit, and on this
+# tree that meant 1,484 pieces of furniture at the price of `player_tool.c`
+# (the held net, axe and rod), `rom_shop*` (Nook's shop interiors),
+# `rom_myhome*_wall` (your own house), `dia_win` (the DIALOGUE BOX) and the
+# whole inventory UI. Those are not decoration — they are the things a player
+# walks into within a minute of leaving Nook, and the budget was quietly
+# spending their bytes on trees.
+#
+# So: these families are taken FIRST, whole, in tree order, before the
+# cheapest-first pass gets the remainder. Each is here because the game puts it
+# in front of the player on the critical path, not because of what it costs.
+#
+#   player_      the tools the player holds
+#   rom_         ROOM interiors: the shops, the museum, your house's walls
+#   obj_shop_    the shop's merchandise displays and signage
+#   inv_         the inventory / pockets UI
+#   dia_ des_ req_ pas_ pwd_ sel_   dialogue, design, request, passwd panels
+#   cal_ clk_ tim_ onp_ kei_ ctl_ sav_ clg_ kan_ gba_ shi_ mra_ fkm_ hni_ tyo_
+#                the HUD and menu windows. The clock/date pair is behind choice
+#                index 1 and is invisible to every census ever taken
+#                (kb/RESUME.md §8), which is exactly why it has to be named.
+#   obj_w_       ⭐ THE WINTER STRUCTURES, and they are the cheapest item in
+#                this whole file: 43 files for 19,024 B after T1. They are the
+#                other half of kb/RESUME.md §7 item 5 — R1 made the winter
+#                GROUND demand-loadable but left these 84 structures stubbed,
+#                so a winter town still draws every building as a black spiky
+#                mess. Cheapest-first dropped them on the first run of this
+#                ranking, which is exactly why the priority list exists.
+MODEL_PRIORITY_PREFIXES = (
+    "obj_w_",
+    "player_", "rom_", "obj_shop_", "inv_",
+    "dia_", "des_", "req_", "pas_", "pwd_", "sel_",
+    "cal_", "clk_", "tim_", "onp_", "kei_", "ctl_", "sav_", "clg_",
+    "kan_", "gba_", "shi_", "mra_", "fkm_", "hni_", "tyo_",
+)
+
+
+def _texpool_owned():
+    """The symbol set T1 demand-loads, from make_stub_data.py itself.
+
+    Imported rather than re-derived: the two must agree about which symbols are
+    free after T1, and a second implementation of that scan is a second thing to
+    keep in step. Returns an empty set if the generator cannot be imported, and
+    says so — a silent empty set would overstate every residue below and
+    under-fill the budget, which is the safe direction but a lie.
+    """
+    import importlib.util
+    path = os.path.join(HERE, "make_stub_data.py")
+    spec = importlib.util.spec_from_file_location("_mkstub", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    table = mod.parse_asset_table(mod.ASSET_TABLE)
+    rows = mod.texpool_rows(table)
+    return {name for name, _b, _s, _o, _own in rows}, mod
+
+
+def full_model_sources(budget, already):
+    """Every remaining src/data/model/*.c that fits, cheapest first.
+
+    Returns (kept_paths, n_dropped, bytes_kept, bytes_dropped).
+    `already` is the set of repo-relative paths the earlier sections emit, so
+    the residue arithmetic prices only what this section ADDS.
+    """
+    owned, mod = _texpool_owned()
+
+    cand = []
+    for fn in sorted(os.listdir(MODEL_DIR)):
+        if not fn.endswith(".c"):
+            continue
+        if fn.startswith("mFM_grd_"):
+            continue                      # R1's, see the note above
+        r = rel(os.path.join(MODEL_DIR, fn))
+        if r in already:
+            continue
+        text = open(os.path.join(MODEL_DIR, fn), "r",
+                    encoding="utf-8", errors="surrogateescape").read()
+        if "#ifdef TARGET_PC" not in text:
+            continue                      # nothing stubbed, nothing to buy back
+        globs, stats, _ = mod.scan_declarations(text)
+        residue = sum(s for n, s in globs + stats if n not in owned)
+        if residue == 0:
+            # Pure texture file: T1 already covers every byte of it, so keeping
+            # it costs nothing and buys nothing. Emit it anyway — it is free,
+            # and leaving it out would make the count disagree with the tree.
+            cand.append((0, r))
+            continue
+        cand.append((residue, r))
+
+    # Priority families first, whole and in tree order; then everything else
+    # cheapest-first. `prio` sorts before `rest` and neither is re-sorted
+    # against the other, which is the point — see MODEL_PRIORITY_PREFIXES.
+    def is_prio(path):
+        stem = path.rsplit("/", 1)[-1]
+        return stem in MODEL_REQUIRED or stem.startswith(
+            MODEL_PRIORITY_PREFIXES)
+
+    prio = [c for c in cand if is_prio(c[1])]
+    rest = sorted(c for c in cand if not is_prio(c[1]))
+
+    kept, dropped, b_kept, b_drop = [], [], 0, 0
+    for residue, r in prio + rest:
+        if b_kept + residue > budget:
+            b_drop += residue
+            dropped.append((residue, r))
+            continue
+        kept.append(r)
+        b_kept += residue
+
+    # ⚠️ NO SILENT CAPS. What did not fit still renders as nothing, so the ten
+    # biggest casualties are named rather than summarised — a count alone reads
+    # as "a few small things" whatever it dropped.
+    if dropped:
+        sys.stderr.write("keeplist-full: budget dropped, largest first:\n")
+        for residue, r in sorted(dropped, reverse=True)[:10]:
+            sys.stderr.write("    %8d B  %s\n" % (residue, r))
+        if len(dropped) > 10:
+            sys.stderr.write("    ... and %d more\n" % (len(dropped) - 10))
+    return sorted(kept), len(dropped), b_kept, b_drop
+
+
+# ---------------------------------------------------------------------------
 # HAND-ADDED ENTRIES. These are NOT derivable from a directory glob, and they
 # were previously typed straight into keeplist-town.txt -- which meant that
 # regenerating the file silently DELETED them. That regression was caught by a
@@ -395,6 +569,14 @@ def main():
     # accepting the old flag keeps every existing invocation working.
     want_interiors = "--no-interiors" not in sys.argv
     want_winter = "--no-winter" not in sys.argv
+    # --full-model: everything else under src/data/model that fits. OPT-IN, so
+    # regenerating keeplist-town.txt is unchanged and only the new
+    # keeplist-full.txt carries it.
+    want_full_model = "--full-model" in sys.argv
+    model_budget = MODEL_BUDGET_DEFAULT
+    for a in sys.argv[1:]:
+        if a.startswith("--model-budget="):
+            model_budget = int(a.split("=", 1)[1])
 
     opening = opening_entries()
     acres = acre_sources()
@@ -496,10 +678,38 @@ def main():
     print("# pose (rhythm.c:148-155), not a bug -- do not chase it.")
     n_extra = emit(extras)
 
+    n_full = 0
+    if want_full_model:
+        full, n_drop, b_kept, b_drop = full_model_sources(
+            model_budget, set(resolved))
+        # emit() prints through `resolved`, which was built before this section
+        # existed. These are all bare paths with no '#' filter, so registering
+        # them is a plain identity insert — but it has to happen, or emit()
+        # KeyErrors on the first one.
+        for r in full:
+            resolved.setdefault(r, r)
+        print("")
+        print("# ---- the rest of src/data/model, cheapest-first, up to the")
+        print("#      %d B budget (--full-model). These are the models the town"
+              % model_budget)
+        print("#      list never named: unkept they lose their VERTEX arrays and")
+        print("#      collapse to the origin, which is the black spiky mess.")
+        print("#      Affordable only because T1 (dc/src/dc_texpool.c) took")
+        print("#      885,984 B of texture arrays out of .bss.")
+        print("#      ⚠️ NOT EVERYTHING FITS. What the budget dropped still")
+        print("#      renders as nothing; the kept/dropped byte counts go to")
+        print("#      the generator's STDERR rather than into this file, so a")
+        print("#      stale number cannot outlive the tree it was measured on.")
+        n_full = emit(full)
+        sys.stderr.write(
+            "keeplist-full: model residue kept %d B in %d files, "
+            "DROPPED %d B in %d files (budget %d)\n"
+            % (b_kept, n_full, b_drop, n_drop, model_budget))
+
     sys.stderr.write(
         "keeplist-town: %d entries (%d censused + %d acre + %d structure "
-        "+ %d extra)  [interiors %s, winter %s]\n"
-        % (len(seen), n_open, n_acre, n_str, n_extra,
+        "+ %d extra + %d model)  [interiors %s, winter %s]\n"
+        % (len(seen), n_open, n_acre, n_str, n_extra, n_full,
            "in" if want_interiors else "OUT",
            "in" if want_winter else "OUT"))
 

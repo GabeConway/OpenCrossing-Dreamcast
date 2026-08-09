@@ -45,12 +45,18 @@ Current numbers: `kb/STATE.md`.
 ### The shipping config
 
 ```bash
-DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-town.txt | paste -sd: -)" \
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-full.txt | paste -sd: -)" \
 DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
 DC_ARAM_WINDOW=1048576 DC_ARENA_BYTES=1200000 \
 DC_AUDIO_SCENES=all DC_AUDIO_DISC_FRAMES=8 DC_AUDIO_VOICES=12 \
 DC_CDI_PAD=1 bash dc/build-dc.sh
 ```
+
+⚠️ **The keep list is `keeplist-FULL.txt` since 2026-08-09**, not
+`keeplist-town.txt`. It is the town list plus 650 more `src/data/model/` files
+that T1's freed bytes pay for. `keeplist-town.txt` is still the right list for a
+T1-off build, and the two are NOT interchangeable: `keeplist-full` with
+`DC_TEXPOOL_DEMAND=0` is ~11.4 MB of span and does not fit.
 
 ⭐ **Everything else that matters is a DEFAULT and needs no flag**:
 `DC_EMU64_CULL=1` (G3), the vertex-index side channel, `pvr_dr_*` emit,
@@ -249,6 +255,58 @@ vertex. **`us/v` 2.68 → 2.51 (−6.3 %), hit rate 50.9 → 53.7 %.** Kill
   plus our own `GX*` setters; the side channel removes no setter. Several kb
   files conflated the two — do not add to that.
 
+### T1 — every display-list texture comes off the disc (`dc/src/dc_texpool.c`)
+
+Landed 2026-08-09. The 6,068 texture arrays the display lists name by ADDRESS
+are stubbed to `[1]` and read off `/cd/foresta.rel` into ONE 4,096 B staging
+buffer at the moment the PVR first binds them. **The row index is the cache
+key**, so `tex_content_hash()` — up to 512 B of main RAM read on every one of
+~109 binds a frame — is gone for those rows, and an array that is not read on a
+bind does not have to be resident. **−841,888 B on a matched link.** Kill
+`DC_TEXPOOL_DEMAND=0`. Full numbers and the runtime counters: `kb/levers.md` L10.
+
+- **Its keep-list half is the first PER-SYMBOL rule in this project.** R1/R2/R3
+  each removed whole FILES; T1 cannot, because a texture array shares its TU
+  with vertex arrays that must stay. `make_stub_data.py`'s `DEMAND_STUB` beats a
+  keep-list entry, which turned the partial-keep path from dead code into the
+  common one. `kb/traps.md` has the three things that broke on the way.
+- ⚠️ **24 rows are EXCLUDED** — reached through a pointer table and then
+  `gSPSegment`, which the old exclusion regex could not see. They stay resident;
+  their six owner files are pinned in `make_keeplist_town.py`'s `MODEL_REQUIRED`.
+- 🔴 **NOT SIGNED OFF.** The town ground renders lavender while everything else
+  in the frame is correct. Undetermined whether it is new — no screenshot of
+  this port's town predates 2026-08-09. `kb/STATE.md` action 0.
+
+### The shared read-ahead window (`dc/src/dc_assetwin.c`) — ⭐ **DEFAULT OFF**
+
+Every mid-scene demand read goes through it: T1's, R1's, R2/R3's, and
+`dc_stub_keep_load_one()`'s post-boot path (gated on `dc_stub_boot_done`, so the
+boot sweep is untouched). At `DC_ASSETWIN_B=0`, the default, that is a plain
+seek+read — byte-for-byte the pre-T1 path.
+
+🔴 **IT WAS BUILT, MEASURED FOUR WAYS, AND TURNED OFF. Do not re-propose it
+without reading this.** One 900 s town run, same build otherwise:
+
+| refill policy | reads | bytes off disc | `[STUTTER]` |
+|---|---:|---:|---:|
+| 32 KB always | 148 | 4,849,664 | 94 |
+| sectors + sequential | 218 | 2,177,024 | 147 |
+| **OFF (default)** | 271 | **325,184** | **109** |
+
+Baseline without T1 is 90 stutters. **325,184 B is the true payload; every
+window variant paid 6.7-15× it.** The premise was L10's "median gap 512 B, 863
+of 905 gaps under 32 KB" — **which describes those offsets SORTED**.
+`dc_keep_sweep()` earns clustering by sorting the whole request list first; a
+loader driven by the renderer's bind order cannot, and inheriting the conclusion
+without the sort was the error.
+
+⚠️ **It is OFF, not deleted, because RULE 12 applies.** On a CD-R, 271 seeks is
+5.4-27 s and 4.85 MB of read-ahead is ~9.7 s — the same order, and Flycast
+models neither. Its FastGDRomLoad makes a byte free, which is exactly why the
+emulator ranked the 32 KB variant best. **A burn settles it; a smoke run cannot.**
+⚠️ And judge it on `reads=` AND `bytes=` together — `reads=` alone is what hid
+the 4.8 MB for a whole iteration.
+
 ### Audio — the four rules from four burns
 
 Every burn falsified the previous fix's **scope**, never its mechanism. The
@@ -338,21 +396,24 @@ window, bracketed into `[PHASE]`'s draw/skip/vi plus `audio` and `xform`.
    `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, because `aNPC_dma_draw_data_proc`
    (`ac_npc_ctrl.c_inc:687`) never runs. **R2/R3 are DEFAULTED OFF for exactly
    this reason.** N2b is the prerequisite for testing either.
-2. 🔴 **The name-entry keyboard renders black — a whole TEV class, and the fix
-   is WRITTEN BUT NEVER RUN.** 18 of its 26 display lists are config **#037,
-   class P3**, which is **27 of the 101 configs**. The implementation exists
-   behind **`-DDC_PVR_TEVP3`, default OFF** (`dc/src/dc_pvr.c`, ~11 sites):
-   vertex base colour `= PRIM − ENV`, per-vertex `oargb = ENV`,
-   `PVR_TXRENV_MODULATE` + the offset-colour bit, with `oargb` carried through
-   the clipper and the vertex memo exactly like `argb`. With the switch off
-   `emit_projected()` sets `oargb = 0` and every P3 batch loses both colour
-   constants. **Compile-verified, never run on a frame** — it handles 9 of the
-   27 P3 configs exactly.
-   ⚠️ **Free falsification before any screenshot: `[DC/PVR] tevp3 batches=0` on
-   a run that reaches the keyboard** kills the diagnosis for nothing.
-   ⚠️ **Second falsifiable prediction: the panel is black but the 40 key caps
-   are correctly coloured.** If the caps are black too, the diagnosis is wrong.
-   `kb/tev-map-hard-cases.md` §6.6.
+2. 🔴 **The name-entry keyboard renders black. The fix is written, HAS NOW BEEN
+   RUN (2026-08-09), and its PREDICATE IS TOO WIDE.** 18 of the keyboard's 26
+   display lists are config **#037, class P3** — 27 of the 101 configs. The
+   implementation is behind **`-DDC_PVR_TEVP3`, default OFF** (`dc/src/dc_pvr.c`,
+   ~11 sites): vertex base colour `= PRIM − ENV`, per-vertex `oargb = ENV`,
+   `PVR_TXRENV_MODULATE` + the offset-colour bit.
+   🔴 **Switched on in a town build it printed `tevp3 batches=20305
+   clamped=6941` and recoloured the town** — purple/pink ground, trunks and
+   mailboxes — **in a run that never opened the keyboard.** 26 display lists in
+   one widget cannot be 20,305 batches: the predicate is matching a shape #037
+   merely shares, not #037. It also cost ~10 % (`us/v` 2.83 vs 2.57).
+   **The maths in §6.6 is right; the recogniser is wrong. Fix the predicate
+   first — log the combine words of the first N distinct matches — and only
+   then take a screenshot pair.** `kb/tev-map-hard-cases.md` §6.6a.
+   ⚠️ **Still untested: the panel is black but the 40 key caps are correctly
+   coloured.** If the caps are black too, the whole diagnosis is wrong. Needs a
+   run that actually reaches the name-entry screen — `DC_AUTOSTART` presses
+   index 0 and never gets there (§8).
 3. **The large black wedges are TEV config #007 losing BOTH alpha factors** —
    diagnosed, not fixed. `ef_shadow_out.c:34-35` records as **two** stages, not
    three; the batch draws at `vtx.a * T0.a`, where `vtx.a` is the
@@ -365,11 +426,13 @@ window, bracketed into `[PHASE]`'s draw/skip/vi plus `audio` and `xform`.
    **Note the relation to item 2: #007 loses both ALPHA factors, #037 loses both
    COLOUR constants.**
 4. **The other 74 `obj_s_*` structures** — 333 KB, one building silhouette each.
-5. ⚠️ **The winter time bomb is REDUCED, NOT CLEARED.** R1 made all 41
-   `mFM_grd_w_*` ground textures demand-loadable, but the 84 `obj_w_*`
-   structures are still stubbed, so a winter town still draws every building as
-   a black spiky mess. Verifying it needs a season-forcing build, and **no such
-   knob exists yet** — `DC_SEASON` has been written up as if it did.
+5. ✅ **The winter time bomb is CLEARED on paper (2026-08-09), never verified.**
+   R1 already made all 41 `mFM_grd_w_*` ground textures demand-loadable, and
+   `keeplist-full.txt` now keeps **all 43 `obj_w_*.c` structure files** — they
+   cost only 19,024 B after T1, which is why they are pinned first in
+   `make_keeplist_town.py`'s `MODEL_PRIORITY_PREFIXES`. ⚠️ **Nobody has seen a
+   winter town.** Verifying still needs a season-forcing build and **no such
+   knob exists** — `DC_SEASON` has been written up as if it did.
 6. **The station roof clip-through.** Reproducible for the first time —
    `DC_AUTOWALK` can walk a character under it, `DC_PVR_BATCH_LOG` prints
    `src=`/`vram=` so a batch joins to a symbol, and `-DDC_PVR_PT_NEAREST` is a

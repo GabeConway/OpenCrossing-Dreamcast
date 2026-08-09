@@ -818,12 +818,20 @@ static unsigned int dc_stub_keep_bytes;
 
 #ifndef DC_HOST_STUB
 /* Indexed by rom_src. Held open across the whole burst: a CD-R seek is ~200 ms
- * and re-opening per asset would cost more than the read itself. */
+ * and re-opening per asset would cost more than the read itself.
+ *
+ * ⚠️ THESE ARE THE **BOOT** HANDLES ONLY. dc_stub_keep_assets() closes them
+ * when the keep list is done, and every read after that goes through
+ * dc/src/dc_assetwin.c, which owns its own pair. The two lifetimes do not
+ * overlap; see that file's header for why they are kept separate. */
 static file_t dc_stub_rom_fd[2] = { FILEHND_INVALID, FILEHND_INVALID };
-static const char* const dc_stub_rom_path[2] = {
-    "/cd/foresta.rel",   /* DC_STUB_SRC_REL — already Yaz0-decompressed */
-    "/cd/main.dol"       /* DC_STUB_SRC_DOL */
-};
+/* The path table lives in dc_assetwin.c so there is exactly one copy. */
+#define dc_stub_rom_path(src) dc_assetwin_rom_path(src)
+/* 1 once the boot keep list has been read. Until then the inline path below
+ * must NOT use the shared window: at boot it would be 1,392 requests in SOURCE
+ * order, which is the read-amplification case the window is a loss on, and
+ * DC_KEEP_SWEEP=0's contract is "restore the old behaviour exactly". */
+static int dc_stub_boot_done;
 #endif
 
 void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
@@ -973,18 +981,40 @@ void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
         return;
     }
 
+    /* ⭐ AFTER BOOT, EVERY READ GOES THROUGH THE SHARED WINDOW.
+     *
+     * This is the MID-SCENE path — R1's 27 acre ground textures per acre load,
+     * R2/R3's villager fetches, and anything else that demand-loads while the
+     * game is running. Each is a small read at a clustered offset issued one at
+     * a time, so dc_keep_sweep()'s sort-then-replay discipline cannot apply, but
+     * dc_assetwin.c's stay-where-you-are window can and does. It also owns the
+     * file handles after boot, which is why nothing below re-opens one.
+     *
+     * Before boot is done, fall through to the per-asset read: the boot list is
+     * 1,392 requests in SOURCE order and the window is a loss on that (the sweep
+     * exists precisely because sorting is what boot needs). */
+    if (dc_stub_boot_done) {
+        if (!dc_assetwin_read(rom_src, rom_off, dest, size)) {
+            DC_LOGE("[DC/KEEP] %s: demand read of %u B at %u failed\n",
+                    who, size, rom_off);
+            dc_stub_keep_bad++;
+            return;
+        }
+        goto swapped;
+    }
+
     fd = dc_stub_rom_fd[rom_src];
     if (fd == FILEHND_INVALID) {
-        fd = fs_open(dc_stub_rom_path[rom_src], O_RDONLY);
+        fd = fs_open(dc_stub_rom_path(rom_src), O_RDONLY);
         if (fd == FILEHND_INVALID) {
             DC_LOGE("[DC/KEEP] %s MISSING — every kept asset from it stays "
-                    "zeroed\n", dc_stub_rom_path[rom_src]);
+                    "zeroed\n", dc_stub_rom_path(rom_src));
             dc_stub_rom_fd[rom_src] = FILEHND_INVALID;
             dc_stub_keep_bad++;
             return;
         }
         dc_stub_rom_fd[rom_src] = fd;
-        DC_LOGE("[DC/KEEP] opened %s (%d B)\n", dc_stub_rom_path[rom_src],
+        DC_LOGE("[DC/KEEP] opened %s (%d B)\n", dc_stub_rom_path(rom_src),
                 (int)fs_total(fd));
     }
 
@@ -997,6 +1027,8 @@ void dc_stub_keep_load_one(const char* bin_path, void* dest, unsigned int size,
         dc_stub_keep_bad++;
         return;
     }
+
+swapped:
 
     switch (swap) {
         case DC_STUB_SWAP_U16: pc_bswap_asset_u16(dest, size); break;
@@ -1072,16 +1104,16 @@ static void dc_keep_sweep(void) {
 
         fd = dc_stub_rom_fd[r->rom_src];
         if (fd == FILEHND_INVALID) {
-            fd = fs_open(dc_stub_rom_path[r->rom_src], O_RDONLY);
+            fd = fs_open(dc_stub_rom_path(r->rom_src), O_RDONLY);
             if (fd == FILEHND_INVALID) {
                 DC_LOGE("[DC/KEEP] %s MISSING — every kept asset from it "
-                        "stays zeroed\n", dc_stub_rom_path[r->rom_src]);
+                        "stays zeroed\n", dc_stub_rom_path(r->rom_src));
                 dc_stub_keep_bad++;
                 continue;
             }
             dc_stub_rom_fd[r->rom_src] = fd;
             DC_LOGE("[DC/KEEP] opened %s (%d B)\n",
-                    dc_stub_rom_path[r->rom_src], (int)fs_total(fd));
+                    dc_stub_rom_path(r->rom_src), (int)fs_total(fd));
         }
 
         /* Served by the window? */
@@ -1181,6 +1213,11 @@ static void dc_stub_keep_assets(void) {
             }
         }
     }
+    /* From here on the boot handles are gone and dc/src/dc_assetwin.c owns the
+     * disc: every demand load — R1's, R2/R3's, T1's — goes through its window.
+     * This flag is the ONLY thing that switches the inline path over, so a
+     * loader that fires before this point still gets the old behaviour. */
+    dc_stub_boot_done = 1;
 #endif
     DC_LOGE("[DC] DC_ASSET_STUB keep list: %d assets, %u B loaded, %d failed\n",
             dc_stub_keep_ok, dc_stub_keep_bytes, dc_stub_keep_bad);

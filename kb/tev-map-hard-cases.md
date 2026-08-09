@@ -241,3 +241,51 @@ halves** — and both are "the folded polynomial was decoded correctly years ago
 and the recogniser is narrower than the table".
 
 ---
+
+### 6.6a 🔴 `-DDC_PVR_TEVP3` WAS RUN FOR THE FIRST TIME (2026-08-09) AND IT IS
+### **TOO WIDE**, NOT TOO NARROW. DO NOT SHIP IT AS WRITTEN.
+
+The implementation above sat "compile-verified, never run" from session 7 until
+2026-08-09, when it was switched on in a town build. It ran, and the gate is
+damning:
+
+```
+[DC/PVR] tevp3 batches=20305 clamped=6941 of 1587516
+```
+
+**Two findings, and the second is the one that matters.**
+
+1. **`clamped=6941` — 34 % of the batches it touched drove `PRIM − ENV`
+   NEGATIVE.** §6.2's out-of-range warning above predicted exactly this ("18 of
+   the 56 P2/P3 configs can drive `base` negative; #037 is on that list") and
+   the prediction is now measured rather than inferred. A clamp is not a
+   rounding error here: it turns the subtraction into a different colour, and
+   the human report was *"visual regressions"* — a purple/pink cast on the town
+   ground, tree trunks and mailboxes.
+
+2. 🔴 **20,305 BATCHES IS THE WRONG ORDER OF MAGNITUDE.** §6.6 is about **26
+   display lists** in one widget that is on screen for a few seconds of a
+   name-entry screen. A predicate that fires 20,305 times in a 900 s town run —
+   in which the keyboard was **never opened** — is not recognising config #037.
+   It is recognising a SHAPE that #037 shares with something common, and
+   repainting the whole town with it. **The bug is in the predicate, not in the
+   `PRIM − ENV`/`oargb` maths**, which §6.6 derives correctly.
+
+**So the next step is NOT "fix the clamp".** It is: instrument which configs
+`tevp3` is actually matching (log the combine words for the first N distinct
+matches), confirm #037 is among them, and then narrow the predicate until the
+count is plausible for the widget. Only then is a screenshot pair meaningful.
+
+⚠️ **It also cost ~10 % of the frame**: `us/v` 2.83 with it on versus 2.57 with
+it off, same build otherwise. That is a second reason the predicate is too wide
+— a change scoped to one widget cannot cost 10 % of a town frame.
+
+⚠️ **The §6.6 falsifiable prediction is STILL UNTESTED.** Nothing in this run
+reached the keyboard (`DC_AUTOSTART` presses index 0 and the keyboard is not on
+that path — `kb/RESUME.md` §8). "Is the panel black while the 40 caps are
+correctly coloured" remains the cheap first check, and it needs a run that
+actually opens the name-entry screen.
+
+**Default stays OFF (`-DDC_PVR_TEVP3` is opt-in).**
+
+---

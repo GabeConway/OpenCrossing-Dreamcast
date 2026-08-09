@@ -333,6 +333,54 @@ void dc_asset_census_report(void);
  * entries and leaves this as a plain memmove. */
 void dc_bgtex_load(const void* src, void* dest, unsigned int size);
 
+/* --- The shared mid-scene read-ahead window (dc/src/dc_assetwin.c) ----------
+ * ⭐ EVERY DEMAND LOADER READS THROUGH THIS, and that is the point: R1's acre
+ * ground textures, T1's textures and dc_stub_keep_load_one()'s mid-scene path
+ * all issue small scattered reads one at a time, so none of them can use
+ * dc_keep_sweep()'s sort-then-replay discipline.  What they CAN share is a
+ * window that stays where it was, because their offsets are clustered
+ * (kb/levers.md L10: median gap 512 B, 863 of 905 gaps under 32 KB).
+ *
+ * Returns 1 on success.  On 0 the destination is UNTOUCHED — a caller must
+ * treat that as "do not draw this", never as "draw what you got".
+ *
+ * Kill switch DC_ASSETWIN_B=0 restores a plain seek+read per request, which is
+ * byte-for-byte what each caller did before this existed.  ⚠️ The number to
+ * A/B is `reads=` from dc_assetwin_report(), NOT wall clock: Flycast mounts
+ * with FastGDRomLoad and models no seek time (kb/RESUME.md §6). */
+int  dc_assetwin_read(int rom_src, unsigned int rom_off, void* dst,
+                      unsigned int len);
+void dc_assetwin_drop(void);
+void dc_assetwin_report(void);
+void dc_assetwin_stats(unsigned int* req, unsigned int* hits,
+                       unsigned int* reads, unsigned int* disc_bytes);
+/* The ROM path table lives in dc_assetwin.c so there is exactly one copy of it;
+ * dc_main.c's keep-list loader reads it through here.  NULL for an out-of-range
+ * rom_src (DC_STUB_SRC_NONE, which has no on-disc source). */
+const char* dc_assetwin_rom_path(int rom_src);
+
+/* --- T1: textures demand-loaded off the disc (dc/src/dc_texpool.c) ----------
+ * dc_texpool_lookup() maps the `data` pointer dc_gx_backend_texture_upload()
+ * receives back to the asset row it is the base of, in one binary search over
+ * link-time addresses.  A row index is a SYNTHETIC CACHE KEY: it identifies the
+ * texture without reading a byte of it, which is what lets the array stop being
+ * resident at all.  -1 means "not a mapped texture" and the caller must fall
+ * back to hashing the content.
+ *
+ * dc_texpool_fetch() is called ONLY on a cache miss and returns a pointer to
+ * `need` bytes of the texture — the array itself when the row is still
+ * resident, or a single staging buffer filled off the disc when it is not.
+ * NULL means the upload must be abandoned; it must NEVER be treated as "use
+ * `data`", because under DC_ASSET_STUB a non-resident array is one byte long.
+ *
+ * The returned pointer is valid until the next dc_texpool_fetch(). */
+int         dc_texpool_lookup(const void* data);
+const void* dc_texpool_fetch(int row, unsigned int need);
+void        dc_texpool_report(void);
+/* The probe half (DC_TEXPOOL_PROBE=1). Counts; changes nothing. */
+void        dc_texpool_note_bind(const void* data, unsigned int decoded_bytes,
+                                 unsigned int content_hash);
+
 /* --- Arena high-water probe (kb/STATE.md N4) --------------------------------
  * Compiled to an empty function unless -DDC_ARENA_PROBE=<frames> (DC_ARENA_PROBE
  * in dc/Makefile). Prints touched/peak arena bytes and the current libc break,

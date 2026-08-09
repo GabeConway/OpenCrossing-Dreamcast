@@ -7,6 +7,131 @@ of it and no longer do. Entries are dated snapshots: a number here was true when
 it was written and is **not** a claim about today. For what is true now, read
 `kb/STATE.md`.
 
+## 2026-08-09 (session 15) — T1 BUILT: −841,888 B, SPENT ON 650 MODEL FILES.
+## ONE VISUAL FAULT UNRESOLVED, AND TWO OF MY OWN CHANGES CAUSED REGRESSIONS
+
+User directive: *"pick up on the ram problem, using dynamic loading or whatever,
+i want it so the whole game is loaded now. trying to get it playable past nook."*
+
+**What landed.** `dc/src/dc_texpool.c` (T1, `DC_TEXPOOL_DEMAND=0` reverts),
+`dc/src/dc_assetwin.c` (the shared mid-scene read window, `DC_ASSETWIN_B=0`
+reverts), `make_stub_data.py --texpool-demand` with its `DEMAND_STUB` per-symbol
+keep rule, and `tools/dcstub/keeplist-full.txt` from
+`make_keeplist_town.py --full-model`.
+
+**The RAM result, matched links, `_end − 0x8c010000`:**
+
+| build | span |
+|---|---:|
+| baseline (T1 off, `keeplist-town`) | 10,375,116 |
+| T1 on, same keep list | **9,533,228** (−841,888) |
+| T1 on + `keeplist-full` @ 900,000 budget | 10,553,116 |
+
+Runtime, 900 s town run: `fetch=181 staged=181 fail=0 toobig=0`,
+`uploads=392 evictions=0`, `ASSET MISSING 0`, deepest scene 9.
+
+**THREE THINGS I GOT WRONG, IN THE ORDER THEY BIT.**
+
+1. **I turned on `-DDC_PVR_TEVP3` alongside the RAM work.** It was never part of
+   the ask, it had never been run, and its default was OFF for that reason. It
+   fired on **20,305 batches with `clamped=6941`** and recoloured the world.
+   Removing it also took `us/v` 2.83 → 2.57 — it was costing ~10 % as well.
+   **Lesson: do not bundle an unproven renderer flag into a memory change; the
+   A/B stops being readable and the human sees one fault, not two.**
+
+2. **The read-ahead window's first shape was a large net loss.** Built on
+   `kb/levers.md` L10's "offsets are clustered, median gap 512 B, 863 of 905
+   gaps ≤ 32 KB" — **which describes the offsets SORTED.** `dc_keep_sweep()`
+   earns that by sorting the whole request list first; a bind-order demand
+   loader cannot. Cost: **4,849,664 B off disc for ~190 KB of texture**, 148
+   refills of 32 KB, hit rate 123/271, 94 `[STUTTER]` frames at ~320 ms with the
+   time in neither `gx` nor `snd`. Now reads ahead only when a request continues
+   where the last ended: 2,177,024 B, `narrow=169`. **Lesson: a distribution
+   measured over a SORTED set is not a statement about arrival order.**
+
+3. **The first `--full-model` budget landed 784 bytes under the ceiling** and I
+   nearly called that a fit. The ceiling's libc-peak term dates from 2026-08-04
+   and has never been re-derived. Cut to 900,000 for ~460 KB of real margin.
+
+**THE PERF RESULT, matched runs, same probe set** (baseline = T1 off,
+`keeplist-town`):
+
+| | baseline | T1 + `keeplist-full` |
+|---|---:|---:|
+| `us/v` | 2.69 | **2.57** |
+| FPS | 14.6 | **16.4** |
+| `draw` ms | 52.3 | **47.4** |
+| `v` | 3488 | 3001 |
+| `[STUTTER]` | 90 | **147** |
+
+⭐ **T1 plus 650 extra model files is FASTER than baseline**, which was not the
+expected direction — removing `tex_content_hash()` from ~109 binds a frame is
+apparently worth more than the extra geometry costs. The one real regression is
+stutters; the time is in neither `gx` nor `snd` (mean unaccounted 84 → 157 ms),
+so it is the demand reads.
+
+4. 🔴 **I CALLED A SCREENSHOT PAIR A REGRESSION AND IT WAS THE TOWN SEED.** The
+   T1 runs showed a wide lavender cobble ground where the baseline showed green
+   grass, and I wrote "confirmed regression" on the strength of two frames. It
+   was the paved plaza: the cobble is the SAME shade in both, grass is green in
+   both, and the two runs seeded different towns and walked to different places.
+   **Rule 11 is written about `us/v` and it applies just as hard to
+   SCREENSHOTS** — `v=3488` vs `v=3001` across the same pair looks like a 16 %
+   geometry win and is equally meaningless. To compare frames, compare the same
+   acre, or compare many frames, or do not compare.
+
+✅ **AND THEN A GENUINELY MATCHED PAIR SETTLED T1's VISUALS.** `t1only` — T1 on,
+`keeplist-town`, everything else identical to the baseline — drew **v=3507
+against baseline's 3488, 0.5 % apart, i.e. the same town** — and frame 90 of
+each is the same scene with no visible difference. Rule 2 satisfied, for T1 at
+least. Four-way table:
+
+| | baseline | t1only | T1 + `keeplist-full` (win off) |
+|---|---:|---:|---:|
+| `v` | 3488 | 3507 | 4007 |
+| `us/v` | 2.69 | 2.67 | 2.61 |
+| FPS | 14.6 | 15.5 | 16.2 |
+| `[STUTTER]` | 90 | 110 | 109 |
+
+**T1 is free per vertex and costs ~20 stutters.** ⚠️ The lesson from #4 above
+cuts both ways: this pair is trustworthy BECAUSE `v` matched to 0.5 %. Check
+that before believing any frame comparison in this project.
+
+**STILL OPEN, WHICH IS WHY NOTHING WAS COMMITTED.** A human reports wrong/
+garbled textures and missing geometry that no captured frame reproduces —
+including the matched pair above.
+Everything checkable statically is clean: no full-size load survives into a
+`[1]` array (462 rewritten files); no decoder over-read at any of 7,680 resolved
+operand sites; `dc_dvd_read_yielding()` seeks once then reads sequentially; the
+`goto swapped` reroute still byte-swaps; **T1 stubs exactly 1,379 extra symbols
+and every one is a T1 texture row, un-stubbing nothing**; and `keeplist-full` is
+a strict superset of `keeplist-town`. So the missing geometry is the **904 model
+files / 1,128,096 B the budget dropped**, which were equally absent before
+today. The live suspect is a wrong texture on a class the autowalk never binds;
+`t1only.cdi` vs `base.cdi` is the experiment that isolates it.
+
+🔴 **IT IS NOT KNOWN WHETHER THE LAVENDER GROUND IS NEW.** No screenshot of this
+port's town predates today, so there is nothing to diff against. `base.cdi`
+(T1 off, old keep list) is the reference and `nowin.cdi` (T1 on,
+`DC_ASSETWIN_B=0`) is the discriminator; both are built.
+
+⚠️ **A SELF-INFLICTED DETOUR WORTH RECORDING, because it is a whole class of
+mistake.** I concluded twice that a run had died with its window closed, and
+both times I was wrong: `ps aux | grep -c "[f]lycast"` is CASE-SENSITIVE and the
+binary is `/Applications/Flycast.app/Contents/MacOS/**F**lycast`, so the check
+returned 0 for every healthy run. On that false reading I killed a baseline run
+that was working, told the user runs were being destroyed, and left an orphan
+Flycast process behind. **`console.log` really is written only at exit
+(`kb/RESUME.md` §2), so "no log yet" is the NORMAL state for most of a 900 s
+run — it is not evidence of anything.** Use `grep -i`, and prefer waiting on the
+log file to inferring liveness from a process list.
+
+**A number I reported too confidently and am correcting:** I told the user the
+bigger keep list draws "32 % more vertices" from `v=3640` against a `v=2745`
+baseline. Two boots of the same new build measured `v=3001` and `v=3640`. **The
+town reseeds every boot (rule 11), so those are different towns and the
+comparison is indicative at best, not a measurement.**
+
 ## 2026-08-09 (session 14b) — THE PIVOT TO PLAYABILITY, AND T1's PROBE WAS
 ## MEASURING ITS OWN STUB PADDING
 

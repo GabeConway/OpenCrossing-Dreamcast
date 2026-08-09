@@ -654,7 +654,96 @@ in — **324 B**, on top of the speed win of not running a software square root
 339 times a frame. The mechanism is archive extraction, not symbol overriding:
 our objects precede `-lm` on the link line, so libm's copy is never reached.
 
-## ⭐ L10. T1 — textures never reach the SH-4. **−579,248 B, then +2.78 MB of content for 68 KB** (designed 2026-08-06)
+## ⭐ L10. T1 — textures never reach the SH-4. ✅ **BUILT 2026-08-09: −841,888 B measured**
+
+### What shipped, and what the design got wrong about its own size
+
+`dc/src/dc_texpool.c` is the loader; `DC_TEXPOOL_DEMAND=0` reverts it.
+`dc/src/dc_assetwin.c` is the shared read-ahead window it and R1 read through;
+`DC_ASSETWIN_B=0` reverts that. The generator half is
+`make_stub_data.py --texpool-demand`, whose `DEMAND_STUB` set is **the first
+keep-list rule in this project that works per SYMBOL rather than per FILE** —
+R1/R2/R3 could each remove whole files, and T1 cannot, because a texture array
+normally shares its TU with vertex arrays that must stay resident.
+
+**Measured against a matched build, both linked, `_end − 0x8c010000`:**
+
+| build | span | Δ |
+|---|---:|---:|
+| baseline: T1 off, `keeplist-town.txt` | 10,375,116 | — |
+| **T1 on, same keep list** | **9,533,228** | **−841,888** |
+| T1 on + `keeplist-full.txt` (`--model-budget 900000`) | 10,553,116 | +177,988 |
+
+⚠️ **The 579,248 B this entry predicted was for "phase 1", the 669 case-1
+textures. The loader was built for all 6,068 eligible rows at once, so the real
+figure is the whole resident set: the generator reports `bytes kept` falling
+2,844,280 → 1,958,296 on the same keep list, i.e. −885,984 B of `.bss`, and the
+link gives back 841,888 after the map's own ~73 KB of `.rodata` and ~49 KB of
+`.bss`.** There was never a reason to stage it in two phases; the map costs the
+same either way.
+
+⚠️ **6,068 rows, not 6,092.** A static sweep found 24 texture symbols reached
+through a POINTER TABLE and then `gSPSegment` — `m_design_ovl.c`'s six
+`tool_*_table[]` and `ac_shrine_draw.c_inc`'s `leaf_texture_table[]` — which
+`TEXPOOL_SEGMENT_RE` could not see because it matched only a literal third
+argument. They are excluded now (`scan_pointer_table_symbols()`, 25,856 B stays
+resident) and their six owner files are pinned in `MODEL_REQUIRED`.
+`kb/traps.md` carries why leaving them in was unsafe even though they happened
+to work.
+
+### Runtime, one 900 s town run (`smoke-t1v2-20260809-172553`)
+
+```
+[DC/TEXPOOL] fetch=181 staged=181 memo=0 resident=0 fail=0 toobig=0 bytes=217664
+[DC/TEX]     uploads=392 hits=3033850 resident=1656192 B evictions=0 rejects=0
+ASSET MISSING 0, deepest scene 9
+```
+
+**181 disc fetches for a whole run** — the design's central claim, that the
+array is needed only on a cache MISS and therefore ~300 times a run rather than
+~109 times a frame, holds. `us/v` 2.57 against a 2.51 baseline, i.e. inside or
+just outside the ±2 % floor (rule 11).
+
+### ⚠️ THE READ-AHEAD WINDOW'S FIRST SHAPE WAS A LOSS, AND THIS ENTRY CAUSED IT
+
+The seek section below says "resident texture ROM offsets are clustered (median
+gap 512 B; 863 of 905 gaps ≤ 32 KB), so a 32 KB read-ahead window collapses ~306
+seeks to ~40." `dc_assetwin.c` was built on that sentence and it is **wrong for
+a demand loader**: that distribution describes the offsets **SORTED**, and the
+same paragraph says they span 10.9 MB. `dc_keep_sweep()` earns the clustering by
+sorting the whole request list first; a loader driven by the renderer's bind
+order cannot.
+
+Measured cost of believing it (`smoke-t1test-20260809-170652`): **4,849,664 B off
+disc to deliver ~190 KB of texture**, 148 refills of 32 KB, hit rate 123/271, and
+94 `[STUTTER]` frames whose 320 ms was in neither `gx` nor `snd`. A human
+watching the emulator called it before any counter did.
+
+Reading ahead **only when the request continues where the last one ended** cut
+that to `bytes=2,177,024` — and still lost. A fourth configuration, **no window
+at all**, settled it:
+
+| refill policy | reads | bytes off disc | `[STUTTER]` |
+|---|---:|---:|---:|
+| 32 KB always | 148 | 4,849,664 | 94 |
+| sectors + sequential | 218 | 2,177,024 | 147 |
+| **OFF — now the default** | 271 | **325,184** | **109** |
+
+Baseline without T1 is 90 stutters. **325,184 B is the true payload; every
+window variant paid 6.7-15× it to collapse ~120 commands.** `DC_ASSETWIN_B`
+defaults to 0, which makes T1's read path byte-for-byte the long-proven keep
+loader's.
+
+⚠️ **The file is kept, not deleted, because rule 12 applies.** On a CD-R 271
+seeks is 5.4-27 s and 4.85 MB is ~9.7 s at ~500 KB/s — the same order, and
+Flycast models neither. Its FastGDRomLoad makes a byte free, which is exactly
+why the emulator ranked the 32 KB variant best. **A burn settles it.**
+⚠️ Judge it on `reads=` AND `bytes=` together — `reads=` alone hid the 4.8 MB
+for a whole iteration.
+
+---
+
+### The original design note, kept for its reasoning (2026-08-06)
 
 T1 was the highest-value open *concept* from 2026-08-01 until it graduated
 into this entry. Designed against the tree today it is **smaller, better-placed and

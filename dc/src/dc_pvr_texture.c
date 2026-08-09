@@ -100,15 +100,25 @@
 #include "dc_gx_internal.h"
 #include <dolphin/gx/GXEnum.h>
 
-#if defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE
-/* T1's probe (dc/src/dc_texpool.c). Declared here rather than through a header
- * because dc_bgtex.c / dc_npctex.c / dc_npcmdl.c all do it this way — none of
- * the four has a dc/include header, and a one-consumer instrument does not earn
- * one. Both symbols exist only when the probe is compiled in. */
-void dc_texpool_note_bind(const void* data, unsigned int decoded_bytes,
-                          unsigned int content_hash);
-void dc_texpool_report(void);
+/* T1 — dc/src/dc_texpool.c. dc_texpool_lookup() / dc_texpool_fetch() /
+ * dc_texpool_report() are declared in dc_platform.h (pulled in by dc_pvr.h) and
+ * are defined in BOTH directions of the switch, so this file needs no #if
+ * around the declarations — only around the calls.
+ *
+ * DC_TEXPOOL_ACTIVE is the one place the loader's switch is read here. With it
+ * off, tp_row is a compile-time -1, every branch below folds away and the file
+ * is byte-identical to the pre-T1 build. */
+#if defined(DC_TEXPOOL_DEMAND) && DC_TEXPOOL_DEMAND
+#define DC_TEXPOOL_ACTIVE 1
+#else
+#define DC_TEXPOOL_ACTIVE 0
 #endif
+
+/* The synthetic cache key. Any value distinguishes rows from each other because
+ * probe.data_ptr is in the key too and `aliased=0` says no two rows share an
+ * address — the 0x5431 tag ("T1") is there so a key seen in a dump is
+ * attributable rather than mysterious. */
+#define DC_TEXPOOL_KEY(row) (0x54310000u | (unsigned int)(row))
 
 /* --- KOS surface -----------------------------------------------------------
  * dc_platform.h already pulls <dc/pvr.h> behind #ifndef DC_HOST_STUB; the
@@ -1040,11 +1050,12 @@ void dc_pvr_texture_report(void) {
     DC_LOGE("[DC/TEX] uploads=%u hits=%u resident=%u B evictions=%u rejects=%u\n",
             s_stat_uploads, s_stat_hits, s_bytes_resident,
             s_stat_evictions, s_stat_rejects);
-#if defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE
+#if DC_TEXPOOL_ACTIVE || (defined(DC_TEXPOOL_PROBE) && DC_TEXPOOL_PROBE)
     /* Hung off the existing report rather than given its own call site: this
      * function is already reached every 30 presented frames via dc_pvr_report()
-     * (dc_pvr.c:3215 <- dc_vi.c:581), so the probe inherits a rate that is known
-     * good and cannot put a line on the boot path. */
+     * (dc_pvr.c:3215 <- dc_vi.c:581), so it inherits a rate that is known good
+     * and cannot put a line on the boot path. It also prints [DC/AWIN], which
+     * is where the loader's GD-ROM command count comes out. */
     dc_texpool_report();
 #endif
 }
@@ -1084,6 +1095,11 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     int is_be, pot_w, pot_h, texels, slot, i;
     unsigned int need;
     pvr_ptr_t base;
+    /* T1: the row `data` is the base of, or -1. `src` is where the bytes to
+     * decode actually live — the array itself when it is resident, the staging
+     * buffer when it is not. They are the same pointer in a pre-T1 build. */
+    int tp_row = -1;
+    const void* src = data;
 
     if (!data || w <= 0 || h <= 0) return 0;
     if (w > DC_PVR_TEX_MAX_DIM || h > DC_PVR_TEX_MAX_DIM) {
@@ -1097,7 +1113,17 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     is_be = tlut_is_be(tlut);
     memset(&probe, 0, sizeof(probe));
     probe.data_ptr   = (unsigned int)(uintptr_t)data;
-    probe.data_hash  = tex_content_hash(data, w, h, fmt);
+#if DC_TEXPOOL_ACTIVE
+    /* ⭐ THE WHOLE SAVING IS THIS BRANCH. tex_content_hash() reads up to 512 B
+     * of the texture array on EVERY bind — ~109 times a frame — for no reason
+     * other than to build a cache key, and GXInitTexObj memsets the tex-obj so
+     * dc_gx.c's dedup early-out never fires for emu64. A row index names the
+     * same texture without touching main RAM, and an array that is not read on
+     * a bind does not have to be resident at all. kb/levers.md L10. */
+    tp_row = dc_texpool_lookup(data);
+#endif
+    probe.data_hash  = (tp_row >= 0) ? DC_TEXPOOL_KEY(tp_row)
+                                     : tex_content_hash(data, w, h, fmt);
     probe.tlut_ptr   = (unsigned int)(uintptr_t)tlut;
     probe.tlut_hash  = tlut_content_hash(tlut, tlut_fmt, tlut_count, is_be);
     probe.gx_w       = (unsigned short)w;
@@ -1144,13 +1170,27 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
         return 0;
     }
 
+    /* --- T1: get the source bytes, off the disc if they are not resident ---
+     * A cache MISS is the only place the array is needed, and it is ~306 times
+     * a run rather than ~109 times a frame. NULL is "abandon the upload": under
+     * DC_ASSET_STUB a non-resident array is ONE BYTE, so falling back to `data`
+     * would decode whatever the linker put next and draw a plausible wrong
+     * texture. Returning 0 here draws untextured, which is attributable. */
+    if (tp_row >= 0) {
+        src = dc_texpool_fetch(tp_row, (unsigned int)gc_data_size(w, h, fmt));
+        if (!src) {
+            s_stat_rejects++;
+            return 0;
+        }
+    }
+
     /* --- palette + alpha survey ----------------------------------------- */
     if (fmt == GX_TF_C4 || fmt == GX_TF_C8)
         build_palette(tlut, tlut_fmt, tlut_count, palette, is_be);
     else
         build_palette(NULL, 0, 0, palette, 0);
 
-    s_class = survey_alpha(data, w, h, fmt, (const u8 (*)[4])palette,
+    s_class = survey_alpha(src, w, h, fmt, (const u8 (*)[4])palette,
                            (fmt == GX_TF_C4 || fmt == GX_TF_C8) ? tlut_count : 0);
 
     /* --- VRAM, with LRU eviction against both ceilings ------------------- */
@@ -1183,7 +1223,7 @@ unsigned int dc_gx_backend_texture_upload(const void* data, int w, int h, int fm
     s_pitch = pot_w;
     /* Clears the NPOT pad AND gives unhandled formats a transparent image. */
     for (i = 0; i < texels; i++) s_scratch[i] = 0;
-    decode_gc_texture(data, w, h, fmt, (const u8 (*)[4])palette);
+    decode_gc_texture(src, w, h, fmt, (const u8 (*)[4])palette);
 
 #ifndef DC_PVR_NO_TEX_EDGEPAD
     /* EDGE-EXTEND THE POWER-OF-TWO PAD.

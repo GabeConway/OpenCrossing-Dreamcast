@@ -626,6 +626,51 @@ check what the compiler already knows before moving the test. Settled-negative i
 
 ## Assets, the stub tree and the keep list
 
+**A KEEP-LIST ENTRY NO LONGER MEANS "RESIDENT" (2026-08-09, T1).** R1/R2/R3 each
+switched a class off by removing whole FILES from the list, so "on the list ⇒
+full size" held for two months. T1 cannot work that way — a texture array
+normally shares its TU with the vertex arrays and display lists that must stay —
+so `make_stub_data.py` grew a `DEMAND_STUB` set that `keep_symbol()` consults
+and that **beats a keep-list entry at the symbol level**. Three consequences,
+all of which bit during the implementation:
+- the partial-keep path, which `keeplist-town.txt` never used (it carries **no**
+  `#` prefix filters at all, despite `partial_file()`'s docstring describing the
+  `#!obj_w_` season filter as if it were live), went from dead code to handling
+  ~500 files in one commit;
+- `emit_keep_inc()`'s symbol filter used to run only `if prefixes:`. Leaving it
+  there would have emitted a loader call for a demand-stubbed array — a
+  full-size `memcpy` into a `[1]` destination, which is the NEUTRALISE overrun
+  class above, in a new place;
+- the `.c_inc` rewrite loop lived only in the whole-file arm, so pushing files
+  into the partial arm silently stopped rewriting their `.c_inc`. That is the
+  reply-box bug (§ below) exactly. It is hoisted above the fork now.
+
+**`gSPSegment`'s argument is not always a symbol — 24 textures are reached
+through a POINTER TABLE (2026-08-09).** `TEXPOOL_SEGMENT_RE` matched only a
+symbol written literally as the third argument, so `m_design_ovl.c`'s six
+`tool_*_table[]` and `ac_shrine_draw.c_inc`'s `leaf_texture_table[]` slipped
+past the exclusion and were demand-loaded. They happened to still work, because
+every anime-segment placeholder in `gbi_extensions.h:36-47` is
+`SEGMENT_ADDR(SEG, 0)` — **offset zero**, so the address the PVR is handed
+equals the symbol's own. ⚠️ **That is a property of the game data, not of the
+loader, and the failure it guards is the silent-and-pretty one**: a non-zero
+offset would miss the lookup, fall back to hashing a one-byte array, and draw
+whatever the linker put next. Fixed generally by
+`scan_pointer_table_symbols()` — any eligible symbol appearing as a bare
+element of an all-identifier brace initialiser is treated as segment-reached.
+**Generalise: an exclusion regex that matches a CALL SITE only covers the
+literal spelling; the indirect spelling is the one that gets away.**
+
+**A BUDGET THAT LANDS 784 BYTES UNDER THE CEILING IS A COINCIDENCE, NOT A FIT
+(2026-08-09).** The first `--full-model` keep list was sized by arithmetic to
+1,300,000 B and linked to `_end - 0x8c010000 = 11,012,828` against a derived
+ceiling of `11,013,612`. It is tempting to call that a pass. It is not: the
+ceiling's libc-peak term was measured on 2026-08-04 against a much smaller keep
+list and has never been re-derived (`kb/STATE.md` says so), and rule 6 already
+says `MEMLEDGER FIT ... OK` is not a statement that the image boots. Budget cut
+to 900,000 for ~460 KB of real margin. **Raise it against an OOM pair, never
+against arithmetic.**
+
 **`DC_ASSET_STUB` corrupts `.bss` unless every full-size pass is neutralised, not
 just `pc_assets_init()`.** Shrinking a destination array does not shrink the loops
 that write it: their bounds are compiled-in constants. `boot.c` runs four

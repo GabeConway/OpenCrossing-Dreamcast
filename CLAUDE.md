@@ -152,7 +152,10 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | `tools/dcstub/make_src_shrink.py` | the `DC_SRC_SHRINK` scratch-tree rewriter (S3, on by default) |
 | `tools/dcstub/census_resolve.py` | resolves a `DC_ASSET_CENSUS=1` log into a scene's real working set |
 | `tools/dcstub/census_keeplist.py` | joins a resolved census to the linked map and emits `DC_STUB_KEEP` |
-| `tools/dcstub/keeplist-town.txt` | **the keep list to BUILD WITH.** ⚠️ Enumerated from the tree, NOT censused — the town reseeds every boot, so no census can be correct (`kb/RESUME.md` §8) |
+| `dc/src/dc_texpool.c` | **T1 — every display-list texture is read off the disc, not kept in `.bss`.** The row index IS the PVR's cache key, so the array is never touched on a bind and never has to be resident. `DC_TEXPOOL_DEMAND=0` reverts; `DC_TEXPOOL_PROBE=1` is the separate falsification instrument |
+| `dc/src/dc_assetwin.c` | **the one read-ahead window every demand loader shares** (T1, R1, R2/R3, the mid-scene keep path). ⚠️ Judge it on `reads=` in the `[DC/AWIN]` line, never on wall clock — Flycast models no seek. `DC_ASSETWIN_B=0` reverts |
+| `tools/dcstub/keeplist-town.txt` | the pre-T1 keep list. ⚠️ Enumerated from the tree, NOT censused — the town reseeds every boot, so no census can be correct (`kb/RESUME.md` §8) |
+| `tools/dcstub/keeplist-full.txt` | **the keep list to BUILD WITH.** keeplist-town plus as much of `src/data/model/` as T1's freed bytes pay for, priority families first. Regenerate with `make_keeplist_town.py --full-model`; ⚠️ **it is budgeted and the budget bites** — what it dropped still renders as nothing, and the generator names the casualties on stderr |
 | `tools/dcstub/keeplist-opening.txt` | the censused keep list for the opening scene — still right for title-screen and size work |
 | `tools/dcfb/fbimg_to_png.py` | decodes a `DC_FB_IMAGE` log into PNG screenshots |
 | `dc/stage-disc.sh` | flatten a `dcasset extract` tree into a disc root for `DC_DISC_ROOT` |

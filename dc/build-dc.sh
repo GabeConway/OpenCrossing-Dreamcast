@@ -92,12 +92,14 @@ if [ "${DC_ASSET_STUB:-0}" = "1" ]; then
          "(DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
          "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
          "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
-         "DC_TEXPOOL_PROBE=${DC_TEXPOOL_PROBE:-0})"
+         "DC_TEXPOOL_PROBE=${DC_TEXPOOL_PROBE:-0}" \
+         "DC_TEXPOOL_DEMAND=${DC_TEXPOOL_DEMAND:-1})"
     python3 "$REPO/tools/dcstub/make_stub_data.py" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
         --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
-        --texpool="${DC_TEXPOOL_PROBE:-0}"
+        --texpool="${DC_TEXPOOL_PROBE:-0}" \
+        --texpool-demand="${DC_TEXPOOL_DEMAND:-1}"
 fi
 
 # DC_SRC_SHRINK=1 (the DEFAULT) -> the .bss literal-shrink tree, 1,159,392 B of
@@ -250,6 +252,24 @@ ENVARGS=(
 # sessions (kb/traps.md).
 [ -n "${DC_TEXPOOL_PROBE+x}" ] && \
     ENVARGS+=(-e DC_TEXPOOL_PROBE="$DC_TEXPOOL_PROBE")
+# T1's LOADER, forward-only for the same two reasons. dc/Makefile has
+# `DC_TEXPOOL_DEMAND ?= 1`, so omitting the line leaves the loader ON, which is
+# the intended default and matches what make_stub_data.py above just did with
+# --texpool-demand=1. A plain `-e DC_TEXPOOL_DEMAND=` would blank the default
+# and expand -DDC_TEXPOOL_DEMAND= into every TU, where dc_texpool.c's
+# `#if defined(DC_TEXPOOL_DEMAND) && DC_TEXPOOL_DEMAND` is a preprocessor error.
+# ⚠️ THE TWO HALVES MUST AGREE: the generator decides which arrays are [1] and
+# this -D decides whether the renderer reads them off the disc. Disagree in the
+# =0/=1 direction and every mapped texture draws untextured; disagree the other
+# way and dc_texpool.c #includes a map that was never emitted.
+[ -n "${DC_TEXPOOL_DEMAND+x}" ] && \
+    ENVARGS+=(-e DC_TEXPOOL_DEMAND="$DC_TEXPOOL_DEMAND")
+# The shared read-ahead window (dc/src/dc_assetwin.c). dc/Makefile has
+# `DC_ASSETWIN_B ?= 32768` and defines it unconditionally, so this is the plain
+# forward-only rule: absent means the default, 0 means a seek+read per request.
+[ -n "${DC_ASSETWIN_B+x}" ] && ENVARGS+=(-e DC_ASSETWIN_B="$DC_ASSETWIN_B")
+[ -n "${DC_ASSETWIN_MIN+x}" ] && \
+    ENVARGS+=(-e DC_ASSETWIN_MIN="$DC_ASSETWIN_MIN")
 # G2, forward-only for the same reason as DC_EMU64_HIST above -- its Makefile
 # guard is `ifneq (...,0)` too, so an empty -e would arm it on every build.
 [ -n "${DC_EMU64_SHADOW_LOOP+x}" ] && \
