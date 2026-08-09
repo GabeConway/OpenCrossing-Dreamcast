@@ -5,7 +5,7 @@ and the measurement rules are `kb/RESUME.md`; the evidence and the narrative for
 every figure here are `kb/state-log.md`, newest first. If a section here starts
 growing a history, that history belongs in the log.
 
-Last flush: **2026-08-09 (session 14, batch S14)**. Audited 2026-08-09 — every
+Last flush: **2026-08-09 (session 14b — S14 burned, pivot to playability)**. Audited 2026-08-09 — every
 number below was re-derived or re-sourced; the pre-session-9 material that used
 to sit in this file is in `kb/state-log.md`.
 
@@ -67,10 +67,13 @@ different probe set. It is the number to quote for "how does it play".
 | `us/v` | 3.06 | 3.24 | 2.65 | 2.51 | **2.48** |
 | `xform` ms | 8.8 | 8.9 | 7.2 | 6.9 | **7.0** |
 
-⚠️ **S14 is a WASH in Flycast and that was predicted** — four of its eight
+⚠️ **S14 is a WASH in Flycast and that was predicted** — four of its seven
 changes pay in cache misses and Flycast models no cache. −1.2 % on `us/v` is
 inside the ±2 % floor. **Do not read the 2.51 → 2.48 column as a result in
-either direction; the batch's verdict is a burn.** `kb/batch-s14.md` §2a.
+either direction.** ⭐ **The burn answered it: *"definitely runs better on real
+hardware"*, *"music doesn't cut out at all or stutter"* — but *"the FPS is still
+definitely worse than emulator"*. TAIL FIXED, MEDIAN STILL SHORT**, and the
+median gap has never been measured on silicon. `kb/batch-s14.md` §7.
 
 ### Where G3's cull time actually goes — measured 2026-08-09, first time ever
 
@@ -145,6 +148,15 @@ next step is an OOM pair on the current config, not more arithmetic.
 column** — `dec` omits inter-section alignment and counts `.ocram`, which lives
 at `0x7c001000` and is not in the image.
 
+⭐ **THE PIVOT, 2026-08-09: FPS is "good enough on hardware"; the workstream is
+now PLAYABILITY.** ⚠️ **"Eliminate stub loading" is not the lever** — a full
+`DC_ASSET_STUB=0` image is refuted by a boot and has LESS content than the
+stubbed one (below). **The stub system already IS the demand loader**
+(`dc_stub_keep_load_one()` / `dc_keep_sweep()`); what limits the game is that
+the **keep list is static — 765 entries chosen at build time.** The goal is to
+stop a build-time list deciding what exists: T1 (action 7), then R2/R3 behind
+N2b, then the 74 `obj_s_*` and 84 `obj_w_*` structures.
+
 **RAM is no longer the binding constraint; RESIDENCY is.** 8,813,054 B of asset
 destination arrays can never all be resident, so the keep list still decides what
 exists. The opposite extreme is closed by a boot, not by arithmetic: a full
@@ -201,8 +213,18 @@ rather than optional.**
    that reaches the keyboard.
 6. **N2b — wire the VMU save path.** Still the only way to get a villager into
    the town, and therefore still the gate on testing the R2/R3 pools.
-7. **T1 phase 1** (−579,248 B), then phase 2 (all 5,685 remaining textures for
-   +68,000 B). `kb/levers.md` L10 — run the `DC_TEXPOOL_PROBE` falsifier first.
+7. ⭐ **T1 — now the head of the PLAYABILITY workstream** (user directive
+   2026-08-09: *"the FPS is now good enough on hardware … make the full game
+   playable"*). Phase 1 frees 579,248 B; phase 2 makes **4,711 stubbed textures
+   / 2,132,352 B** loadable — content that renders as nothing today. ⚠️ **The
+   kb's "5,685 / 2,782,080 B" was ~30 % high**; the figures here are measured
+   (`[DC/TEXPOOL] map=6092 resident=1381/885984 stubbed=4711/2132352`).
+   ⚠️ **Its falsifier RAN and the probe itself was broken** — `interior=4318`
+   was the probe charging a stubbed row's NEIGHBOURS to it. Fixed; **T1 is
+   neither cleared nor killed until the re-run lands.** `kb/levers.md` L10.
+   ⚠️ **The seek risk is the playability risk**: ~306 seeks = 6-30 s of
+   hitching on CD-R unless it uses `dc_keep_sweep()`'s read-ahead window, which
+   R1 also still does not use.
 8. **AICA offload (stage B)** — the ~265 µs per voice-update term is exactly
    what the 64 hardware ADPCM channels do. Needs an offline VADPCM →
    AICA-ADPCM converter and a residency manager for 8.3 MB in ~1.8 MB.

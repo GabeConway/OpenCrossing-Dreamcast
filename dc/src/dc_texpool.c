@@ -184,6 +184,38 @@ static int lookup(const void* p, int* interior) {
     r = (int)s_order[best];
     base = row_addr(r);
     if (base == a) { *interior = 0; return r; }
+
+    /* 🔴 A STUBBED ROW IS **ONE BYTE** LONG, NOT `size` BYTES — AND WITHOUT THIS
+     * TEST THE PROBE REPORTS ITS NEIGHBOURS AS ITS OWN INTERIOR.
+     *
+     * MEASURED 2026-08-09, and it produced a false falsification of T1 that was
+     * one commit away from being believed. A 700 s town run read
+     * `interior=4318`, which is the counter this file calls "THE KILLER", and
+     * every one of those binds named ONE symbol: `ef_doyon01_00`, at offsets
+     * +68, +324 and +480. That symbol is NOT in keeplist-town.txt, so the stub
+     * tree declares it `u8 ef_doyon01_00[1]` — one byte — while
+     * `dc_texpool_map[].size` still carries its real 1,024. The linker then
+     * packs ~50 other small symbols into the 1,024-byte window after it
+     * (`dna_win_*_pal`, `ef_ame02_*_v`, `ef_anahikari01_*`, … all inside
+     * 0x8c684xxx in the map), and every bind to one of THOSE was attributed to
+     * ef_doyon01_00 as an interior pointer.
+     *
+     * The header above already states the premise — "under DC_ASSET_STUB an
+     * unkept array is `u8 x[1]`, so an interior pointer into it is a pointer
+     * into WHATEVER THE LINKER PUT NEXT" — and then the containment test used
+     * the declared size anyway. The premise was right and the code did not
+     * implement it.
+     *
+     * A pointer past a stubbed row's single byte is therefore not "inside" it;
+     * it belongs to some other symbol this map cannot name, which is exactly
+     * what `unmapped` means. Return -1 and let it be counted there.
+     *
+     * ⚠️ CONSEQUENCE FOR THE VERDICT, STATED SO NOBODY RE-READS THE OLD LOG AS
+     * EVIDENCE: `interior` is only meaningful for RESIDENT rows, and it is only
+     * resident rows T1 would take bytes back from. Every `interior=` figure
+     * printed before this fix is void. */
+    if (!dc_texpool_map[r].kept) return -1;
+
     if (a - base < (unsigned int)dc_texpool_map[r].size) { *interior = 1; return r; }
     return -1;
 }

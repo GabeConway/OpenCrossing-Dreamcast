@@ -164,11 +164,15 @@ Add to the prefix above, then run the harness:
     there BY CONSTRUCTION. **The emulator can falsify an instruction-count
     claim; it can NEVER falsify a locality claim** — and the converse trap is
     that a Flycast *win* on such a change is understated, not absent.
-    ⭐ **The audio half is not a second opinion, it is the same measurement**:
-    `DC_AUDIO_MAX_FRAMES` caps production at `MAX_FRAMES × 17.49 ms × 2 ticks`
-    **per PRESENTED frame** (§5 audio rule 4), so synthesis budget per second is
-    proportional to frame rate and stutter is the first thing a faster build
-    fixes. `kb/batch-s14.md` §7.
+    ⚠️ **The audio half measures the TAIL, not the median.**
+    `DC_AUDIO_MAX_FRAMES` caps production at
+    `MAX_FRAMES × 17.49 ms × 2 ticks` **per PRESENTED frame** (§5 audio rule 4),
+    but at 6 the sustained floor is ~4.8 FPS, which this port cleared long ago.
+    `[STUTTER]` fires on frames that individually blow the budget, so "no
+    skipping" says **the p99 frame time came down and says nothing about p50**.
+    Confirmed by the same human in the same session: *"music doesn't cut out at
+    all or stutter on hardware, but the FPS is still definitely worse than
+    emulator."* **Tail fixed, median still short.** `kb/batch-s14.md` §7.
 
 ---
 

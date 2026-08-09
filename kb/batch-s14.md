@@ -334,23 +334,32 @@ misses. **`us/v` 2.48 was never the result; it was the floor.**
 Same burn, same session: ***"sound is perfect. no skipping."*** In Flycast the
 comparable run booked **`[STUTTER]` 65 / 900 s**.
 
-**This is not an independent nicety, it is a FRAME-RATE MEASUREMENT WEARING A
-DIFFERENT HAT**, and the mechanism is already written down in `kb/RESUME.md` §5
-audio rule 4:
+**It is a frame-time measurement wearing a different hat — but of the TAIL, not
+the median.** The mechanism is in `kb/RESUME.md` §5 audio rule 4:
 
 > **`DC_AUDIO_MAX_FRAMES` IS AN FPS CONSTANT, NOT AN AUDIO ONE.** Production is
 > capped at `MAX_FRAMES × 17.49 ms × 2 ticks` **per PRESENTED frame** — the
 > audio cannot keep up below a floor FPS *however cheap synthesis becomes*.
 
-Audio production budget is therefore **proportional to presented frames**. A
-build that presents more frames per second gets proportionally more synthesis
-budget per second, and the stutter is what disappears first. ⭐ **So "no
-skipping" is a consequence of "runs better", derived from a documented
-mechanism** — which upgrades the hardware verdict from one perceptual report to
-**two observations of one cause, one of them structural.**
+Audio production budget is proportional to presented frames, so a faster build
+gets proportionally more synthesis budget and the stutter is the first thing to
+go.
 
-⚠️ **It still does not attribute**, and it does not prove the FPS gain is large
-— only that it crossed whatever this scene's audio floor is. Nothing here
+🔴 **BUT BE PRECISE ABOUT WHAT IT BOUNDS, BECAUSE AN EARLIER DRAFT OF THIS FILE
+WAS NOT.** At `DC_AUDIO_MAX_FRAMES=6` the sustained floor is **~4.8 FPS** — a
+bound this port cleared long ago. `[STUTTER]` does not fire on the median frame;
+it fires on the frames that individually blow the budget. **So "no skipping" is
+a statement about the WORST frames, not the average one: it says the p99 frame
+time came down, and it says nothing about p50.**
+
+⭐ **That is corroborated directly by the human in the same session: *"music
+doesn't cut out at all or stutter on hardware, but the FPS is still definitely
+worse than emulator."* Tail fixed, median still short.** The two halves of that
+sentence are consistent and they measure different things — which is exactly why
+the audio is worth reading as an instrument and exactly why it cannot stand in
+for one.
+
+⚠️ **It does not attribute, and it does not size the median gap.** Nothing here
 replaces `istall`.
 
 ### What this does NOT establish

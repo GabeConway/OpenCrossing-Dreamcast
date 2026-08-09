@@ -7,6 +7,79 @@ of it and no longer do. Entries are dated snapshots: a number here was true when
 it was written and is **not** a claim about today. For what is true now, read
 `kb/STATE.md`.
 
+## 2026-08-09 (session 14b) — THE PIVOT TO PLAYABILITY, AND T1's PROBE WAS
+## MEASURING ITS OWN STUB PADDING
+
+User directive after the S14 burn: *"the FPS is now good enough on hardware.
+let's see if we can eliminate stub loading to make the full game playable on
+hardware if possible."*
+
+### "Eliminate stub loading" is the wrong lever, and the right goal
+
+`DC_ASSET_STUB=0` is refuted by a boot and fails in the OPPOSITE direction:
+`margin=-781036 OVER`, a failed 15,638,528 B contiguous malloc, and **all
+14,495 assets MISSING** — the non-stub image has LESS content than the stubbed
+one (`kb/closed.md`). **The stub system already IS the demand loader**
+(`dc_stub_keep_load_one()` / `dc_keep_sweep()` live inside `#ifdef
+DC_ASSET_STUB`). What limits the game is that the **keep list is static**: 765
+entries chosen at build time. The town prints `ASSET MISSING 0` because its list
+is complete; the missing content is in the scenes the list does not cover.
+
+So the goal is **"stop letting a build-time list decide what exists"**, and the
+biggest lever for it is **T1** (`kb/levers.md` L10).
+
+### T1's falsifier ran twice and taught a lesson about instruments
+
+| run | scenes | verdict |
+|---|---|---|
+| 300 s | `0 → 3 → 4` — **never reached the town** | `interior=0 mutated=0 oversize=0 aliased=0`, 726,570 binds |
+| 700 s | `0 → 3 → 4 → 18 → 9` | 🔴 `interior=4318`, 2,187,050 binds |
+
+🔴 **The 4,318 are a PROBE ARTIFACT.** All of them named one symbol,
+`ef_doyon01_00`, at +68/+324/+480. It is not in `keeplist-town.txt`, so the stub
+tree gives it `u8 ef_doyon01_00[1]` while the probe's map still carries its real
+1,024 B — and the linker packed ~50 other small symbols into that window
+(0x8c684xxx: `dna_win_*_pal`, `ef_ame02_*_v`, `ef_anahikari01_*`). Every bind to
+a NEIGHBOUR was charged to `ef_doyon01_00` as an interior pointer.
+
+⭐ **`dc_texpool.c`'s own header had already stated the premise and the code did
+not implement it.** Fixed: a row with `kept == 0` is one byte, so anything past
+its base is `unmapped`. **Every `interior=` figure printed before the fix is
+void; T1 is neither cleared nor killed until the re-run lands.**
+
+⚠️ **A SHORT RUN IS NOT A CHEAP RUN, IT IS A DIFFERENT RUN.** The 300 s pass
+returned a clean all-four-zero verdict purely because it never entered the town
+— the same blind spot `kb/RESUME.md` §8 records for the census. **Check
+`deepest_scene` before believing any "all clear".**
+
+### The measured population, and a sixth kb figure corrected
+
+```
+[DC/TEXPOOL] map=6092 rows resident=1381/885984 B stubbed=4711/2132352 B
+```
+`kb/levers.md` L10 phase 2 claimed "5,685 textures / 2,782,080 B". Measured
+against the real build and keep list: **4,711 rows / 2,132,352 B** — ~30 % less
+content on offer than advertised, though still the best bytes-per-content ratio
+in the file.
+
+### The hardware picture, refined
+
+Human, same session: ***"music doesn't cut out at all or stutter on hardware,
+but the FPS is still definitely worse than emulator."*** ⚠️ **This CORRECTS an
+over-claim made earlier the same day**: the audio was written up as
+corroborating the median frame rate. It does not. At `DC_AUDIO_MAX_FRAMES=6` the
+sustained floor is ~4.8 FPS — cleared long ago — and `[STUTTER]` fires on frames
+that individually blow the budget. **"No skipping" certifies the p99 frame time
+came down and says nothing about p50. Tail fixed, median still short.**
+
+**The median gap has still never been measured on hardware.** Only
+`AC-DC-20260809a-pmcr.cdi` can, and it splits the diagnosis three ways: `istall`
+high ⇒ icache, F5 was right, more layout work pays (and
+`AC-DC-20260809c-nof5.cdi` sizes F5 alone); `dstall` high ⇒ the data side;
+neither, just `cyc` ⇒ raw work, i.e. G-B(2)'s 13.31 ms.
+
+---
+
 ## ⭐⭐⭐ 2026-08-09 (session 14) — BATCH S14: EIGHT CHANGES IN ONE PASS, A WASH
 ## IN FLYCAST BY CONSTRUCTION, AND THE FRUSTUM TEST TURNED OUT TO BE 0.14 ms
 
@@ -41,13 +114,17 @@ Flycast measured the same batch as a wash (below). The two do not conflict —
 four of the seven changes pay only in cache misses and **Flycast models neither
 cache**, so `us/v` 2.48 was never the result, it was the floor.
 
-⭐ **The audio is not a second opinion, it is the same measurement.**
+⭐ **The audio is an instrument, not a second opinion — but of the TAIL.**
 `DC_AUDIO_MAX_FRAMES` is an FPS constant (`kb/RESUME.md` §5 audio rule 4):
 production is capped at `MAX_FRAMES × 17.49 ms × 2 ticks` **per PRESENTED
-frame**, so synthesis budget per second is proportional to frame rate and the
-stutter is what disappears first. "No skipping" is therefore a derived
-consequence of "runs better" — two observations of one cause, one of them
-structural rather than perceptual.
+frame**. ⚠️ **At 6, the sustained floor is ~4.8 FPS — a bound this port cleared
+long ago — so "no skipping" does NOT mean "median FPS rose".** `[STUTTER]` fires
+on frames that individually blow the budget, so what it certifies is that the
+**p99 frame time came down.** The human confirmed exactly that split later the
+same session: ***"music doesn't cut out at all or stutter on hardware, but the
+FPS is still definitely worse than emulator."* Tail fixed, median still short**,
+and the two halves measure different things. (An earlier draft of this entry
+read the audio as corroborating the median. It does not.)
 
 ⚠️ **Direction, not magnitude, and NO attribution.** It does not say which of
 the seven did it, and cannot rule out one of them being a small regression

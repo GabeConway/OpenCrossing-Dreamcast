@@ -707,10 +707,40 @@ resolves through `gSPSegment` and is safe. Mitigation as specified: exclude the
 14 `gSPSegment`-argument symbols (1 resident, 512 B) and all of
 `src/data/npc/**` (R2's domain).
 
-### The falsification experiment — one build, one run, ZERO behaviour change
+### ⚠️ The falsification experiment — RAN 2026-08-09, AND THE PROBE WAS BROKEN
 
-`DC_TEXPOOL_PROBE=1`, counters `interior` / `mutated` / `oversize`. **Any one of
-them non-zero kills the design as specified.** Run it before writing the loader.
+`DC_TEXPOOL_PROBE=1`, counters `interior` / `mutated` / `oversize` / `aliased`.
+**Any one non-zero kills the design as specified.** It ran, twice, and the
+result is a lesson about instruments rather than about T1:
+
+| run | scenes reached | verdict |
+|---|---|---|
+| 300 s | `0 → 3 → 4` (**never reached the town**) | `interior=0 mutated=0 oversize=0 aliased=0` over 726,570 binds |
+| 700 s | `0 → 3 → 4 → 18 → 9` | 🔴 `interior=4318` over 2,187,050 binds |
+
+🔴 **AND THE 4,318 ARE A PROBE ARTIFACT, NOT A PROPERTY OF THE GAME.** Every one
+named a single symbol — `ef_doyon01_00`, at +68/+324/+480. That symbol is **not
+in `keeplist-town.txt`**, so the stub tree declares it `u8 ef_doyon01_00[1]`
+while `dc_texpool_map[].size` still carries its real 1,024 B. The linker packs
+~50 other small symbols into the window after it (`dna_win_*_pal`,
+`ef_ame02_*_v`, `ef_anahikari01_*`, all in 0x8c684xxx), and every bind to one of
+THOSE was attributed to `ef_doyon01_00` as an interior pointer.
+
+⭐ **`dc_texpool.c`'s own header states the premise — "under `DC_ASSET_STUB` an
+unkept array is `u8 x[1]`, so an interior pointer into it is a pointer into
+WHATEVER THE LINKER PUT NEXT" — and then the containment test used the declared
+size anyway.** Fixed 2026-08-09: a row with `kept == 0` is one byte long, so
+anything past its base is `unmapped`, not `interior`. **Every `interior=`
+figure printed before that fix is void, and the design is neither cleared nor
+killed until the re-run lands.**
+
+⚠️ **TWO PROCESS LESSONS, both already in this kb in other words:**
+1. **A short run is not a cheap run, it is a DIFFERENT run.** The 300 s pass
+   returned a clean verdict because it never entered the town. `kb/RESUME.md` §8
+   says the same thing about the census only seeing depth-0 branches — **check
+   `deepest_scene` before believing any "all clear".**
+2. **`interior` is only meaningful for RESIDENT rows** — and resident rows are
+   the only ones T1 takes bytes back from anyway.
 
 ### ⚠️ The seek risk, and the fix that already exists in the tree
 
