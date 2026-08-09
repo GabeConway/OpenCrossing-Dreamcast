@@ -174,6 +174,21 @@ Ours would sit inside the vertex loop.
 
 ### G-B 🔴 Transform each unique vertex ONCE, before index expansion
 
+⚠️ **READ FIRST (2026-08-09): "G-B" now names TWO changes, and only the small
+one shipped.**
+- ✅ **The vertex-index SIDE CHANNEL — SHIPPED, ON by default.**
+  `dc_emu64_cull.cpp` records the index sequence it already walks, `dc_gx.c`
+  stamps `(epoch<<8)|index` into `DCGXVertex`'s two dead padding bytes, and the
+  memo keys on the stamp instead of hashing + comparing 30 bytes. **`us/v`
+  2.68 → 2.51, hit rate 50.9 → 53.7 %**, gate `vidchk=15,538,941 vidbad=0`.
+  It kills the memo's random read — **the hash-lookup workaround this section
+  complains about is now cheap.**
+- 🔴 **THE REWRITE BELOW IS UNSTARTED.** Transforming the unique set once and
+  indexing into it — and thereby deleting emu64's index expansion and our own
+  `GX*` setters — **is still the 13.31 ms block and still the largest single
+  block in the project.** A cheap memo is not that. Do not mark this section
+  done off the side channel.
+
 **This is the biggest lever found, and it aims at the largest unattributed
 block in the project.** `kb/perf-dc.md:40-45` records ~23.6 ms — 52 % of the
 then-frame — as "`dl_G_TRIN`'s index expansion PLUS our own `GX*` setters,
@@ -622,9 +637,16 @@ icache work reached from the other end (`tools/dcopt/icache_map.py`: the
    compare. **G-B would replace it structurally**: emu64's index stream already
    knows which corners share a vertex, so an index-keyed memo needs no hash, no
    compare and no random read, and would hit ~100 %.
-4. **G-B (13.31 ms)** — still the largest single block in the project, and
-   untouched by any of the above: it is emu64's expansion loop, upstream of
-   everything measured here.
+   ✅ **DONE 2026-08-09 — this is exactly what shipped** (the vertex-index side
+   channel, `-DDC_GX_NO_VTXID`). ⚠️ Two corrections from the run: the hit rate
+   went **50.9 → 53.7 %, not ~100 %** (arming stops at the frustum test and the
+   three punts, and one submit can merge two TRINs), and **`memo` itself barely
+   moved** — 1.26 → 1.20 — because the saving shows up as **fewer misses** in
+   the five miss-charged stages. `us/v` 2.68 → 2.51.
+4. **G-B (13.31 ms)** — **the INDEXED-SUBMIT half, unstarted** (the side channel
+   in item 3 is not it). Still the largest single block in the project, and
+   untouched by any of the above: it is emu64's expansion loop plus our `GX*`
+   setters, upstream of everything measured here.
 5. §0a / G-D / G-F — **0.58 + 0.23 + 0.70 ms.** Do these last, if ever.
 
 ### The ranking, re-costed against 30.39 ms

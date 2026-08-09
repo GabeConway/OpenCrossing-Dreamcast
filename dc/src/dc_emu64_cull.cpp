@@ -74,7 +74,9 @@
  * KILL SWITCH AND VERDICT
  * =============================================================================
  * DC_EMU64_CULL=0 (the default) compiles this file to nothing — byte-identical
- * image. The verdict on a run is `[EMU64C] falsecull=0` under
+ * image. `-DDC_GX_VTXID_DECAL` (also default off) is a second, narrower switch
+ * that only widens G-B's side channel; see its own section below the includes.
+ * The verdict on a run is `[EMU64C] falsecull=0` under
  * -DDC_EMU64_CULL_VERIFY, which needs no screenshot: in verify mode every
  * batch we would cull is ALSO handed to the original handler, and we count any
  * batch our entry test rejected that dc_gx.c's flush-time test did not.
@@ -149,11 +151,81 @@ extern const int dc_gx_batch_cull;
  * there and the VERIFY comparison below has to know. */
 extern int g_pc_frameskip_active;
 
+/* G-B. The vertex-index side channel into dc_gx.c's GXPosition3f32. See the
+ * block comment above DCGXVertex in dc/include/dc_gx_internal.h; the condition
+ * below is that header's, restated rather than pulling the whole GX state
+ * struct into a C++ TU that only needs two function names. */
+#if !defined(DC_GX_NO_VTXID) && !defined(DC_GX_FAT_VERTEX)
+#define DC_GX_VTXID 1
+void dc_gx_vtxid_arm(const unsigned char *ids, int n);
+void dc_gx_vtxid_disarm(void);
+#endif
+
 void dc_emu64_cull_init(void);
 void dc_emu64_cull_frame_open(unsigned int tick);
 void dc_emu64_cull_report(void);
 
 } /* extern "C" */
+
+/* =============================================================================
+ * DC_GX_VTXID_DECAL — G-B REACH: ARM THE DECAL-Z BATCHES, STILL NEVER CULL THEM
+ * =============================================================================
+ * DEFAULT OFF. There is no Makefile variable on purpose — this is an A/B knob,
+ * reached with DC_XDEFS='-DDC_GX_VTXID_DECAL'. With it off, every line it
+ * guards disappears and this file behaves exactly as it did before, down to the
+ * [EMU64C] log format.
+ *
+ * THE ARGUMENT, PRESERVED HERE BECAUSE IT IS THE WHOLE JUSTIFICATION:
+ *
+ * The three punts in cull_batch() were all written for CULLING, and culling is
+ * the strong operation — skipping a batch skips a draw AND skips the in-place
+ * vertex mutations set_position() performs on the way, and it does so on the
+ * strength of an AABB that may not even describe the geometry that would have
+ * been drawn. ARMING SKIPS NOTHING. The original handler still runs, every
+ * reference, in the same order, doing exactly what it did before; all the side
+ * channel does is tell dc_gx.c which emu64 index each successive
+ * GXPosition3f32 call belongs to. So arming clears a much weaker bar:
+ *
+ *     the same index must stage a BYTE-IDENTICAL DCGXVertex
+ *     within this submit.
+ *
+ * Against that bar the three punts split two-to-one:
+ *
+ *   PUNT 1, decal-Z (emu64.c:2724-2783) — MEETS IT. set_position() there
+ *     computes a TRANSIENT projected, z-biased position and hands it straight
+ *     to GXPosition3f32; it never writes it back to emu_vtx->position. Every
+ *     reference recomputes it from the same stored position through the same
+ *     projection_mtx and position_mtx_stack[mtx_stack_size], none of which move
+ *     inside a batch, so two references to one index stage identical vertices.
+ *     It still FAILS the CULL's bar — our box is built from the raw positions
+ *     and says nothing about where the reprojected geometry lands — so this
+ *     path arms and is NEVER frustum-tested.
+ *
+ *   PUNT 2, G_TEXTURE_GEN (emu64.c:2710-2721) — FAILS IT. The normal is
+ *     multiplied by model_view_mtx IN PLACE on EVERY reference, with no
+ *     idempotence flag. Reference 2 of an index stages a different normal than
+ *     reference 1. Stays punted whatever happens here — and measurement says it
+ *     costs nothing anyway (ptgen=0).
+ *
+ *   PUNT 3, mixed MTX_NONSHARED (emu64.c:2693-2709) — FAILS IT. A disagreeing
+ *     vertex is transformed in place on FIRST touch and its flag flipped, so
+ *     again reference 1 and reference 2 stage different vertices. Stays punted,
+ *     and it is RE-CHECKED on the decal path below: being a decal batch does
+ *     not excuse being a mixed batch, and the two conditions are independent.
+ *
+ * WHAT IT IS WORTH. Measured over a 30-frame window, 2026-08-09:
+ *     punt=1560 pdec=900 ptgen=0 pmix=660   against   vis=1770 armed batches.
+ * PUNT 1 alone is ~900 batches, so lifting it takes armed batches 1770 -> 2670,
+ * +51 % reach for the memo. `viddec=` on the report line is the measured half
+ * of that claim; `pdec=` keeps counting the same thing it always did, so the
+ * two are directly comparable across the A/B.
+ */
+#if defined(DC_GX_VTXID_DECAL) && !defined(DC_GX_VTXID)
+#error "DC_GX_VTXID_DECAL widens the G-B side channel, but DC_GX_NO_VTXID or DC_GX_FAT_VERTEX has compiled that channel out of this build. Drop one of the two."
+#endif
+#ifdef DC_GX_VTXID_DECAL
+#define CU_DECAL_ARM 1
+#endif
 
 /* ⚠️ sizeof is the cheap half of the tripwire — it catches a header edit or a
  * toolchain bump that moves members, not a change that keeps the size and
@@ -201,6 +273,29 @@ static int   s_active = 0;
  * fault that fired once would hide it. The report labels them. */
 static unsigned int s_trin, s_cull, s_vis, s_punt, s_refs;
 static unsigned int s_reinst;
+#ifdef DC_GX_VTXID
+/* G-B. `vid=` batches armed / references handed to the side channel, per
+ * window. `vid=0` on a town run means the channel is dead and every memo
+ * lookup fell back to the hash — which is the free falsification. */
+static unsigned int s_vid_armed, s_vid_refs;
+/* Which punt costs the side channel its reach. The three are NOT equal under
+ * the weaker bar arming has to clear -- see the note above each punt. */
+static unsigned int s_punt_dec, s_punt_tgen, s_punt_mix;
+/* Cumulative, and a must-be-zero: the reference list outgrew its structural
+ * bound, so the batch went unarmed rather than desynced. */
+static unsigned int s_vid_over;
+#endif
+#ifdef CU_DECAL_ARM
+/* Per window, like s_vid_armed and s_punt_dec, so `pdec=` and `viddec=` can be
+ * read against each other on one line. It is a SUBSET of s_vid_armed: a decal
+ * batch that arms bumps both, which is why vid= may now exceed vis=. The
+ * batches counted here are also still counted in punt=/pdec=, exactly once
+ * each, so trin = cull + vis + punt and punt = pdec + ptgen + pmix both still
+ * hold and the A/B against the OFF build stays honest. pdec= - viddec= is the
+ * set of decal batches that reached the arm site and were refused there (mixed
+ * MTX_NONSHARED, or the structural bound). */
+static unsigned int s_vid_decal;
+#endif
 #ifdef DC_EMU64_CULL_VERIFY
 static unsigned int s_falsecull, s_gfxp_bad, s_skipped;
 #endif
@@ -229,7 +324,27 @@ static unsigned int s_falsecull, s_gfxp_bad, s_skipped;
  * n_faces == 0 at every exit), because the dispatcher increments it again at
  * emu64.c:5874. So our culled path sets gfx_p = p - 1.
  */
+#ifndef DC_GX_VTXID
 #define CU_MARK(i)  (mark[(unsigned)(i) >> 5] |= 1u << ((unsigned)(i) & 31u))
+#else
+/* G-B. The same walk also records the reference SEQUENCE, which is the part
+ * mark[] throws away: a bitset says which vertices the batch touches, and
+ * GXPosition3f32 needs to know which one each successive call is for.
+ *
+ * The bound is structural and EXACT, not a guess: n_faces is a 7-bit field
+ * plus one (emu64.c:4806) and every face marks exactly three indices, so a
+ * TRIN command is at most 128 faces and 384 references. The store is still
+ * bounds-tested and `nids` still counts past the cap, so an overrun writes
+ * nothing and the arm site below simply declines to arm. A silently truncated
+ * list would desync the cursor and hand vertices each other's transforms —
+ * which is worth one compare per reference to make impossible. */
+#define CU_IDS_MAX 384
+static unsigned char s_ids[CU_IDS_MAX];
+#define CU_MARK(i)  (mark[(unsigned)(i) >> 5] |= 1u << ((unsigned)(i) & 31u), \
+                     (void)(nids < CU_IDS_MAX \
+                                ? (s_ids[nids] = (unsigned char)(i)) : 0), \
+                     (void)nids++)
+#endif
 
 /* ==========================================================================
  * cull_batch — returns 1 if the command was fully consumed here, 0 to punt
@@ -251,6 +366,19 @@ static int cull_batch(emu64 *self)
     int  first_pass = 1;
     int  poly_add = 0;
     int  want;
+#ifdef CU_DECAL_ARM
+    /* Set by PUNT 1 instead of returning; consumed by the decal arm block that
+     * sits between the walk and dirty_check(). */
+    int  decal = 0;
+#endif
+#ifdef DC_GX_VTXID
+    int  nids = 0;
+
+    /* Disarm FIRST, ahead of every punt below. At most one list is ever live,
+     * and a batch that punts or culls falls back to the content-hashed memo
+     * instead of inheriting whatever the last batch left behind. */
+    dc_gx_vtxid_disarm();
+#endif
 
     s_trin++;
 
@@ -260,12 +388,41 @@ static int cull_batch(emu64 *self)
      * is built from the raw positions, so it describes geometry that is not
      * what would be drawn. The divergence would present as z-fighting weeks
      * later, which is the worst possible failure mode for a cull. Punt, and
-     * revisit only with a measurement of how many batches this is. */
+     * revisit only with a measurement of how many batches this is.
+     *
+     * ⚠️ THIS PUNT IS ABOUT CULLING AND MAY NOT APPLY TO G-B's SIDE CHANNEL.
+     * Arming skips nothing — the original handler still runs every reference —
+     * so all it needs is "same index ⇒ same staged vertex within this submit".
+     * The decal path recomputes its transient position from the SAME
+     * emu_vtx->position through the SAME matrices on every reference, so it
+     * meets that bar even though it fails the cull's. Counted separately
+     * (`pdec=`) so the reach this costs is a number before anyone acts on it.
+     * ⭐ ACTED ON: -DDC_GX_VTXID_DECAL does exactly that, arming without ever
+     * culling. The full argument is in the section above the static_assert. */
     if ((self->othermode_low & ZMODE_DEC) == ZMODE_DEC &&
         (self->geometry_mode & G_ZBUFFER) != 0 &&
         (self->geometry_mode & G_DECAL_EQUAL) == 0) {
         s_punt++;
+#ifdef DC_GX_VTXID
+        s_punt_dec++;
+#endif
+#ifdef CU_DECAL_ARM
+        /* ARM, BUT DO NOT CULL. Both counters above fired exactly as they do
+         * in the OFF build and exactly once for this batch, so punt= and pdec=
+         * stay comparable; the new reach shows up in viddec=. Fall through to
+         * the walk rather than returning.
+         *
+         * ⚠️ NON-NEGOTIABLE, AND THE ONE THING THAT MAKES THIS SAFE: this batch
+         * must never reach dc_gx_aabb_is_offscreen(). The box we would hand it
+         * is built from the raw positions and the decal path draws a
+         * reprojected, z-biased position instead, so the answer would be
+         * meaningless in BOTH directions — including the direction that deletes
+         * visible geometry. The decal block after the walk returns 0
+         * unconditionally and never falls into the box builder. */
+        decal = 1;
+#else
         return 0;
+#endif
     }
 
     /* ---- PUNT 2: reflection mapping on a nonshared batch -----------------
@@ -273,9 +430,29 @@ static int cull_batch(emu64 *self)
      * emu_vtx->normal IN PLACE and has no idempotence flag to stop it doing so
      * again on the next batch that touches the same vertex. Skipping the batch
      * therefore does not merely skip a draw, it changes how many times a
-     * shared normal gets multiplied. Punt rather than reason about it. */
+     * shared normal gets multiplied. Punt rather than reason about it.
+     *
+     * ⚠️ AND THIS ONE FAILS G-B's BAR TOO, for the same reason it fails the
+     * cull's: the normal is re-multiplied on EVERY reference, so the second
+     * reference to an index does not stage the same vertex as the first. It
+     * must stay punted whatever happens to the decal case. */
     if ((self->geometry_mode & G_TEXTURE_GEN) != 0) {
+#ifdef CU_DECAL_ARM
+        /* ⚠️ THE ONE INTERACTION THE FALL-THROUGH CREATES. In the OFF build a
+         * batch that is BOTH decal and G_TEXTURE_GEN returns at PUNT 1 and is
+         * counted once, in punt= and pdec=. With the switch on it reaches this
+         * test as well, so counting again here would inflate punt= and invent a
+         * ptgen= the OFF build never had — the A/B would show a counter moving
+         * that describes nothing. It was fully accounted one punt ago; just
+         * leave. And it must NOT arm: G_TEXTURE_GEN re-multiplies the normal on
+         * every reference, which fails the arming bar no matter what the ZMODE
+         * bits say. Disarmed on entry, so leaving is enough. */
+        if (decal) return 0;
+#endif
         s_punt++;
+#ifdef DC_GX_VTXID
+        s_punt_tgen++;
+#endif
         return 0;
     }
 
@@ -339,6 +516,73 @@ static int cull_batch(emu64 *self)
         }
     }
 
+#ifdef CU_DECAL_ARM
+    /* ---- THE DECAL ARM PATH. It arms, and it returns 0. That is all. ------
+     *
+     * PLACED DELIBERATELY BEFORE dirty_check() / setup_1tri_2tri_1quad(), and
+     * this is a choice, not an accident. Those two calls exist here for exactly
+     * one reason: g_gx.projection_mtx and g_gx.current_mtx are one command
+     * stale until they run, and the FRUSTUM TEST reads both. A batch that is
+     * never frustum-tested has no use for them. Making them anyway would be
+     * harmless — they are idempotent, and the original handler makes the same
+     * two calls at emu64.c:4812-4813 a moment later, which is precisely why the
+     * existing punt paths can already leave them made or unmade — but NOT
+     * making them keeps this path's observable effect on `this` byte-for-byte
+     * identical to the OFF build's early return at PUNT 1, and that is the
+     * property worth having when the switch is meant to be a clean A/B.
+     * (setup_1tri_2tri_1quad also writes this->using_nonshared_mtx, emu64.c
+     * :2862/:2866; the original handler sets it again from the same first_vtx
+     * before any vertex is submitted, so skipping it here changes nothing that
+     * is read before it is rewritten.)
+     *
+     * THE MIXED-MTX CHECK IS NOT SKIPPED. Decal and MTX_NONSHARED are
+     * independent conditions, and a mixed batch fails the ARMING bar on its own
+     * account: set_position() (emu64.c:2693-2709) transforms a disagreeing
+     * vertex in place on first touch and flips its flag, so reference 2 of that
+     * index stages a different vertex than reference 1 and the memo would hand
+     * one of them the other's transform. So the same distinct-vertex ctz walk
+     * over mark[] runs here, agreement-only — no box, no extrema, no frustum.
+     * A decal batch that fails it simply does not arm and needs no counter of
+     * its own: it is already in pdec=, and pdec= - viddec= is exactly that set.
+     */
+    if (decal) {
+        int want_d = self->vertices[first_vtx].flag & MTX_NONSHARED;
+        int agree  = 1;
+        int w;
+
+        for (w = 0; w < 4 && agree; w++) {
+            unsigned int m = mark[w];
+            while (m) {
+                int b = __builtin_ctz(m);
+                m &= m - 1u;
+                if ((self->vertices[w * 32 + b].flag & MTX_NONSHARED)
+                        != want_d) {
+                    agree = 0;
+                    break;
+                }
+            }
+        }
+
+        /* Same structural bound and same refusal-to-truncate as the visible
+         * path below: a short list would desync the cursor, so decline instead.
+         * cull_batch() already disarmed on entry, so declining leaves the
+         * channel dead and every vertex of this batch falls back to the
+         * content-hashed memo — which is what it did before this switch
+         * existed. */
+        if (agree) {
+            if (nids <= CU_IDS_MAX) {
+                dc_gx_vtxid_arm(s_ids, nids);
+                s_vid_armed++;
+                s_vid_refs += (unsigned int)nids;
+                s_vid_decal++;
+            } else {
+                s_vid_over++;
+            }
+        }
+        return 0;
+    }
+#endif /* CU_DECAL_ARM */
+
     /* ---- THE ORDERING RULE, AND IT IS THE ONE THAT DELETES GEOMETRY IF
      * BROKEN. g_gx.projection_mtx is refreshed only by GXSetProjection inside
      * dirty_check (emu64.c:3430-3436), and g_gx.current_mtx only by
@@ -373,7 +617,17 @@ static int cull_batch(emu64 *self)
                 float a, c, d;
                 m &= m - 1u;
 
-                if ((v->flag & MTX_NONSHARED) != want) { s_punt++; return 0; }
+                /* ⚠️ ALSO FAILS G-B's BAR: set_position() transforms a
+                 * disagreeing vertex in place on FIRST touch and flips its
+                 * flag, so reference 1 and reference 2 of that index stage
+                 * different vertices. Stays punted. */
+                if ((v->flag & MTX_NONSHARED) != want) {
+                    s_punt++;
+#ifdef DC_GX_VTXID
+                    s_punt_mix++;
+#endif
+                    return 0;
+                }
 
                 a = v->position.x; c = v->position.y; d = v->position.z;
                 if (!seeded) {
@@ -396,7 +650,32 @@ static int cull_batch(emu64 *self)
         mn[0] = n0; mn[1] = n1; mn[2] = n2;
         mx[0] = x0; mx[1] = x1; mx[2] = x2;
 
-        if (!dc_gx_aabb_is_offscreen(mn, mx)) { s_vis++; return 0; }
+        if (!dc_gx_aabb_is_offscreen(mn, mx)) {
+            s_vis++;
+#ifdef DC_GX_VTXID
+            /* G-B. THE ONLY PLACE THE SIDE CHANNEL IS ARMED, and every
+             * condition that makes it sound has already been checked above:
+             * the batch is about to be DRAWN by the original handler, the
+             * decal-Z and G_TEXTURE_GEN punts did not fire, and every
+             * referenced vertex agreed on MTX_NONSHARED. Those three are
+             * exactly the cases in which set_position() mutates vertices[]
+             * mid-batch — so on this path "same index ⇒ byte-identical staged
+             * vertex" is a property of emu64's own code, not an assumption.
+             *
+             * A batch we CULL never arms, because it emits no vertices at
+             * all. `nids <= CU_IDS_MAX` is structurally guaranteed; if it ever
+             * is not, the list is short and arming it would desync, so don't.
+             */
+            if (nids <= CU_IDS_MAX) {
+                dc_gx_vtxid_arm(s_ids, nids);
+                s_vid_armed++;
+                s_vid_refs += (unsigned int)nids;
+            } else {
+                s_vid_over++;
+            }
+#endif
+            return 0;
+        }
     }
 
     /* ---- COMMITTED. Replicate the handler's non-drawing side effects. ----
@@ -553,17 +832,44 @@ void dc_emu64_cull_report(void)
     /* The first five are this window; everything after `|` is CUMULATIVE for
      * the run and must read zero. `nocmp=` is not a fault — it is the number
      * of culls taken on a frameskipped tick, where dc_gx.c cannot answer. */
-    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u | cum reinst=%u"
+    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u"
+#ifdef DC_GX_VTXID
+            " vid=%u/%u over=%u pdec=%u"
+#ifdef CU_DECAL_ARM
+            /* Of the pdec= decal batches, how many the side channel reached.
+             * Also a subset of vid=. Absent entirely when the switch is off, so
+             * the default build's log line is unchanged. */
+            " viddec=%u"
+#endif
+            " ptgen=%u pmix=%u"
+#endif
+            " | cum reinst=%u"
 #ifdef DC_EMU64_CULL_VERIFY
             " falsecull=%u gfxp_bad=%u nocmp=%u"
 #endif
             "\n",
-            s_trin, s_cull, s_vis, s_punt, s_refs, s_reinst
+            s_trin, s_cull, s_vis, s_punt, s_refs,
+#ifdef DC_GX_VTXID
+            s_vid_armed, s_vid_refs, s_vid_over,
+            s_punt_dec,
+#ifdef CU_DECAL_ARM
+            s_vid_decal,
+#endif
+            s_punt_tgen, s_punt_mix,
+#endif
+            s_reinst
 #ifdef DC_EMU64_CULL_VERIFY
             , s_falsecull, s_gfxp_bad, s_skipped
 #endif
            );
     s_trin = s_cull = s_vis = s_punt = s_refs = 0;
+#ifdef DC_GX_VTXID
+    s_vid_armed = s_vid_refs = 0;
+    s_punt_dec = s_punt_tgen = s_punt_mix = 0;
+#endif
+#ifdef CU_DECAL_ARM
+    s_vid_decal = 0;
+#endif
 }
 
 #endif /* DC_EMU64_CULL */

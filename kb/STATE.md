@@ -1,5 +1,98 @@
 # Session state — resume here
 
+## ⭐⭐⭐ 2026-08-09 (session 13) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED.
+## `us/v` 2.68 → 2.51
+
+Five runs, **one build line** (town, `DC_ASSET_STUB=1`, `keeplist-town.txt`,
+`DC_ARAM_WINDOW=1048576`, `DC_ARENA_BYTES=1200000`, `DC_AUDIO_SCENES=all`,
+`DC_AUDIO_DISC_FRAMES=8`, `DC_AUDIO_VOICES=12`, `DC_AUTOSTART=1`,
+`DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`), 600 s each, Flycast:
+
+```
+build                        us/v  draw xform  sum  memo shade  lit  tex post emit   xf     v  hit%
+ctrl (neither change)        2.65  29.1   7.5  6.66  1.27  1.99 0.58 0.57 0.58 1.45 0.23  2820  50.5
+shade hoist only             2.68  28.3   7.3  6.65  1.26  1.98 0.61 0.62 0.56 1.40 0.22  2739  50.9
+G-B + hoist                  2.51  29.2   6.9  6.31  1.20  1.82 0.54 0.57 0.55 1.40 0.22  2745  53.7
+G-B + hoist + shortcuts      2.54  28.5   7.0  6.33  1.18  1.89 0.53 0.56 0.57 1.39 0.20  2745  53.7
+G-B, hoist OFF               2.56  27.8   7.0  6.45  1.26  1.91 0.55 0.59 0.55 1.40 0.20  2754  54.1
+```
+
+All five: `ASSET MISSING 0`, `reinst=0`, `dropped=0`. ⚠️ **Every run drew a
+DIFFERENT TOWN** (`v` 2820/2739/2745/2745/2754) — **`us/v` is the instrument, `draw`
+is not.**
+
+🔴 **THE FIFTH RUN GAVE THIS SESSION ITS MOST REUSABLE RESULT: THE NOISE FLOOR
+ON `us/v` IS ~±2 %, AND NOBODY HAD MEASURED IT.** The shade hoist reads
+**+1.1 %** against `ctrl` (2.65 → 2.68) and **−2.0 %** against `G-B, hoist OFF`
+(2.56 → 2.51). **The sign flips.** Grouped, the five runs are 2.65 / 2.68
+without G-B and 2.51 / 2.54 / 2.56 with it — the groups separate cleanly, the
+members within a group do not. `us/v` normalises for vertex COUNT but not for
+WHICH vertices, and the lit / textured / punch-through mix moves with the town.
+
+**Consequences, and they are general:**
+- **The hoist is INSIDE THE NOISE and its sign is NOT determined by this data.**
+  Any claim that it helped or hurt is unsupported. It is kept ON because it
+  single-sources a predicate that was written out twice, not because it is fast.
+- **G-B's −6.3 % is ~3x the floor**, and what carries it is the two-GROUP
+  separation, not any single pair.
+- ⚠️ **A change worth less than ~4 % CANNOT be resolved by one A/B pair.**
+  Session 12's wins were 8-18 % and were safe on one run each; that precedent
+  does NOT license a 2 % claim. Run each arm 2-3 times, or report the result as
+  inside the floor — do not quietly pick the favourable pair.
+
+1. ⭐ **G-B, the vertex-index side channel — SHIPPED, ON by default,
+   `us/v` −6.3 %.** `dc_emu64_cull.cpp`'s index walk already visits indices in
+   `set_position3()` order, so it records the sequence; `dc_gx.c` stamps
+   `(epoch<<8)|index` into `DCGXVertex` bytes 30-31 (dead padding, `sizeof`
+   stays 32); `dc_pvr.c`'s memo keys on the stamp — **no hash, no 30-byte
+   compare, and no random read into `verts[]`**, which was the 122-cycle miss.
+   Kill `-DDC_GX_NO_VTXID`. Gate `-DDC_GX_VTXID_VERIFY` ran:
+   **`vidchk=15,538,941 vidbad=0 over=0`**. Armed on `vid=1770/61470` against
+   `vis=1770` = **100 % of visible TRIN batches**.
+   ⚠️ **NOT the 13.31 ms block** — see below. ⚠️ The win landed in
+   `shade`/`lit`/`tex`/`post`, not in `memo` (1.26 → 1.20): those are charged on
+   memo MISSES (rule 10) and the hit rate went **50.9 → 53.7 %**.
+   ⚠️ **Flycast models no cache, so 2.51 is a FLOOR.**
+2. ❌ **The shade hoist is NEUTRAL and the shortcuts are DEAD, measured twice.**
+   Hoist alone 2.65 → 2.68; shortcuts on top 2.51 → 2.54 with `shade` 1.82 →
+   1.89, while firing 10,184,262 times. **Mechanism: with the shortcuts off,
+   `need_rgb`/`need_a` were compile-time constants and GCC straight-lined the
+   block; hoisting makes them runtime bitmask loads, so `if (need_rgb)` becomes
+   a real branch with both arms emitted.** Generalised rule: **hoisting a
+   predicate out of a loop buys nothing if it was already constant IN the loop.**
+   `kb/closed.md`.
+3. **The punt split re-opens one punt.**
+   `[EMU64C] trin=6990 cull=3660 vis=1770 punt=1560 pdec=900 ptgen=0 pmix=660`.
+   Decal-Z is **58 % of punts**, `G_TEXTURE_GEN` is **zero**. The punts exist
+   because *culling* changes semantics; *arming* skips nothing and needs only
+   "same index ⇒ byte-identical staged vertex in this submit". Decal-Z meets
+   that (it recomputes from the same `position` through the same matrices);
+   `G_TEXTURE_GEN` and mixed `MTX_NONSHARED` do not (both mutate `vertices[]`).
+
+### Ranked next actions (2026-08-09) — supersedes every list below
+
+1. ⭐ **The decal-Z arming lift — WRITTEN, GATE PASSED, PERF NOT YET MEASURED.**
+   `-DDC_GX_VTXID_DECAL`, **default OFF**. A decal-Z batch now walks and arms
+   the side channel but is still **never frustum-tested and never culled** (its
+   AABB describes raw positions, not the reprojected z-biased ones it draws).
+   Gate ran with the switch ON: **`vidchk=15,835,845 vidbad=0 over=0`**, and the
+   reach moved **`vid=1800/61920` → `2670/72810`, +48 % batches / +18 % refs**,
+   with `viddec=900` of `pdec=1020` (120 decal batches refused on
+   `MTX_NONSHARED` disagreement, as designed).
+   ⚠️ **Refs only +18 % because decal batches are small (~12 refs vs ~35), so
+   the expected `us/v` effect is AT the ±2 % noise floor — it needs REPEATED
+   runs (rule 11), not one pair.** Four were in flight at flush; read them
+   before defaulting this ON.
+   ⚠️ **`-DDC_EMU64_CULL_VERIFY` CANNOT certify this switch** — it only checks
+   batches we cull, and a decal batch never culls. `-DDC_GX_VTXID_VERIFY` is the
+   gate, and it is the one that ran above.
+2. 🔴 **The full indexed-submit G-B — the 13.31 ms block.** `dl_G_TRIN`'s index
+   expansion plus our own `GX*` setters. **Still the largest single block in the
+   project, and NOT what this session's G-B addressed** — the side channel makes
+   the memo cheap, it does not remove a setter. Multi-session.
+3. **The hardware PMCR burn** (session 11, `AC-DC-20260808g-pmcr.cdi`). Every
+   number above is a Flycast floor; `istall` on silicon is the only price.
+
 ## ⭐⭐⭐ 2026-08-08 (session 12) — THE QUEUE BELOW WAS SPENT. `us/v` 3.24 → 2.65
 
 Three changes, one measured run each, **all ON by default**:
@@ -31,6 +124,12 @@ share a denominator — the middle five are charged on memo MISSES. `shade` is
 **Queue now: hoist shade's predicates per batch → G-B (13.31 ms, still the
 largest single block in the project) → the memo fingerprint key (−1.0-1.2 ms,
 needs a `VERIFY` gate) → §0a/G-D/G-F last.**
+
+⚠️ **[SUPERSEDED 2026-08-09 — session 13 spent the first and third of those.**
+The hoist is **neutral** and the shortcuts behind it are **dead** (the section
+at the top of this file has the compiler-level reason). The memo key landed as
+the **vertex-index side channel**, `us/v` −6.3 %, gate clean. **The 13.31 ms
+indexed-submit item is untouched and still #2.]**
 
 ## 🔴🔴 2026-08-08 (session 11b) — `xform` IS SPLIT. THE FRAME IS MEMORY-BOUND,
 ## AND THE sh4zam QUEUE IS RE-RANKED AROUND IT

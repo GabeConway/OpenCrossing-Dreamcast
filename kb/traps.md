@@ -1162,3 +1162,13 @@ so the state provably cannot change inside one `dc_gx_backend_submit()`.
 **Rule: hoist the test to the loop level where its inputs actually change.** And
 note this was NOT an icache effect — Flycast models no icache — so "it must be
 the cache" was not available as an excuse. It was simply more instructions.
+
+⚠️ **AMENDED 2026-08-09 — the hoist this rule prescribes was measured and it is
+NEUTRAL, and the shortcuts behind it are still negative** (`shade_batch_mode()`,
+`-DDC_PVR_NO_SHADE_HOIST`: hoist alone `us/v` 2.65 → 2.68; shortcuts on top
+`shade` 1.82 → 1.89). **Why: with the shortcuts off, `need_rgb`/`need_a` were
+compile-time CONSTANTS and GCC straight-lined the block; hoisting made them
+runtime bitmask loads, i.e. a real branch with both arms emitted.** So the rule
+gains a second clause: **hoisting a predicate out of a loop buys nothing if it
+was already a constant IN the loop** — check what the compiler already knows
+before moving the test. Closed as settled-negative in `kb/closed.md`.

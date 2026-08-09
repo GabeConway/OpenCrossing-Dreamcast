@@ -141,6 +141,12 @@ static unsigned int s_prim_unsupported;
  * timing movement is NOT this. */
 static unsigned int s_shade_a8;
 #endif
+#if defined(DC_GX_VTXID) && defined(DC_GX_VTXID_VERIFY)
+/* G-B's correctness gate. `vidbad` MUST be 0; `vidchk` says how much was
+ * actually checked, so a zero that comes from the channel never arming is
+ * distinguishable from a zero that means it is right. */
+static unsigned int s_vid_checked, s_vid_bad;
+#endif
 #ifndef DC_PVR_NO_TEX1ALPHA
 /* Batches that took the second-texture alpha fold. Reported next to the other
  * renderer counters so the feature says how often it fires rather than being
@@ -1623,46 +1629,113 @@ static int tev_const_alpha_last(float* out) {
 #endif /* !DC_PVR_NO_TEVCONST_ALPHA */
 #endif /* !DC_PVR_NO_TEVCONST */
 
-static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
-                                 const float* nrm) {
-#ifdef DC_PVR_NO_LIGHTING
-    (void)eye; (void)nrm;
-    return ((unsigned int)v->color0[3] << 24) | ((unsigned int)v->color0[0] << 16) |
+/* The vertex colour bytes, in the TA's ARGB word order. Three paths below
+ * return exactly this and it used to be written out three times. */
+static inline unsigned int pack_vtx_argb(const DCGXVertex* v) {
+    return ((unsigned int)v->color0[3] << 24) |
+           ((unsigned int)v->color0[0] << 16) |
            ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
+}
+
+/* --- THE SHADE PREDICATES ARE PER-BATCH, AND THEY USED TO BE PER-VERTEX -----
+ *
+ * Everything shade_vertex() branches on is g_gx channel state: num_chans and
+ * chan_ctrl_{enable,mat_src,amb_src}[]. NONE of it can change inside one
+ * dc_gx_backend_submit() call — GXSetChanCtrl is the only writer of the three
+ * chan_ctrl_* arrays (dc_gx.c:1907) and it calls
+ * dc_gx_flush_if_begin_complete() before every write, as do GXSetNumChans
+ * (dc_gx.c:1878) and the rest of the lighting-state family. So a batch's
+ * vertices provably all take the same branches.
+ *
+ * Session 12 measured the consequence of NOT knowing that: the LAZYRGBA and
+ * ALPHA8 shortcuts below are exact, they fire on essentially every lit vertex
+ * in the town, and they still measured NEGATIVE — `shade=` 2.09 -> 1.94 ms
+ * while `xform - sum` went 0.44 -> 0.71 and `us/v` did not move. Three g_gx
+ * loads and three branches per vertex to save three int->float converts is
+ * moving work, not removing it. (kb/RESUME.md session 12, "what did NOT pay".)
+ *
+ * shade_batch_mode() therefore evaluates all of them ONCE, next to
+ * `need_light`, and hands the answer down as a bitmask. Kill switch
+ * -DDC_PVR_NO_SHADE_HOIST calls it per vertex instead, which is an exact
+ * behavioural revert through the same code path. */
+enum {
+    SHADE_PASSTHRU = 1u << 0, /* the answer is the vertex colour, unchanged */
+    SHADE_NEED_RGB = 1u << 1, /* build rgba[0..2] for chan_eval to read      */
+    SHADE_NEED_A   = 1u << 2, /* build rgba[3]                               */
+    SHADE_A8       = 1u << 3  /* the alpha lane is a byte copy               */
+};
+
+static unsigned int shade_batch_mode(void) {
+#ifdef DC_PVR_NO_LIGHTING
+    return SHADE_PASSTHRU;
 #else
-    float rgba[4];
+    unsigned int m = 0;
 
     /* numChans == 0 means the TEV takes no rasterised colour at all. Passing
      * the vertex colour through is wrong in principle but is what makes
      * untextured UI geometry visible instead of black. */
     if (g_gx.num_chans == 0)
-        return ((unsigned int)v->color0[3] << 24) |
-               ((unsigned int)v->color0[0] << 16) |
-               ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
+        return SHADE_PASSTHRU;
 
 #ifndef DC_PVR_NO_SHADEFAST
     /* THE PASS-THROUGH CASE, and it is the common one.
      *
      * With no light enabled on either half of the channel and both material
      * sources set to GX_SRC_VTX, GX's whole channel equation collapses to
-     * "the vertex colour", and chan_component() below was spending four
-     * float divides, four multiplies, four clamps and four float->int
-     * conversions arriving back at the byte it started from. Returning the
-     * bytes is EXACT, not an approximation: pack_argb() computes
-     * (int)(b/255*255 + 0.5) and the round-trip error is ~1e-5, four orders of
-     * magnitude below the 0.5 that would change the answer.
+     * "the vertex colour", and chan_component() was spending four float
+     * divides, four multiplies, four clamps and four float->int conversions
+     * arriving back at the byte it started from. Returning the bytes is EXACT,
+     * not an approximation: pack_argb() computes (int)(b/255*255 + 0.5) and the
+     * round-trip error is ~1e-5, four orders of magnitude below the 0.5 that
+     * would change the answer.
      *
      * This is also what licenses dc_gx_backend_submit() to skip the eye-space
      * position and the normal transform entirely — see `need_light` there. The
-     * predicate is duplicated deliberately and the two must not drift: every
-     * path below that reads `eye` or `nrm` is guarded by chan_ctrl_enable[]. */
+     * two predicates are still written out separately and must not drift:
+     * every path below that reads `eye` or `nrm` is guarded by
+     * chan_ctrl_enable[], and SHADE_PASSTHRU implies !need_light. */
     if (!g_gx.chan_ctrl_enable[0] && !g_gx.chan_ctrl_enable[1] &&
         g_gx.chan_ctrl_mat_src[0] == GX_SRC_VTX &&
         g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX)
-        return ((unsigned int)v->color0[3] << 24) |
-               ((unsigned int)v->color0[0] << 16) |
-               ((unsigned int)v->color0[1] << 8) | (unsigned int)v->color0[2];
+        return SHADE_PASSTHRU;
 #endif
+
+#ifndef DC_PVR_SHADE_LAZYRGBA
+    m |= SHADE_NEED_RGB | SHADE_NEED_A;
+#else
+    if (g_gx.chan_ctrl_mat_src[0] == GX_SRC_VTX ||
+        g_gx.chan_ctrl_amb_src[0] == GX_SRC_VTX)
+        m |= SHADE_NEED_RGB;
+    if (g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX ||
+        g_gx.chan_ctrl_amb_src[1] == GX_SRC_VTX)
+        m |= SHADE_NEED_A;
+#endif
+
+#ifdef DC_PVR_SHADE_ALPHA8
+    if (!g_gx.chan_ctrl_enable[1] &&
+        g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX) {
+        m |= SHADE_A8;
+        m &= ~(unsigned int)SHADE_NEED_A;
+    }
+#endif
+
+    return m;
+#endif
+}
+
+static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
+                                 const float* nrm, unsigned int mode) {
+#ifdef DC_PVR_NO_LIGHTING
+    (void)eye; (void)nrm; (void)mode;
+    return pack_vtx_argb(v);
+#else
+    float rgba[4];
+
+    /* Both pass-through cases, decided once per batch in shade_batch_mode().
+     * The caller hoists this test out of the vertex loop as well, so on a
+     * pass-through batch shade_vertex() is not even called. */
+    if (mode & SHADE_PASSTHRU)
+        return pack_vtx_argb(v);
 
 #ifdef DC_PVR_NO_SHADEFAST
     rgba[0] = v->color0[0] * (1.0f / 255.0f);
@@ -1692,33 +1765,19 @@ static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
          * failure than a wrong colour, and one that would not reproduce. A
          * store of zero is one instruction against the five it replaces.
          *
-         * ⚠️ MEASURED 2026-08-08 AND DEFAULTED **OFF**. It is opt-in via
+         * ⚠️ MEASURED 2026-08-08 AND DEFAULTED **OFF**, when the predicate was
+         * evaluated here, per vertex. It is opt-in via
          * -DDC_PVR_SHADE_LAZYRGBA. Together with the alpha-byte shortcut below
          * it took `[VTXSPLIT] shade=` 2.09 -> 1.94 ms — and put MORE than that
          * back into the per-primitive loop: `xform - sum` went 0.44 -> 0.71 ms
          * and `us/v` did not move (2.65 -> 2.64).
          *
-         * THE REASON IS THE PREDICATE'S PLACEMENT, NOT THE IDEA. `need_rgb`
-         * and `a8` are three g_gx loads and three branches evaluated PER
-         * VERTEX to save three int->float converts — that moves work rather
-         * than removing it. They are per-BATCH constants: every writer of
-         * chan_ctrl_* calls dc_gx_flush_if_begin_complete() first
-         * (dc_gx.c:1879,1911,1935,1947,2065), so the state provably cannot
-         * change inside one dc_gx_backend_submit(). Hoisting them next to
-         * `need_light` is the version worth measuring, and it is the reason
-         * this code is kept rather than deleted.
-         *
-         * (Not the icache: Flycast models none. This is added instructions.) */
-        int need_rgb, need_a;
-#ifndef DC_PVR_SHADE_LAZYRGBA
-        need_rgb = 1;
-        need_a = 1;
-#else
-        need_rgb = (g_gx.chan_ctrl_mat_src[0] == GX_SRC_VTX) ||
-                   (g_gx.chan_ctrl_amb_src[0] == GX_SRC_VTX);
-        need_a   = (g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX) ||
-                   (g_gx.chan_ctrl_amb_src[1] == GX_SRC_VTX);
-#endif
+         * THE REASON WAS THE PREDICATE'S PLACEMENT, NOT THE IDEA — three g_gx
+         * loads and three branches per vertex to save three int->float
+         * converts. The predicate now lives in shade_batch_mode() and runs
+         * once per batch; this block only reads the bit. */
+        const int need_rgb = (mode & SHADE_NEED_RGB) != 0;
+        const int need_a = (mode & SHADE_NEED_A) != 0;
 
         /* --- S3: THE ALPHA LANE IS A BYTE COPY, AND IT IS EXACT ------------
          *
@@ -1746,16 +1805,12 @@ static unsigned int shade_vertex(const DCGXVertex* v, const float* eye,
          * opt-in via -DDC_PVR_SHADE_ALPHA8. The shortcut itself is exact and
          * it fires constantly (`shade_a8 verts=12,543,600` on a 600 s town
          * run), so what failed to pay was the PER-VERTEX predicate, not the
-         * saving. Hoist the predicate per batch and re-measure.
+         * saving. The predicate is now per batch (shade_batch_mode(), which
+         * also clears SHADE_NEED_A when it fires).
          *
          * Counter: `shade_a8=` in dc_pvr_report(). */
-        int a8;
-#ifndef DC_PVR_SHADE_ALPHA8
-        a8 = 0;
-#else
-        a8 = (!g_gx.chan_ctrl_enable[1] &&
-              g_gx.chan_ctrl_mat_src[1] == GX_SRC_VTX);
-        if (a8) need_a = 0;
+#ifdef DC_PVR_SHADE_ALPHA8
+        const int a8 = (mode & SHADE_A8) != 0;
 #endif
 
         if (need_rgb) {
@@ -2587,6 +2642,13 @@ static int          s_vmemo_src[VMEMO_SLOTS];   /* index into verts[] */
 static unsigned int s_vmemo_tag[VMEMO_SLOTS];   /* the batch it belongs to */
 static unsigned int s_vmemo_gen = 0;
 static ClipVtx      s_vmemo_val[VMEMO_SLOTS];
+#ifdef DC_GX_VTXID
+/* G-B. The (epoch<<8 | emu64 index) this slot was published for, or
+ * DC_GX_VTXID_NONE when the hash path published it. 256 B, and it is the
+ * second half of the id lookup — see dc_gx.c's dc_gx_vtxid_arm() for why the
+ * generation tag alone is not enough once GXBegin merges two TRINs. */
+static unsigned short s_vmemo_vid[VMEMO_SLOTS];
+#endif
 
 static inline unsigned int vmemo_hash(const DCGXVertex* v) {
     /* Position dominates: two vertices of one model almost never share it,
@@ -3193,6 +3255,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
      * than producing a wrong colour, and that is a much worse failure. */
     int need_light;
 #endif
+    /* Every predicate shade_vertex() branches on, decided once. See
+     * shade_batch_mode(). -DDC_PVR_NO_SHADE_HOIST moves the call back into the
+     * vertex loop, which is an exact revert. */
+    unsigned int shade_mode = 0;
     int i, j, step, per_prim;
 
     if (!dc_pvr_ready || !s_scene_open || count <= 0) return;
@@ -3422,6 +3488,10 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                  (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]);
 #endif
 
+#ifndef DC_PVR_NO_SHADE_HOIST
+    shade_mode = shade_batch_mode();
+#endif
+
 #ifndef DC_PVR_NO_VTXMEMO
     /* Invalidate on entry, not on exit: everything the memo depends on that is
      * NOT the source vertex — the folded matrix, mv, nm, the light state, the
@@ -3444,11 +3514,52 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             float ox = v->position[0], oy = v->position[1], oz = v->position[2];
             float eye[3], nrm[3], nl;
 #ifndef DC_PVR_NO_VTXMEMO
-            unsigned int slot = vmemo_hash(v);
+            unsigned int slot;
+            int memo_hit;
+#ifdef DC_GX_VTXID
+            /* G-B. WHEN emu64's OWN INDEX IS ON THE VERTEX, THE LOOKUP IS TWO
+             * SEQUENTIAL LOADS. `slot` is the index itself — emu64's vertex
+             * cache is 128 entries and so is this table — so it is injective
+             * within a TRIN and there is no hash, no 30-byte compare, and
+             * above all NO RANDOM READ INTO verts[]. That read is what made
+             * this stage 122 cycles a vertex: it is an operand-cache miss, not
+             * arithmetic (kb/RESUME.md session 11b).
+             *
+             * The stamp compare is the epoch half — GXBegin can merge two TRIN
+             * commands into one submit, so `tag == gen` alone is NOT
+             * sufficient. See dc_gx.c's dc_gx_vtxid_arm().
+             *
+             * No id/hash mixing is possible inside one batch: the side channel
+             * is armed for a whole TRIN or not at all (dc_emu64_cull.cpp), so
+             * every vertex of a given TRIN either carries a stamp or none
+             * does. A merged submit CAN mix an armed TRIN with an unarmed one,
+             * which is exactly why the two lookups stay separate and the
+             * unarmed side keeps its content compare. */
+            const unsigned int vid = v->vtxid;
+            if (vid != DC_GX_VTXID_NONE) {
+                slot = vid & (VMEMO_SLOTS - 1u);
+                memo_hit = (s_vmemo_tag[slot] == s_vmemo_gen) &&
+                           (s_vmemo_vid[slot] == vid);
+#ifdef DC_GX_VTXID_VERIFY
+                /* THE GATE. A desynced side channel does not fail, it returns
+                 * another vertex's transform — so on every id hit, run the
+                 * compare the fast path just skipped and count disagreements.
+                 * `vidbad=` MUST read 0. This build is slower by construction;
+                 * it is a correctness run, never a perf run. */
+                s_vid_checked++;
+                if (memo_hit && !vmemo_same(v, &verts[s_vmemo_src[slot]]))
+                    s_vid_bad++;
+#endif
+            } else
+#endif
+            {
+                slot = vmemo_hash(v);
+                memo_hit = (s_vmemo_tag[slot] == s_vmemo_gen) &&
+                           vmemo_same(v, &verts[s_vmemo_src[slot]]);
+            }
 
             dc_pvr_vmemo_total++;
-            if (s_vmemo_tag[slot] == s_vmemo_gen &&
-                vmemo_same(v, &verts[s_vmemo_src[slot]])) {
+            if (memo_hit) {
                 cv[k] = s_vmemo_val[slot];
                 dc_pvr_vmemo_hit++;
                 VS_MARK(VS_MEMO);
@@ -3509,7 +3620,16 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
                 cv[k].v *= tex->v_scale;
             }
             VS_MARK(VS_TEX);
-            cv[k].argb = shade_vertex(v, eye, nrm);
+#ifdef DC_PVR_NO_SHADE_HOIST
+            shade_mode = shade_batch_mode();
+#endif
+            /* The pass-through test is lifted out of the call as well: on a
+             * pass-through batch the whole of shade_vertex() is four byte
+             * loads and three shifts, and paying a function call for that was
+             * most of what `shade` cost. */
+            cv[k].argb = (shade_mode & SHADE_PASSTHRU)
+                             ? pack_vtx_argb(v)
+                             : shade_vertex(v, eye, nrm, shade_mode);
             VS_MARK(VS_SHADE);
 #ifndef DC_PVR_NO_PUNCHTHRU
 #ifndef DC_PVR_PT_KEEP_VTXALPHA
@@ -3742,6 +3862,14 @@ void dc_gx_backend_submit(int prim, const DCGXVertex* verts, int count) {
             s_vmemo_src[slot] = i + k;
             s_vmemo_tag[slot] = s_vmemo_gen;
             s_vmemo_val[slot] = cv[k];
+#ifdef DC_GX_VTXID
+            /* An unarmed vertex publishes NONE, so a later id lookup landing
+             * on this slot cannot mistake it for its own; the armed case
+             * publishes the stamp it was found by. s_vmemo_src stays written
+             * on BOTH paths — the hash path still needs it, and the VERIFY
+             * gate reads it to content-check an id hit. */
+            s_vmemo_vid[slot] = (unsigned short)v->vtxid;
+#endif
 #endif
             VS_MARK(VS_POST);
         }
@@ -3886,6 +4014,9 @@ void dc_pvr_report(void) {
 #if defined(DC_PVR_SHADE_ALPHA8) && !defined(DC_PVR_NO_LIGHTING) && \
     !defined(DC_PVR_NO_SHADEFAST)
     DC_LOGE("[DC/PVR] shade_a8 verts=%u\n", s_shade_a8);
+#endif
+#if defined(DC_GX_VTXID) && defined(DC_GX_VTXID_VERIFY)
+    DC_LOGE("[DC/PVR] vtxid vidchk=%u vidbad=%u\n", s_vid_checked, s_vid_bad);
 #endif
 #ifndef DC_PVR_NO_TEX1ALPHA
     DC_LOGE("[DC/PVR] tex1alpha batches=%u of %u\n", s_tex1_batches, s_batches);

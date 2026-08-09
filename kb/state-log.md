@@ -1,5 +1,192 @@
 # Session log — what was observed running, in order
 
+## ⭐⭐⭐ 2026-08-09 (session 13) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED
+## (`us/v` 2.68 → 2.51), THE SHADE HOIST IS NEUTRAL, AND THE SHORTCUTS ARE DEAD
+## FOR A REASON THAT IS NOW UNDERSTOOD
+
+Four measured runs, **one build line for all of them**, 600 s each, Flycast:
+
+```
+town, keeplist-town.txt, DC_ASSET_STUB=1, DC_ARAM_WINDOW=1048576,
+DC_ARENA_BYTES=1200000, DC_AUDIO_SCENES=all, DC_AUDIO_DISC_FRAMES=8,
+DC_AUDIO_VOICES=12, DC_AUTOSTART=1, DC_PVR_VTXSPLIT=16, -DDC_PERF_PHASE
+```
+
+```
+build                        us/v  draw xform  sum  memo shade  lit  tex post emit   xf     v  hit%
+ctrl (neither change)        2.65  29.1   7.5  6.66  1.27  1.99 0.58 0.57 0.58 1.45 0.23  2820  50.5
+shade hoist only             2.68  28.3   7.3  6.65  1.26  1.98 0.61 0.62 0.56 1.40 0.22  2739  50.9
+G-B + hoist                  2.51  29.2   6.9  6.31  1.20  1.82 0.54 0.57 0.55 1.40 0.22  2745  53.7
+G-B + hoist + shortcuts      2.54  28.5   7.0  6.33  1.18  1.89 0.53 0.56 0.57 1.39 0.20  2745  53.7
+G-B, hoist OFF               2.56  27.8   7.0  6.45  1.26  1.91 0.55 0.59 0.55 1.40 0.20  2754  54.1
+```
+
+All five: **`ASSET MISSING 0`, `reinst=0`, `dropped=0`.**
+
+🔴 **THE FIFTH RUN GAVE THIS SESSION ITS MOST REUSABLE RESULT: THE NOISE FLOOR
+ON `us/v` IS ~±2 %, AND NOBODY HAD MEASURED IT.** The shade hoist reads
+**+1.1 %** against `ctrl` (2.65 → 2.68) and **−2.0 %** against `G-B, hoist OFF`
+(2.56 → 2.51). **The sign flips.** Grouped, the five runs are 2.65 / 2.68
+without G-B and 2.51 / 2.54 / 2.56 with it — the groups separate cleanly, the
+members within a group do not. `us/v` normalises for vertex COUNT but not for
+WHICH vertices, and the lit / textured / punch-through mix moves with the town.
+
+**Consequences, and they are general:**
+- **The hoist is INSIDE THE NOISE and its sign is NOT determined by this data.**
+  Any claim that it helped or hurt is unsupported. It is kept ON because it
+  single-sources a predicate that was written out twice, not because it is fast.
+- **G-B's −6.3 % is ~3x the floor**, and what carries it is the two-GROUP
+  separation, not any single pair.
+- ⚠️ **A change worth less than ~4 % CANNOT be resolved by one A/B pair.**
+  Session 12's wins were 8-18 % and were safe on one run each; that precedent
+  does NOT license a 2 % claim. Run each arm 2-3 times, or report the result as
+  inside the floor — do not quietly pick the favourable pair.
+
+⚠️ **Each run drew a DIFFERENT TOWN** (`v = 2820 / 2739 / 2745 / 2745 / 2754`; the seed
+is `sqrand(osGetCount())` per boot, `sys_math.c:7`). **`us/v` is the instrument;
+`draw` is not** — `draw` moves 28.3-29.2 across rows that differ by a change
+worth −6 % on `us/v`, in both directions, which is exactly what a different town
+looks like.
+
+### 1. ⭐ G-B — THE VERTEX-INDEX SIDE CHANNEL. `us/v` 2.68 → 2.51, −6.3 %. SHIPPED, ON BY DEFAULT
+
+⚠️ **FRAMING, BEFORE THE MECHANISM: this is NOT the 13.31 ms block.** That
+figure is `dl_G_TRIN`'s index expansion **plus our own `GX*` attribute
+setters**, and this change removes neither. It makes the **memo** cheap. **The
+indexed-submit rewrite — transform each unique vertex once, index into it, delete
+the setters — is still open and is still the largest single block in the
+project.** Several kb files already blur the two; do not add to that.
+
+**What it is.** `dc/src/dc_emu64_cull.cpp`'s AABB walk already visits the batch's
+indices **in exactly the order `set_position3()` will replay them**, so it now
+*records that sequence* and hands it to `dc/src/dc_gx.c` (`dc_gx_vtxid_arm`).
+`GXPosition3f32` consumes the sequence with a cursor and stamps
+`(epoch << 8) | index` into `DCGXVertex` **bytes 30-31, which were dead
+padding** — `sizeof(DCGXVertex)` stays 32 and session 12's `aligned(32)` is
+untouched. `dc/src/dc_pvr.c`'s vertex memo then keys on that stamp:
+
+- no hash,
+- no 30-byte content compare,
+- ⭐ and above all **no random read into `verts[]`** — which is the
+  operand-cache miss that made `memo` **122 cycles a vertex** (session 11b).
+
+Kill switch **`-DDC_GX_NO_VTXID`**.
+
+**The correctness gate RAN.** `-DDC_GX_VTXID_VERIFY` content-checks **every** id
+hit against the old compare: **`vidchk=15,538,941 vidbad=0 over=0`**
+(`smoke-gbverify-20260809-100644-39747`). Not one disagreement in 15.5 M checks,
+and `over=0` says the cursor never ran past the recorded sequence.
+
+**The epoch is load-bearing, not defensive.** `GXBegin` **merges** batches
+(`pc_gx_merged_batches`), so one submit can hold two TRIN commands, and emu64
+**reloads `vertices[]` between them** — a bare index would hand the second TRIN
+the first TRIN's transformed vertex. The epoch makes a stale id miss.
+
+**Reach: 100 % of what is legal to arm.** Armed only where the batch survives the
+frustum test AND none of `dc_emu64_cull.cpp`'s three punts fired. Per 30-frame
+window: **`vid=1770/61470` against `vis=1770`** — i.e. every visible TRIN batch,
+61,470 stamped vertex references.
+
+⚠️ **WHERE THE WIN LANDED IS NOT WHERE IT WAS AIMED.** `memo` itself moved only
+**1.26 → 1.20 ms**. The gain is in `shade`/`lit`/`tex`/`post`
+(3.77 → 3.48 ms combined), because **those stages are charged on memo MISSES**
+(measurement rule 10) and the **hit rate rose 50.9 → 53.7 %**. Misses per frame
+fall ~5.5 %, the five miss-charged stages fall ~7.3 %; the miss-count drop is
+about three-quarters of it and the remainder is consistent with the deleted
+random read no longer evicting the lines the rest of the loop wants.
+
+⚠️ **AND FLYCAST UNDERSTATES THIS BY CONSTRUCTION.** The thing the side channel
+deletes is *a random read that misses the operand cache*, and **Flycast models no
+cache**. **2.51 is a FLOOR**, not the hardware figure.
+
+### 2. THE SHADE-PREDICATE HOIST IS NEUTRAL AND THE SHORTCUTS ARE DEAD — AND THE MECHANISM IS A COMPILER ONE
+
+`kb/RESUME.md` session 12 said the `LAZYRGBA`/`ALPHA8` shortcuts lost because
+their predicates ran **per vertex**, and told this session to hoist them next to
+`need_light`. **That was done** — `shade_batch_mode()`, kill switch
+`-DDC_PVR_NO_SHADE_HOIST`. Both halves of the prediction failed:
+
+| | `us/v` | `shade` |
+|---|---:|---:|
+| ctrl | 2.65 | 1.99 |
+| **hoist alone** | **2.68** | 1.98 |
+| G-B + hoist | 2.51 | 1.82 |
+| **+ shortcuts on top** | **2.54** | **1.89** |
+
+The hoist alone is **no better** (+1.1 %, i.e. noise-to-slightly-worse). The
+shortcuts on top of the hoist are **WORSE** — `shade` 1.82 → 1.89, `us/v` 2.51 →
+2.54 — while the shortcut fired **`shade_a8 verts=10,184,262`** times. So it is
+not that the fast path is rare; it is that having a fast path costs more than it
+saves, twice, measured two different ways.
+
+⭐ **The mechanism, which is the part worth keeping.** With the shortcuts OFF,
+`need_rgb` / `need_a` are **compile-time constants** and GCC straight-lines the
+block. **Hoisting turns them into runtime variables loaded from a bitmask**, so
+`if (need_rgb)` becomes a real branch with **both arms emitted**. The predicate
+got cheaper to compute and the loop got harder to schedule — fewer evaluations of
+a test, worse code around it.
+
+**This generalises the existing rule** ("a per-vertex predicate is not a saving",
+`kb/traps.md`): **moving a predicate out of a loop does not help if it was
+already a constant IN the loop.** Recorded as settled-negative in
+`kb/closed.md`; do not propose a third variant of this without a new mechanism.
+
+### 3. THE PUNT SPLIT IS MEASURED, AND IT RE-OPENS ONE PUNT
+
+```
+[EMU64C] trin=6990 cull=3660 vis=1770 punt=1560 pdec=900 ptgen=0 pmix=660
+```
+
+Per 30-frame window: **52.4 % culled, 25.3 % visible, 22.3 % punted.** Of the
+punts, **the decal-Z punt is 900 — 58 % of all punts — and `G_TEXTURE_GEN` is
+ZERO.**
+
+⭐ **The three punts exist because CULLING a batch changes semantics. ARMING
+skips nothing** — it only needs the weaker property *"the same index means a
+byte-identical staged vertex within this submit"*.
+
+- **Decal-Z MEETS the weaker bar.** It recomputes a transient position from the
+  same `emu_vtx->position` through the same matrices on every reference.
+- **`G_TEXTURE_GEN` and mixed `MTX_NONSHARED` do NOT.** Both *mutate*
+  `vertices[]` — per reference, and on first touch, respectively.
+
+**Lifting the decal-Z punt FOR ARMING ONLY takes armed batches 1770 → 2670,
++51 % reach.** ⚠️ **NOT DONE, NOT MEASURED.** It is the top ranked next action.
+
+### Ranked next actions (2026-08-09)
+
+1. ⭐ **The decal-Z arming lift — WRITTEN, GATE PASSED, PERF NOT MEASURED.**
+   `-DDC_GX_VTXID_DECAL`, **default OFF**. Decal batches now arm but are still
+   never frustum-tested and never culled. Gate with it ON:
+   **`vidchk=15,835,845 vidbad=0 over=0`**; reach `vid=1800/61920` →
+   `2670/72810` (**+48 % batches, +18 % refs**), `viddec=900` of `pdec=1020`.
+   ⚠️ Refs only +18 % (decal batches are ~12 refs, not ~35), so the `us/v`
+   effect sits AT the ±2 % floor and needs REPEATED runs (rule 11). Four were in
+   flight at flush — read them before defaulting it ON.
+   ⚠️ `-DDC_EMU64_CULL_VERIFY` cannot certify it (decal batches never cull);
+   `-DDC_GX_VTXID_VERIFY` is the gate.
+2. 🔴 **The indexed-submit rewrite — the 13.31 ms block.** Still the largest
+   single block in the project, still untouched by this session, still a
+   multi-session change. The side channel is *evidence for* it (a stamped
+   sequence already exists) but it is not it.
+3. **The hardware PMCR burn** — unchanged, and still the only instrument that
+   can price what Flycast hides. Every number above is a floor.
+
+### Runs
+
+| run | what |
+|---|---|
+| `smoke-ctrl-20260809-094257-38338` | ctrl, neither change |
+| `smoke-cand-20260809-095257-38954` | shade hoist only |
+| `smoke-gbverify-20260809-100644-39747` | `-DDC_GX_VTXID_VERIFY` gate — `vidchk=15,538,941 vidbad=0 over=0` |
+| `smoke-gb-20260809-101618-39854` | G-B + hoist |
+| `smoke-shade2-20260809-103932-40220` | G-B + hoist + shade shortcuts |
+
+⏸ **A fifth run is in flight: G-B with `-DDC_PVR_NO_SHADE_HOIST`**, isolating the
+hoist from the side channel. Until it lands, "G-B is −6.3 %" is measured against
+the hoisted build, and the hoist's own contribution is bounded by the ctrl row at
+±1 %.
+
 ## ⭐⭐⭐ 2026-08-08 (session 12) — G-C SHIPPED, AND THE MEMORY-BOUND READING
 ## PAID: `us/v` 3.24 → 2.65, THREE MEASURED RUNS, ONE CHANGE EACH
 

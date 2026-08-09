@@ -1001,6 +1001,13 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
             s_conv_src_expected = nverts;
             pc_gx_merged_batches++;
             memset(&g_gx.current_vertex, 0, sizeof(DCGXVertex));
+#ifdef DC_GX_VTXID
+            /* 0 is a VALID emu64 index, so the memset must not leave one. Every
+             * staged vertex passes through GXPosition3f32, which overwrites
+             * this — but a zeroed stamp is a trap waiting for the first path
+             * that does not. */
+            g_gx.current_vertex.vtxid = DC_GX_VTXID_NONE;
+#endif
             g_gx.current_vertex.color0[0] = 255;
             g_gx.current_vertex.color0[1] = 255;
             g_gx.current_vertex.color0[2] = 255;
@@ -1030,6 +1037,9 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     s_conv_src_count = 0;
     s_conv_src_expected = nverts;
     memset(&g_gx.current_vertex, 0, sizeof(DCGXVertex));
+#ifdef DC_GX_VTXID
+    g_gx.current_vertex.vtxid = DC_GX_VTXID_NONE;
+#endif
     g_gx.current_vertex.color0[0] = 255;
     g_gx.current_vertex.color0[1] = 255;
     g_gx.current_vertex.color0[2] = 255;
@@ -1056,6 +1066,67 @@ void GXEnd(void) {
     dc_gx_commit_pending_and_flush();
 #endif
 }
+
+#ifdef DC_GX_VTXID
+/* ==========================================================================
+ * G-B — THE emu64 VERTEX-INDEX SIDE CHANNEL
+ * ==========================================================================
+ * dc_emu64_cull.cpp already walks a TRIN command's packed index stream to
+ * build its AABB, and it walks it in EXACTLY the order set_position3() will
+ * visit the same indices in — that property is already load-bearing there
+ * (it is what makes `gfx_p = p - 1` land where emu64 leaves it). So the walk
+ * can hand us the expanded reference list for free, and GXPosition3f32 — which
+ * is called once per reference, in that same order — can consume it with a
+ * cursor and stamp each index onto the vertex it stages.
+ *
+ * WHY A SEQUENCE AND NOT A LOOKUP: nothing between emu64 and here carries the
+ * index. set_position() passes floats, and it lives in src/, which we do not
+ * edit. The order is the only channel available, and it happens to be exact.
+ *
+ * DISARMING is deliberately NOT done on flush. cull_batch() disarms on entry,
+ * before any of its three punts can return, so at most one list is ever live;
+ * and because the two walks agree reference-for-reference, the cursor reaches
+ * `n` exactly as the batch ends and everything after it reads NONE on its own.
+ * Putting a disarm in dc_gx_flush_vertices() would instead race GXBegin's own
+ * flush of the PREVIOUS batch, which runs after we have already armed.
+ *
+ * If the two ever do desync, the symptom is a memo hit returning another
+ * vertex's transform — visible corruption. -DDC_GX_VTXID_VERIFY (dc_pvr.c)
+ * content-checks every id hit and counts disagreements; it must read 0.
+ *
+ * ⚠️ THE EPOCH IS NOT DECORATION — GXBegin MERGES BATCHES. When the incoming
+ * primitive needs no state change, GXBegin folds it into the batch already
+ * staged (the pc_gx_merged_batches path below) instead of flushing. So ONE
+ * dc_gx_backend_submit() can contain the vertices of two consecutive TRIN
+ * commands — and emu64 reloads vertices[] between them (G_VTX changes no GX
+ * state, so it does not break a merge). Index 5 of the first TRIN and index 5
+ * of the second are then different vertices inside one memo generation, and a
+ * bare index would hand the second one the first one's transform.
+ *
+ * So the stamp is `(epoch << 8) | index`, epoch bumped on every arm. The memo
+ * slots on the index and compares the WHOLE stamp, which costs one more load
+ * from a 256-byte array and makes the merge case correct by construction
+ * rather than by hoping it does not happen. */
+static const unsigned char* s_vid_list;
+static int s_vid_n;
+static int s_vid_i;
+static unsigned int s_vid_epoch;
+
+void dc_gx_vtxid_arm(const unsigned char* ids, int n) {
+    s_vid_list = ids;
+    s_vid_n = n;
+    s_vid_i = 0;
+    /* 8 bits, wrapping. It only has to separate TRINs that can land in one
+     * submit, which is a handful; DC_GX_VTXID_NONE is 0xFFFF and no index
+     * exceeds 127, so no epoch can ever forge it. */
+    s_vid_epoch = (s_vid_epoch + 1u) & 0xFFu;
+}
+
+void dc_gx_vtxid_disarm(void) {
+    s_vid_n = 0;
+    s_vid_i = 0;
+}
+#endif /* DC_GX_VTXID */
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
 #ifdef DC_PERF_GXAPI
@@ -1118,6 +1189,13 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     g_gx.current_vertex.position[0] = x;
     g_gx.current_vertex.position[1] = y;
     g_gx.current_vertex.position[2] = z;
+#ifdef DC_GX_VTXID
+    /* One byte load and one short store per vertex, into what was padding. */
+    g_gx.current_vertex.vtxid =
+        (s_vid_i < s_vid_n)
+            ? (unsigned short)((s_vid_epoch << 8) | s_vid_list[s_vid_i++])
+            : (unsigned short)DC_GX_VTXID_NONE;
+#endif
     g_gx.vertex_pending = 1;
 #ifdef DC_PERF_GXAPI
     s_api_vtx_us += dc_time_us() - t_api;

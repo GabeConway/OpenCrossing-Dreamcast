@@ -7,6 +7,44 @@ real toolchain, not reasoned about.
 Companion files: `kb/levers.md` (what is still live), `kb/traps.md` (toolchain
 gotchas).
 
+## ❌ THE `shade_vertex` SHORTCUTS ARE DEAD, HOISTED OR NOT — AND THE REASON GENERALISES (2026-08-09)
+
+`-DDC_PVR_SHADE_LAZYRGBA` / `-DDC_PVR_SHADE_ALPHA8` are **settled-negative**.
+Measured twice, on two different diagnoses, and both times they cost more than
+they saved. Do not propose a third variant without a **new mechanism**.
+
+| build | `us/v` | `shade` ms |
+|---|---:|---:|
+| ctrl | 2.65 | 1.99 |
+| **the hoist alone** (`shade_batch_mode()`) | **2.68** | 1.98 |
+| G-B side channel + hoist | 2.51 | 1.82 |
+| **+ the shortcuts on top** | **2.54** | **1.89** |
+
+⚠️ **READ THE HOIST ROW AGAINST RULE 11, NOT AS A REGRESSION.** 2.65 → 2.68 is
+inside the ±2 % `us/v` noise floor, and against the other baseline the same
+hoist reads −2.0 % (2.56 → 2.51) — **the sign flips**. What is settled here is
+the SHORTCUTS (1.82 → 1.89 with a consistent mechanism), not the hoist, which is
+kept ON purely because it single-sources a predicate that was written twice.
+
+Session 12 measured them losing and blamed **per-vertex predicates**; session 13
+did exactly what that diagnosis prescribed — hoisted the predicates to batch
+level next to `need_light` — and the hoist alone is **neutral** while the
+shortcuts behind it are **worse**, with the fast path firing
+**`shade_a8 verts=10,184,262`** times. It is not rarity.
+
+⭐ **The real mechanism.** With the shortcuts OFF, `need_rgb` / `need_a` are
+**compile-time constants** and GCC straight-lines the block. **Hoisting turns
+them into runtime variables loaded from a bitmask**, so `if (need_rgb)` becomes
+a real branch with **both arms emitted**. The predicate got cheaper to evaluate
+and the loop got harder to schedule.
+
+**The generalised rule** — it extends `kb/traps.md`'s "a per-vertex predicate is
+not a saving": **moving a predicate out of a loop does not help if it was
+already a constant IN the loop.** Hoisting only pays where the compiler could
+not already see the answer. ⚠️ And note again this is not an icache story —
+Flycast models no icache — so "the cache did it" was not available as an excuse
+either time. Evidence: `kb/state-log.md`, 2026-08-09.
+
 ## 🛑 REOPENED 2026-08-08 — "DISC-CACHE MISSES ARE NOT THE STUTTER" WAS AN ARTEFACT OF FLYCAST
 
 It was killed on 2026-08-06 by taking the ARAM cache 4 → 16 blocks: hit rate

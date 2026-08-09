@@ -1,5 +1,141 @@
 # RESUME — pick the session back up here
 
+## ⭐⭐⭐ SESSION 13 (2026-08-09) — THE VERTEX-INDEX SIDE CHANNEL SHIPPED,
+## `us/v` 2.68 → 2.51, AND THE SHADE HOIST SESSION 12 ORDERED IS NEUTRAL.
+## START HERE.
+
+Four measured runs, **one build line** (town, `keeplist-town.txt`,
+`DC_ASSET_STUB=1`, `DC_ARAM_WINDOW=1048576`, `DC_ARENA_BYTES=1200000`,
+`DC_AUDIO_SCENES=all`, `DC_AUDIO_DISC_FRAMES=8`, `DC_AUDIO_VOICES=12`,
+`DC_AUTOSTART=1`, `DC_PVR_VTXSPLIT=16`, `-DDC_PERF_PHASE`), 600 s each, Flycast:
+
+```
+build                        us/v  draw xform  sum  memo shade  lit  tex post emit   xf     v  hit%
+ctrl (neither change)        2.65  29.1   7.5  6.66  1.27  1.99 0.58 0.57 0.58 1.45 0.23  2820  50.5
+shade hoist only             2.68  28.3   7.3  6.65  1.26  1.98 0.61 0.62 0.56 1.40 0.22  2739  50.9
+G-B + hoist                  2.51  29.2   6.9  6.31  1.20  1.82 0.54 0.57 0.55 1.40 0.22  2745  53.7
+G-B + hoist + shortcuts      2.54  28.5   7.0  6.33  1.18  1.89 0.53 0.56 0.57 1.39 0.20  2745  53.7
+G-B, hoist OFF               2.56  27.8   7.0  6.45  1.26  1.91 0.55 0.59 0.55 1.40 0.20  2754  54.1
+```
+
+All five: `ASSET MISSING 0`, `reinst=0`, `dropped=0`. ⚠️ **Every run drew a
+DIFFERENT TOWN** (`v` 2820/2739/2745/2745/2754; the seed is per boot) — **`us/v` is
+the instrument and `draw` is NOT**: `draw` wanders 28.3-29.2 in both directions
+across a change worth −6 % on `us/v`.
+
+🔴 **THE FIFTH RUN GAVE THIS SESSION ITS MOST REUSABLE RESULT: THE NOISE FLOOR
+ON `us/v` IS ~±2 %, AND NOBODY HAD MEASURED IT.** The shade hoist reads
+**+1.1 %** against `ctrl` (2.65 → 2.68) and **−2.0 %** against `G-B, hoist OFF`
+(2.56 → 2.51). **The sign flips.** Grouped, the five runs are 2.65 / 2.68
+without G-B and 2.51 / 2.54 / 2.56 with it — the groups separate cleanly, the
+members within a group do not. `us/v` normalises for vertex COUNT but not for
+WHICH vertices, and the lit / textured / punch-through mix moves with the town.
+
+**Consequences, and they are general:**
+- **The hoist is INSIDE THE NOISE and its sign is NOT determined by this data.**
+  Any claim that it helped or hurt is unsupported. It is kept ON because it
+  single-sources a predicate that was written out twice, not because it is fast.
+- **G-B's −6.3 % is ~3x the floor**, and what carries it is the two-GROUP
+  separation, not any single pair.
+- ⚠️ **A change worth less than ~4 % CANNOT be resolved by one A/B pair.**
+  Session 12's wins were 8-18 % and were safe on one run each; that precedent
+  does NOT license a 2 % claim. Run each arm 2-3 times, or report the result as
+  inside the floor — do not quietly pick the favourable pair.
+
+### 🔴 READ THIS BEFORE ANYTHING ELSE: THIS G-B IS NOT THE 13.31 ms BLOCK
+
+The **13.31 ms** figure is `dl_G_TRIN`'s index expansion **plus our own `GX*`
+attribute setters**, and it is still the largest single block in the project.
+What shipped here is the **vertex-index side channel**: it makes the **memo**
+cheap. **It does not remove one setter and it does not expand one fewer index.**
+The **indexed-submit rewrite is still open, still unstarted, still
+multi-session.** Several kb files conflate the two — do not add to that.
+
+### 1. ⭐ WHAT SHIPPED — G-B, the vertex-index side channel. ON by default
+
+`dc/src/dc_emu64_cull.cpp`'s AABB index walk already visits indices **in exactly
+the order `set_position3()` will replay them**, so it now records that
+**sequence** and hands it to `dc/src/dc_gx.c` (`dc_gx_vtxid_arm`).
+`GXPosition3f32` consumes it with a cursor and stamps `(epoch << 8) | index`
+into **`DCGXVertex` bytes 30-31, which were dead padding** — `sizeof` stays 32,
+session 12's `aligned(32)` is untouched. `dc/src/dc_pvr.c`'s memo then keys on
+the stamp: **no hash, no 30-byte content compare, and above all no random read
+into `verts[]`** — the operand-cache miss that made `memo` 122 cycles a vertex.
+Kill: **`-DDC_GX_NO_VTXID`**.
+
+- **Gate RAN:** `-DDC_GX_VTXID_VERIFY` content-checks every id hit —
+  **`vidchk=15,538,941 vidbad=0 over=0`**.
+- **The epoch is load-bearing.** `GXBegin` **merges** batches
+  (`pc_gx_merged_batches`): one submit can hold two TRIN commands and emu64
+  **reloads `vertices[]` between them**, so a bare index would hand the second
+  TRIN the first one's transforms. The epoch makes a stale id miss.
+- **Reach is 100 % of what is legal.** Armed only where the batch survives the
+  frustum test AND none of `dc_emu64_cull.cpp`'s three punts fired:
+  `vid=1770/61470` against `vis=1770` per 30-frame window.
+- ⚠️ **The win did not land where it was aimed.** `memo` moved only 1.26 → 1.20.
+  The gain is in `shade`/`lit`/`tex`/`post` (3.77 → 3.48 ms), because those are
+  charged on memo **MISSES** (rule 10) and the **hit rate rose 50.9 → 53.7 %**.
+  The miss-count drop is about three-quarters of it.
+- ⚠️ **Flycast understates this by construction** — what it deletes is a read
+  that misses the operand cache, and Flycast models no cache. **2.51 is a
+  floor.**
+
+### 2. ❌ THE HOIST SESSION 12 ORDERED IS NEUTRAL, AND THE SHORTCUTS ARE DEAD
+
+Session 12 said `LAZYRGBA`/`ALPHA8` lost because their predicates ran per vertex
+and told this session to hoist them next to `need_light`. Done —
+`shade_batch_mode()`, kill `-DDC_PVR_NO_SHADE_HOIST` — and **both halves of the
+prediction failed.** The hoist alone: **2.65 → 2.68**, no better. The shortcuts
+on top of it: **`shade` 1.82 → 1.89, `us/v` 2.51 → 2.54, WORSE**, while the
+shortcut fired **`shade_a8 verts=10,184,262`** times.
+
+⭐ **The mechanism: with the shortcuts off, `need_rgb`/`need_a` were
+compile-time constants and GCC straight-lined the block. Hoisting turns them
+into runtime variables loaded from a bitmask, so `if (need_rgb)` becomes a real
+branch with both arms emitted.** The predicate got cheaper to compute and the
+loop got harder to schedule.
+
+**Rule, generalising `kb/traps.md`'s "a per-vertex predicate is not a saving":
+hoisting a predicate out of a loop buys nothing if it was already a CONSTANT in
+the loop.** Settled-negative in `kb/closed.md`. Do not propose a third variant
+without a new mechanism.
+
+### 3. THE PUNT SPLIT IS MEASURED, AND ONE PUNT RE-OPENS
+
+```
+[EMU64C] trin=6990 cull=3660 vis=1770 punt=1560 pdec=900 ptgen=0 pmix=660
+```
+
+Decal-Z is **900 — 58 % of all punts**; `G_TEXTURE_GEN` is **zero**. ⭐ **The
+three punts exist because CULLING a batch changes semantics. ARMING skips
+nothing** — it needs only the weaker property *"the same index means a
+byte-identical staged vertex within this submit"*. **Decal-Z meets that bar**
+(it recomputes a transient position from the same `emu_vtx->position` through
+the same matrices on every reference); `G_TEXTURE_GEN` and mixed
+`MTX_NONSHARED` do not (both mutate `vertices[]`, per reference and on first
+touch). **Lifting decal-Z for arming only: 1770 → 2670 armed batches, +51 %
+reach. NOT DONE, NOT MEASURED.**
+
+### What to do next, in order
+
+1. ⭐ **The decal-Z arming lift — WRITTEN, GATE PASSED, PERF NOT MEASURED.**
+   `-DDC_GX_VTXID_DECAL`, **default OFF**. Decal batches now arm but are still
+   never frustum-tested and never culled. Gate with it ON:
+   **`vidchk=15,835,845 vidbad=0 over=0`**; reach `vid=1800/61920` →
+   `2670/72810` (**+48 % batches, +18 % refs**), `viddec=900` of `pdec=1020`.
+   ⚠️ Refs only +18 % (decal batches are ~12 refs, not ~35), so the `us/v`
+   effect sits AT the ±2 % floor and needs REPEATED runs (rule 11). Four were in
+   flight at flush — read them before defaulting it ON.
+   ⚠️ `-DDC_EMU64_CULL_VERIFY` cannot certify it (decal batches never cull);
+   `-DDC_GX_VTXID_VERIFY` is the gate.
+2. 🔴 **The full indexed-submit G-B — the 13.31 ms block.** Unstarted.
+3. **The hardware PMCR burn** (§ session 11). Everything above is a floor.
+
+✅ **The fifth run landed and is in the table** — G-B with
+`-DDC_PVR_NO_SHADE_HOIST`, `us/v` 2.56. It is what produced measurement rule 11
+(§0b): the hoist's sign FLIPS between the two baselines, so the ±2 % floor, not
+the hoist, is the finding.
+
 ## ⭐⭐⭐ SESSION 12 (2026-08-08) — THE MEMORY-BOUND READING PAID. `us/v` IS
 ## 3.24 → 2.65, AND THE THREE WINS ARE ON BY DEFAULT. START HERE.
 
@@ -42,6 +178,13 @@ to save three converts — that moves work rather than removing it. They are
 per-BATCH constants (every `chan_ctrl_*` writer calls
 `dc_gx_flush_if_begin_complete()` first). **Hoist them next to `need_light` and
 re-measure — that is the first thing to try next session.**
+
+⚠️ **[ANSWERED 2026-08-09, NEGATIVE — see session 13 at the top.** The hoist
+landed (`shade_batch_mode()`) and is **neutral** (2.65 → 2.68); the shortcuts on
+top of it are **worse** (`shade` 1.82 → 1.89). The diagnosis in this paragraph
+was wrong about the cost: the predicates were **compile-time constants** with the
+shortcuts off, so hoisting *created* a runtime branch rather than removing one.
+Closed as settled-negative.]
 
 ### 🔴 TWO CORRECTIONS THIS SESSION FORCED — MEASUREMENT RULE 10
 
@@ -730,7 +873,7 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
 
 </details>
 
-## 0b. THE MEASUREMENT RULES. Now TEN — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, 9 on 2026-08-06, **10 on 2026-08-08**.
+## 0b. THE MEASUREMENT RULES. Now ELEVEN — 6 and 7 were paid for on 2026-08-04, 8 on 2026-08-05, 9 on 2026-08-06, 10 on 2026-08-08, **11 on 2026-08-09**.
 
 1. **`grep 'ASSET MISSING' <run>/console.log` must be empty** before you believe
    any visual comparison.
@@ -790,6 +933,18 @@ a2c0738 docs(dc): correct my own arithmetic on the state-command finding
     buckets print are correct as printed; only the per-vertex derivation was
     wrong. Generalisation of rule 9: **a bucket inside a sampler can have a
     different denominator from the sampler.**
+
+11. 🔴 **THE NOISE FLOOR ON `us/v` IS ~±2 %. ONE A/B PAIR CANNOT RESOLVE A SMALL
+    CHANGE.** Measured 2026-08-09 over five 600 s runs on one build line: the
+    same change (the shade hoist) read **+1.1 %** against one baseline and
+    **−2.0 %** against another — **the sign flipped**. The five cluster
+    2.65 / 2.68 without G-B and 2.51 / 2.54 / 2.56 with it; the GROUPS separate,
+    the members do not. Cause: the town reseeds per boot (`sys_math.c:7`), and
+    `us/v` normalises for vertex COUNT but not for WHICH vertices — the
+    lit / textured / punch-through mix moves with the layout.
+    ⚠️ Session 12's wins were 8-18 % and were safe on one run each. **That does
+    not license a 2 % claim.** Under ~4 %: run each arm 2-3 times and compare
+    groups, or report it as inside the floor. Never pick the favourable pair.
 
 ## 1. Where the port is
 

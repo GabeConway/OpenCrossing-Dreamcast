@@ -16,7 +16,11 @@ This reduces a console.log to the numbers that actually decide "did this build
 get worse", and `--vs` prints the two side by side with the direction of each
 change marked. It is deliberately dumb: it parses, it does not judge, except for
 the handful of counters that have a known-correct value (`LOST=0`, `ptdrop=0`,
-`zero=0`, no exceptions).
+`zero=0`, `over=0`, `vidbad=0`, no exceptions).
+
+⚠️ A field a build does not PRINT summarises to None and prints as
+`not measured` — never as 0. A gate cannot pass on a counter that was never
+compiled in, and `vidbad=0` over `vidchk=0` checks is an unrun gate, not a pass.
 
 USAGE
 -----
@@ -63,6 +67,40 @@ RE_FBNONZERO = re.compile(r"FBNONZERO (\d+) of (\d+)")
 RE_FBIMG = re.compile(r"FBIMG BEGIN (\d+) (\d+) \S+ frame=(\d+)")
 RE_TAG = re.compile(r"^\[([A-Z0-9_/]+)\]")
 
+# G3's cull counters, plus the vertex-index side channel bolted onto them.
+# The line GROWS with the build: `vid=`/`over=`/`pdec=`/`ptgen=`/`pmix=` are all
+# absent under -DDC_GX_NO_VTXID, and `falsecull=`/`gfxp_bad=`/`nocmp=` only
+# exist under -DDC_EMU64_CULL_VERIFY. So the fixed prefix is matched on its own
+# and every later field is picked up by an optional key=value sweep -- an absent
+# field must summarise to None ("not measured"), NEVER to 0, or a build that
+# cannot even count them reads as a clean gate pass.
+RE_EMU64C = re.compile(
+    r"\[EMU64C\]\s+trin=(\d+) cull=(\d+) vis=(\d+) punt=(\d+) refs=(\d+)"
+)
+RE_EMU64C_VID = re.compile(r"\bvid=(\d+)/(\d+)")
+RE_EMU64C_KV = re.compile(
+    r"\b(over|pdec|ptgen|pmix|reinst|falsecull|gfxp_bad|nocmp)=(\d+)"
+)
+
+# -DDC_GX_VTXID_VERIFY only. vidbad must be 0 -- but vidbad=0 with vidchk=0 is
+# an unrun gate, not a pass, and the report says so out loud.
+RE_VTXID = re.compile(r"\[DC/PVR\] vtxid vidchk=(\d+) vidbad=(\d+)")
+
+# ⚠️ MEASUREMENT RULE 10 (kb/RESUME.md): THE SEVEN BUCKETS DO NOT SHARE A
+# DENOMINATOR. `memo` is charged per VERTEX, `emit` per PRIMITIVE, and the
+# middle five (xf/lit/tex/shade/post) are charged only on a memo MISS. So:
+#   - never sum them against `v` or against a per-vertex cost;
+#   - never compare bucket-for-bucket across two runs whose memo hit rate
+#     differs without saying so -- the middle five move purely because fewer or
+#     more vertices missed, with no code change at all.
+# That is why the vsplit_* metrics below are DIAGNOSTIC (they never flip the
+# verdict) and why the diff prints a memo-mix warning when the rates diverge.
+RE_VTXSPLIT = re.compile(
+    r"\[VTXSPLIT\]\s+memo=([\d.]+) xf=([\d.]+) lit=([\d.]+) tex=([\d.]+) "
+    r"shade=([\d.]+) post=([\d.]+) emit=([\d.]+)\s+\|\s+sum=([\d.]+)"
+)
+RE_VTXSPLIT_KV = re.compile(r"\b(prims|samp|memohit|drops)=(\d+)")
+
 # Lines that mean the run went wrong, not merely that it was noisy.
 BAD_MARKERS = [
     ("exception", re.compile(r"\[DC/EXC\].*(unhandled|fault|PC=)", re.I)),
@@ -98,6 +136,9 @@ def parse(path):
         "tex": None,
         "texlog": {"total": 0, "blank": 0, "partial": 0},
         "aram": None,
+        "emu64c": None,
+        "vtxid": None,
+        "vtxsplit": None,
         "fb": {"probes": 0, "nonzero_max": 0, "pixels": 0, "images": []},
         "tags": Counter(),
         "bad": Counter(),
@@ -202,6 +243,40 @@ def parse(path):
                 }
                 continue
 
+            m = RE_EMU64C.search(line)
+            if m:
+                e = {
+                    "trin": int(m.group(1)),
+                    "cull": int(m.group(2)),
+                    "vis": int(m.group(3)),
+                    "punt": int(m.group(4)),
+                    "refs": int(m.group(5)),
+                }
+                v = RE_EMU64C_VID.search(line)
+                if v:
+                    # A = TRIN batches that ARMED the side channel,
+                    # B = vertex references handed to it. Both are REACH.
+                    e["vid_batches"] = int(v.group(1))
+                    e["vid_refs"] = int(v.group(2))
+                for k, val in RE_EMU64C_KV.findall(line):
+                    e[k] = int(val)
+                r["emu64c"] = e
+                continue
+
+            m = RE_VTXID.search(line)
+            if m:
+                r["vtxid"] = {"chk": int(m.group(1)), "bad": int(m.group(2))}
+                continue
+
+            m = RE_VTXSPLIT.search(line)
+            if m:
+                names = ("memo", "xf", "lit", "tex", "shade", "post", "emit", "sum")
+                x = {n: float(m.group(i + 1)) for i, n in enumerate(names)}
+                for k, val in RE_VTXSPLIT_KV.findall(line):
+                    x[k] = int(val)
+                r["vtxsplit"] = x
+                continue
+
             m = RE_FBNONZERO.search(line)
             if m:
                 r["fb"]["probes"] += 1
@@ -243,6 +318,8 @@ def _fps_stats(perf):
 def summarise(r):
     """Reduce a parsed run to the ~15 numbers a regression call is made on."""
     fps = _fps_stats(r["perf"])
+    e = r["emu64c"] or {}
+    x = r["vtxsplit"] or {}
     s = {
         "lines": r["lines"],
         "frames": (r["pvr"] or {}).get("frames"),
@@ -269,9 +346,51 @@ def summarise(r):
         "fb_probes": r["fb"]["probes"] or None,
         "fb_images": len(r["fb"]["images"]) or None,
         "fb_nonzero_max": r["fb"]["nonzero_max"] or None,
+        # G3 cull + the vertex-index side channel. `.get()` throughout, so a
+        # field the build never printed stays None = NOT MEASURED.
+        "emu_trin": e.get("trin"),
+        "emu_cull": e.get("cull"),
+        "emu_vis": e.get("vis"),
+        "emu_punt": e.get("punt"),
+        "emu_refs": e.get("refs"),
+        "emu_vid_batches": e.get("vid_batches"),
+        "emu_vid_refs": e.get("vid_refs"),
+        "emu_over": e.get("over"),
+        "emu_pdec": e.get("pdec"),
+        "emu_ptgen": e.get("ptgen"),
+        "emu_pmix": e.get("pmix"),
+        "emu_reinst": e.get("reinst"),
+        "emu_falsecull": e.get("falsecull"),
+        "emu_gfxp_bad": e.get("gfxp_bad"),
+        "emu_nocmp": e.get("nocmp"),
+        "vtxid_chk": (r["vtxid"] or {}).get("chk"),
+        "vtxid_bad": (r["vtxid"] or {}).get("bad"),
+        # ⚠️ rule 10 applies to every vsplit_* below: no shared denominator.
+        "vsplit_memo": x.get("memo"),
+        "vsplit_xf": x.get("xf"),
+        "vsplit_lit": x.get("lit"),
+        "vsplit_tex": x.get("tex"),
+        "vsplit_shade": x.get("shade"),
+        "vsplit_post": x.get("post"),
+        "vsplit_emit": x.get("emit"),
+        "vsplit_sum": x.get("sum"),
+        "vsplit_prims": x.get("prims"),
+        "vsplit_memohit": x.get("memohit"),
+        "vsplit_drops": x.get("drops"),
         "bad": dict(r["bad"]),
     }
     return s
+
+
+def _memo_mix(s):
+    """memohit per primitive -- NOT a hit RATE (the denominators differ, rule
+    10). It exists only to answer "did the memo mix move between these two
+    runs", which decides whether the middle five buckets may be compared at
+    all. Returns None when either half was not measured."""
+    prims, hit = s.get("vsplit_prims"), s.get("vsplit_memohit")
+    if not prims or hit is None:
+        return None
+    return hit / prims
 
 
 # Relative tolerance, per metric, below which a change is NOISE and not a
@@ -298,6 +417,20 @@ TOLERANCE = {
     # other changes this by one or two with no code change. A jump of more than
     # a handful is a real keep-list or loader problem.
     "texlog_blank": 3.0,
+    # Side-channel reach follows the scene the same way `frames` does -- a run
+    # that stands somewhere else arms a different number of batches.
+    "emu_vid_batches": 0.10,
+    "emu_vid_refs": 0.10,
+    # Sampled millisecond buckets. 10 % is inside the jitter of a 1-in-16
+    # sampler, and anything smaller than that is not a finding.
+    "vsplit_memo": 0.10,
+    "vsplit_xf": 0.10,
+    "vsplit_lit": 0.10,
+    "vsplit_tex": 0.10,
+    "vsplit_shade": 0.10,
+    "vsplit_post": 0.10,
+    "vsplit_emit": 0.10,
+    "vsplit_sum": 0.10,
 }
 
 # Which direction is an improvement. None = report the change, judge nothing.
@@ -324,11 +457,69 @@ DIRECTION = {
     "aram_zero": -1,
     "fb_nonzero_max": None,
     "lines": None,
+    # --- G3 cull + vertex-index side channel -------------------------------
+    "emu_trin": None,      # scene mix decides all four of these
+    "emu_cull": None,
+    "emu_vis": None,
+    "emu_refs": None,
+    "emu_punt": -1,        # a punted batch is one the side channel gave up on
+    "emu_vid_batches": +1,  # REACH: worse when SMALLER
+    "emu_vid_refs": +1,     # REACH: worse when SMALLER
+    "emu_over": -1,         # must be 0: the reference list outgrew its bound
+    "emu_pdec": -1,         # punt reason: decal Z
+    "emu_ptgen": -1,        # punt reason: G_TEXTURE_GEN
+    "emu_pmix": -1,         # punt reason: mixed MTX_NONSHARED
+    "emu_reinst": -1,
+    "emu_falsecull": -1,
+    "emu_gfxp_bad": -1,
+    "emu_nocmp": -1,
+    "vtxid_chk": None,      # coverage, not quality -- see VTXID_COVERAGE below
+    "vtxid_bad": -1,
+    # --- xform split (rule 10: no shared denominator) ----------------------
+    "vsplit_memo": -1,
+    "vsplit_xf": -1,
+    "vsplit_lit": -1,
+    "vsplit_tex": -1,
+    "vsplit_shade": -1,
+    "vsplit_post": -1,
+    "vsplit_emit": -1,
+    "vsplit_sum": -1,
+    "vsplit_prims": None,
+    "vsplit_memohit": None,
+    "vsplit_drops": None,
 }
 
-# Counters with one correct value, whatever the build.
+# Counters with one correct value, whatever the build. A non-zero here is a
+# hard FAIL in the verdict -- never a percentage delta, and never excused by
+# having gone DOWN (3 is not 0 either).
 MUST_BE_ZERO = ["pvr_dropped", "pvr_unsupported", "pt_drop", "tex_rejects",
-                "aram_lost", "aram_zero"]
+                "aram_lost", "aram_zero",
+                "emu_over",        # the side channel silently went unarmed
+                "emu_reinst", "emu_falsecull", "emu_gfxp_bad", "emu_nocmp",
+                "vtxid_bad"]       # ⚠️ only meaningful when vtxid_chk > 0
+
+# Metrics whose DIRECTION is worth printing but which must never flip the
+# verdict on their own. The punt reasons are diagnostics -- they say WHY the
+# side channel declined a batch, and a scene with more decals legitimately
+# moves them. The vsplit_* buckets are worse: rule 10 means the middle five
+# move with the memo hit rate alone, so a bucket-for-bucket "regression" is
+# not a claim this script is entitled to make.
+DIAGNOSTIC = {"emu_pdec", "emu_ptgen", "emu_pmix",
+              "vsplit_memo", "vsplit_xf", "vsplit_lit", "vsplit_tex",
+              "vsplit_shade", "vsplit_post", "vsplit_emit", "vsplit_sum"}
+
+
+def _n(v):
+    """Thousands-grouped, or `n/a` for a field the build never printed."""
+    return "n/a" if v is None else f"{v:,}"
+
+
+def _s(v):
+    """A missing field is `not measured`, and must never read as 0."""
+    if v is None:
+        return "not measured"
+    return f"{v:,}" if isinstance(v, (int, float)) and not isinstance(v, bool) \
+        else str(v)
 
 
 def print_report(r, fh=sys.stdout):
@@ -364,6 +555,60 @@ def print_report(r, fh=sys.stdout):
     else:
         p("  DC_TEX_LOG       (not built in)")
     p("")
+    p("EMU64 CULL / VERTEX-ID")
+    if s["emu_trin"] is None:
+        p("  [EMU64C]         (not built in)")
+    else:
+        p(f"  trin/cull/vis    {s['emu_trin']} / {s['emu_cull']} / {s['emu_vis']}"
+          f"   refs {s['emu_refs']}")
+        if s["emu_vid_batches"] is None:
+            p("  vid side chan    (not measured -- DC_GX_NO_VTXID build)")
+        else:
+            p(f"  vid armed        {s['emu_vid_batches']} batches"
+              f" / {s['emu_vid_refs']} refs   (reach: bigger is better)")
+            p(f"  over             {s['emu_over']}"
+              f"   (must be 0 -- list outgrew its bound, batch went unarmed)")
+        punts = [s["emu_pdec"], s["emu_ptgen"], s["emu_pmix"]]
+        if all(v is None for v in punts):
+            p(f"  punt             {s['emu_punt']}   (reasons not measured)")
+        else:
+            p(f"  punt             {s['emu_punt']}   pdec {s['emu_pdec']}"
+              f"  ptgen {s['emu_ptgen']}  pmix {s['emu_pmix']}")
+        ver = [s["emu_falsecull"], s["emu_gfxp_bad"], s["emu_nocmp"]]
+        if all(v is None for v in ver):
+            p(f"  reinst           {s['emu_reinst']}"
+              f"   (CULL_VERIFY fields not built in)")
+        else:
+            p(f"  VERIFY           reinst {s['emu_reinst']}"
+              f"  falsecull {s['emu_falsecull']}  gfxp_bad {s['emu_gfxp_bad']}"
+              f"  nocmp {s['emu_nocmp']}")
+    if s["vtxid_bad"] is None:
+        p("  vtxid gate       (not built in -- needs -DDC_GX_VTXID_VERIFY)")
+    elif not s["vtxid_chk"]:
+        # A zero-coverage gate is NOT a pass. This is the whole point of
+        # printing vidchk next to vidbad.
+        p(f"  vtxid gate       vidbad {s['vtxid_bad']} but vidchk 0"
+          f"  -> NOT RUN, proves nothing")
+    else:
+        verdict = "PASS" if s["vtxid_bad"] == 0 else "FAIL"
+        p(f"  vtxid gate       {s['vtxid_chk']:,} checked,"
+          f" {s['vtxid_bad']} bad  -> {verdict}")
+    p("")
+    p("XFORM SPLIT  ⚠️ buckets DO NOT share a denominator (rule 10):")
+    p("             memo is per VERTEX, emit per PRIMITIVE, the middle five")
+    p("             only on a memo MISS. Never sum them against v.")
+    if s["vsplit_sum"] is None:
+        p("  [VTXSPLIT]       (not built in -- needs -DDC_PVR_VTXSPLIT=<N>)")
+    else:
+        p(f"  memo {s['vsplit_memo']}  xf {s['vsplit_xf']}  lit {s['vsplit_lit']}"
+          f"  tex {s['vsplit_tex']}  shade {s['vsplit_shade']}"
+          f"  post {s['vsplit_post']}  emit {s['vsplit_emit']}  ms")
+        mix = _memo_mix(s)
+        p(f"  sum              {s['vsplit_sum']} ms   prims {_n(s['vsplit_prims'])}"
+          f"   memohit {_n(s['vsplit_memohit'])}"
+          f"{'' if mix is None else f' ({mix:.3f}/prim)'}"
+          f"   drops {s['vsplit_drops']}")
+    p("")
     p("ARAM / FB")
     p(f"  aram mapped      {s['aram_mapped']}   LOST {s['aram_lost']}   zero {s['aram_zero']}")
     if s["fb_probes"]:
@@ -376,6 +621,10 @@ def print_report(r, fh=sys.stdout):
         v = s.get(k)
         if v:
             flags.append(f"{k}={v} (must be 0)")
+    # vidbad=0 over zero checks is an unrun gate. Reporting it as a pass is how
+    # a verifier gets believed while never having executed -- say it instead.
+    if s["vtxid_bad"] == 0 and not s["vtxid_chk"]:
+        flags.append("vtxid gate did not run (vidchk=0) -- vidbad=0 is not a pass")
     for name, n in s["bad"].items():
         flags.append(f"{name} x{n}")
     if r["top_repeats"]:
@@ -401,6 +650,13 @@ def print_diff(new, old, fh=sys.stdout):
         p("    Frame counts are NOT comparable (kb/RESUME.md §2).")
         p("")
 
+    amix, bmix = _memo_mix(a), _memo_mix(b)
+    if amix is not None and bmix is not None and abs(amix - bmix) > 0.10 * bmix:
+        p(f"⚠️  memo mix moved ({bmix:.3f} -> {amix:.3f} hits/prim). The five")
+        p("    memo-MISS buckets (xf/lit/tex/shade/post) move with the hit rate")
+        p("    alone -- do NOT read them as a code change (rule 10).")
+        p("")
+
     p(f"{'metric':<18} {'old':>14} {'new':>14}   delta")
     p("-" * 62)
     regressions = []
@@ -409,19 +665,34 @@ def print_diff(new, old, fh=sys.stdout):
         if ov is None and nv is None:
             continue
         if ov is None or nv is None:
-            p(f"{k:<18} {str(ov):>14} {str(nv):>14}   (missing one side)")
+            # NOT MEASURED on one side -- a field this build does not print, not
+            # a zero. Say which side, and never derive a delta from it.
+            side = "old" if ov is None else "new"
+            note = f"(not measured on the {side} side)"
+            if k in MUST_BE_ZERO and nv:
+                note += "  !! FAIL (must be 0)"
+                regressions.append(f"{k}={nv} (must be 0)")
+            p(f"{k:<18} {_s(ov):>14} {_s(nv):>14}   {note}")
             continue
         d = nv - ov
+        if isinstance(d, float):
+            d = round(d, 3)
         mark = ""
         tol = TOLERANCE.get(k, 0.0)
         noise = (ov and abs(d) <= tol * abs(ov)) or \
                 abs(d) <= TOLERANCE_ABS.get(k, 0)
-        if d and direction:
+        if k in MUST_BE_ZERO and nv:
+            # Not a percentage: 3 is as wrong as 3000, and 5 -> 3 is not "ok".
+            mark = "  !! FAIL (must be 0)"
+            regressions.append(f"{k}={nv} (must be 0)")
+        elif d and direction:
             good = (d > 0) == (direction > 0)
             if good:
                 mark = "  ok"
             elif noise:
                 mark = f"  ~noise (<={tol:.0%})"
+            elif k in DIAGNOSTIC:
+                mark = "  worse (diagnostic)"
             else:
                 mark = "  REGRESSION"
                 regressions.append(f"{k}: {ov} -> {nv}")
@@ -429,9 +700,12 @@ def print_diff(new, old, fh=sys.stdout):
             mark = "  changed"
         p(f"{k:<18} {ov:>14,} {nv:>14,}   {d:+,}{mark}"
           if isinstance(ov, (int, float)) and isinstance(nv, (int, float))
-          else f"{k:<18} {str(ov):>14} {str(nv):>14}   {mark}")
+          else f"{k:<18} {_s(ov):>14} {_s(nv):>14}   {mark}")
 
     p("")
+    if a.get("vtxid_bad") == 0 and not a.get("vtxid_chk"):
+        p("⚠️  vtxid_bad=0 with vidchk=0 on the new side: the vertex-id gate")
+        p("    never ran. That is not a pass.")
     ns, os_ = a.get("scene_modes") or [], b.get("scene_modes") or []
     if ns != os_:
         p(f"scene modes        {os_} -> {ns}")

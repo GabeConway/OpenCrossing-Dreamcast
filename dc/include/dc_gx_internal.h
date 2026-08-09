@@ -159,6 +159,41 @@ void dc_gx_mark_dirty(unsigned int flag);
 #else
 #define DC_GX_VTX_ALIGN 32
 #endif
+/* ==========================================================================
+ * G-B — THE VERTEX CARRIES emu64's OWN INDEX, IN THE TWO DEAD BYTES
+ * ==========================================================================
+ * The lean vertex's live bytes end at 30 and sizeof is 32, so bytes 30-31 have
+ * always been padding that nothing writes. They now carry the emu64 vertex-
+ * cache index this vertex came from, which turns dc_pvr.c's vertex memo from
+ *
+ *     hash 4 words -> load verts[s_vmemo_src[slot]] -> compare 30 bytes
+ *
+ * into a single tag load. The random read into verts[] is the expensive half:
+ * `memo` is 122 cycles a vertex for what is arithmetically a handful of ops,
+ * and that gap IS the operand-cache miss (kb/RESUME.md session 11b).
+ *
+ * ⭐ IT IS ALSO COLLISION-FREE, WHICH THE HASH NEVER WAS. emu64's vertex cache
+ * is 128 entries (dc_emu64_cull.cpp's mark[] is exactly 128 bits) and the memo
+ * table is 128 slots, so `slot = vtxid` is injective: no two distinct source
+ * vertices can evict each other inside one batch. The hash could and did.
+ *
+ * ⚠️ THE ID IS ONLY VALID WHEN dc_emu64_cull.cpp ARMED IT. Only the two TRIN
+ * opcodes get a side channel, only on the path where the batch survives the
+ * frustum test, and only when none of that file's three punts fired — which is
+ * what makes "same id ⇒ byte-identical vertex" provable rather than hopeful,
+ * because all three punts are exactly the cases where set_position() mutates
+ * emu64's vertices[] mid-batch. Everything else — texrects, the JSystem 2D
+ * path, punted TRIN batches — stamps DC_GX_VTXID_NONE and falls back to the
+ * hash.
+ *
+ * ⚠️ NOT AVAILABLE UNDER -DDC_GX_FAT_VERTEX: that layout's 34-35 is `_pad` and
+ * this is not worth two variants. Kill switch: -DDC_GX_NO_VTXID.
+ * Correctness gate: -DDC_GX_VTXID_VERIFY (see dc_pvr.c). */
+#if !defined(DC_GX_NO_VTXID) && !defined(DC_GX_FAT_VERTEX)
+#define DC_GX_VTXID 1
+#endif
+#define DC_GX_VTXID_NONE 0xFFFFu
+
 typedef struct {
     float position[3];      /*  0 */
     float texcoord[2];      /* 12 */
@@ -167,6 +202,13 @@ typedef struct {
     unsigned char color1[4];/* 24 -- dead: never written, see above */
 #endif
     short normal[3];        /* 24 (28 when fat) */
+#ifdef DC_GX_VTXID
+    /* 30. Was padding. vmemo_same()'s word compare reads bytes 0..29 and
+     * deliberately stops short of this, so the content compare is unaffected
+     * and the VERIFY gate below can cross-check the two keys against each
+     * other. */
+    unsigned short vtxid;
+#endif
 #ifdef DC_GX_FAT_VERTEX
     unsigned short _pad;    /* 34 */
     float _reserved;        /* 36 -> 40 */
