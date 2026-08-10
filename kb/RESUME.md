@@ -273,9 +273,28 @@ bind does not have to be resident. **−841,888 B on a matched link.** Kill
 - ⚠️ **24 rows are EXCLUDED** — reached through a pointer table and then
   `gSPSegment`, which the old exclusion regex could not see. They stay resident;
   their six owner files are pinned in `make_keeplist_town.py`'s `MODEL_REQUIRED`.
-- 🔴 **NOT SIGNED OFF.** The town ground renders lavender while everything else
-  in the frame is correct. Undetermined whether it is new — no screenshot of
-  this port's town predates 2026-08-09. `kb/STATE.md` action 0.
+- 🔴 **T1 SHIPPED TWO GARBLED-TEXTURE BUGS AND BOTH ARE NOW FIXED — read this
+  before adding anything to the demand path.** `kb/batch-s15.md` S15-6/S15-8.
+  **T1 can only serve a texture whose ARRAY ADDRESS reaches
+  `dc_gx_backend_texture_upload()`.** `gDPLoadTextureTile` /
+  `gDPLoadTextureBlock*` go through emu64's TMEM emulation, which copies the
+  texels out of the array into `texture_buffer_data` *before* any hook this
+  port owns — so a stubbed array is read as its one byte and the garbage is
+  baked in upstream (154 rows; the title screen's `Press START!` was two bars
+  of noise). And `scan_asset_declarations()` let the `sorted()`-last file
+  decide linkage, stubbing two arrays that are `static` in one file and global
+  in another (2 rows).
+- ⚠️ **T1'S FALSIFIER CANNOT FALSIFY IT.** Under the loader every row has
+  `kept == 0`, so `lookup()`'s early-out makes `interior=` and `mutated=`
+  **incapable of incrementing**. Every `interior=0 mutated=0` verdict on record
+  was taken where the counters could not move. Honest config:
+  `DC_TEXPOOL_PROBE=1 DC_TEXPOOL_DEMAND=0` + `keeplist-town.txt`.
+  ⭐ **The instrument that actually worked is `-DDC_TEXPOOL_TRACE=<N>`, and it
+  works by ABSENCE** — a texture that renders as noise and is not in the trace
+  was never fetched, which is a LOOKUP failure, not a loader failure.
+- ✅ **Signed off visually 2026-08-09**: title screen text correct, human
+  verdict on the town *"visually looks pretty good"*. The old "lavender ground"
+  entry here was the paved plaza in two differently-seeded towns.
 
 ### The shared read-ahead window (`dc/src/dc_assetwin.c`) — ⭐ **DEFAULT OFF**
 
@@ -388,14 +407,35 @@ window, bracketed into `[PHASE]`'s draw/skip/vi plus `audio` and `xform`.
 
 ## 7. Still broken, ranked
 
-1. 🔴 **THE TOWN HAS NO VILLAGERS, and it is a save bug, not an asset bug.**
-   `mNpc_SetNpcList` populates the town from the save's `Animal_c animals[]`
-   (`m_start_data_init.c:559`); the VMU path is unwired, so `[PC] No save file
-   found` and **not one villager actor is ever constructed**. Measured: two
-   900 s runs that reach scene 9 and walk printed zero
-   `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, because `aNPC_dma_draw_data_proc`
-   (`ac_npc_ctrl.c_inc:687`) never runs. **R2/R3 are DEFAULTED OFF for exactly
-   this reason.** N2b is the prerequisite for testing either.
+1. 🔴 **THE TOWN HAS NO VILLAGERS. IT IS NOT A SAVE BUG AND IT IS NOT A FIELD
+   DATA BUG — BOTH DIAGNOSES ARE FALSIFIED (2026-08-09, S15).**
+   ⚠️ **This item used to read "it is a save bug, not an asset bug … the VMU
+   path is unwired … N2b is the prerequisite". Do not act on that.** The
+   instrument that settled it is `dc/src/dc_npcseed.c`, which logs the roster
+   BEFORE it writes anything:
+
+   ```
+   [DC/NPCSEED] pre ids=6 homed=6 | seeded id=8 home=8 | want=14 max=14
+   ```
+
+   Six villagers already had valid ids **and** valid homes, so `npclist` has
+   been populated all along. `animals[]` is **generated** on a new game by
+   `mNpc_DecideLivingNpcMax` (`m_npc.c:2422`) under `mNpc_InitNpcAllInfo`, and
+   `mSDI_StartInitNew` has no `mFRm_CheckSaveData()` gate — only
+   `StartInitFrom`/`NewPlayer`/`Pak` do.
+
+   ⚠️ **The old evidence could never have supported the old claim.** "Two 900 s
+   runs printed zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines" was collected at the
+   documented defaults `DC_NPCTEX_POOL=0 DC_NPCMDL_POOL=0`, where both files
+   compile to empty stubs and the load seam is not inserted at all — silence
+   was guaranteed either way. **A counter that cannot move is not a
+   measurement.**
+
+   **What is actually broken is ACTOR CONSTRUCTION, downstream of the list.**
+   The S15 run had the pools ON, a 14-entry roster, and still printed zero
+   `[DC/NPCTEX]`/`[DC/NPCMDL]` lines, i.e. `aNPC_dma_draw_data_proc`
+   (`ac_npc_ctrl.c_inc:687`) never runs. **The open question is what walks
+   `Common_Get(npclist)` and spawns NPC actors, and why it spawns none.**
 2. 🔴 **The name-entry keyboard renders black. The fix is written, HAS NOW BEEN
    RUN (2026-08-09), and its PREDICATE IS TOO WIDE.** 18 of the keyboard's 26
    display lists are config **#037, class P3** — 27 of the 101 configs. The

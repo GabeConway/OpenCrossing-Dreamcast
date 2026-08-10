@@ -19,9 +19,36 @@ reaches the town, walks around it, meets Tom Nook and is taken to the houses
 (`[SCENE_MODE] 0 → 3 → 4 → 18 → 9`). Every summer acre is in the image, plus the
 interiors, the winter set and the gyroids. The BGM plays.
 
-⚠️ **The town has no villagers** — the VMU save path is unwired, so
-`mNpc_SetNpcList` constructs none. Nothing on the NPC path can be tested until
-N2b lands (`kb/RESUME.md` §"still broken").
+🔴 **The town has no villagers — AND THE REASON THIS FILE GAVE FOR IT IS
+FALSIFIED (2026-08-09, S15).** The claim was "the VMU save path is unwired, so
+`mNpc_SetNpcList` constructs none", and the prescribed fix was N2b. **Measured,
+in the town, before anything was written:**
+
+```
+[DC/NPCSEED] pre ids=6 homed=6 | seeded id=8 home=8 | want=14 max=14
+```
+
+`pre ids=6 homed=6` — six villagers already had valid `id.npc_id` **and** valid
+`home_info`, so `mNpc_SetNpcList` has been building a populated `npclist` all
+along. Two separate things are now known to be wrong:
+
+1. **`animals[]` is not loaded from the save on a new game — it is GENERATED**
+   by `mNpc_DecideLivingNpcMax` (`m_npc.c:2422`), and `mSDI_StartInitNew`
+   carries no `mFRm_CheckSaveData()` gate. **N2b would not have fixed this.**
+2. **The homes were fine too**, so the FGDATA/`SIGN00..SIGN20` reserve-scan
+   theory that replaced the save theory is *also* wrong.
+
+**The real blocker is downstream of the list**: nothing constructs a villager
+ACTOR. `aNPC_dma_draw_data_proc` still never runs — the same 600 s run printed
+zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines **with `DC_NPCTEX_POOL=1
+DC_NPCMDL_POOL=1`**, which is the first time that silence has meant anything
+(at the old `=0` defaults both files compile to empty stubs, so the earlier
+"zero lines" evidence was vacuous).
+
+**Next step is the actor-construction path, not the save and not the field
+data**: find what walks `Common_Get(npclist)` and spawns the NPC actors, and
+why it spawns none. `dc/src/dc_npcseed.c` (`DC_NPC_SEED=1`) now guarantees a
+14-entry roster, so that half is no longer a variable.
 
 ---
 
@@ -208,14 +235,42 @@ every earlier "regression" was two different towns.
 **T1 costs nothing per vertex and adds ~20 stutters** — the demand reads, 271 of
 them for 325,184 B. That is the whole price.
 
-🔴 **STILL OPEN: a human reports wrong/garbled textures and missing geometry
-that no captured frame reproduces**, including the matched pair above. The
-generator half is proved clean — T1 stubs exactly 1,379 extra symbols, every one
-a T1 texture row, and un-stubs nothing; `keeplist-full` is a strict superset of
-`keeplist-town`. So missing geometry is the **904 model files (1,128,096 B) the
-budget dropped**, equally absent before today. What remains unexplained is a
-class the 900 s autowalk never binds — the shops, house interiors and menus it
-never opens are the obvious candidates.
+✅ **THE GARBLED TEXTURES ARE FIXED (2026-08-09, S15-8). The "generator half is
+proved clean" claim that used to sit here was WRONG — twice over.**
+
+The human report was right and reproducible: with T1 on, the title screen's
+`Press START!` and copyright line rendered as **two bars of noise**; with
+`DC_TEXPOOL_DEMAND=0` they were perfect. Two independent generator defects:
+
+1. **S15-8, 154 rows.** T1's hook is the PVR upload, so it can only serve a
+   texture whose **array address reaches the upload**. `gDPLoadTextureTile` /
+   `gDPLoadTextureBlock*` go through emu64's **TMEM emulation**, which copies
+   the texels out of the array into `texture_buffer_data` *before* any hook
+   this port owns — so a stubbed array is read as its one byte and the garbage
+   is baked in upstream. Now excluded from the demand path (91,072 B back to
+   residency).
+2. **S15-6, 2 rows.** `scan_asset_declarations()` let the `sorted()`-last file
+   decide linkage, so two symbols that are `static` in `dia_win{,2,3}.c` and
+   global in `lat_letter64_xk_tex.c` were stubbed to `u8 x[1]` with their
+   loaders removed while their display lists still bound them.
+
+⭐ **The instrument was `-DDC_TEXPOOL_TRACE=<N>` (S15-7), and it worked by
+ABSENCE**: the rows that rendered correctly were listed; the broken ones were
+never fetched at all. `fetch=133 fail=0` cannot distinguish a lookup failure
+from a healthy run, which is why T1 looked clean while the screen was wrong.
+
+⚠️ **And T1's own falsifier could never have caught either.** Under the loader
+every row has `kept == 0`, so `lookup()`'s early-out makes `interior=` and
+`mutated=` **incapable of incrementing** — every `interior=0 mutated=0` verdict
+recorded for T1 was taken where those counters could not move. The only honest
+probe config is `DC_TEXPOOL_PROBE=1 DC_TEXPOOL_DEMAND=0` + `keeplist-town.txt`.
+
+🔴 **Still open: MISSING GEOMETRY**, which is a separate bisect and is not
+explained by either fix. Most of it is the **904 model files (1,128,096 B) the
+keep-list budget dropped**, equally absent before. For anything beyond that,
+start with `-DDC_GX_NO_GHCULL` — the only change that can delete a whole batch.
+
+Full numbers and the rollback contract: `kb/batch-s15.md`.
 
 **RAM is no longer the binding constraint; RESIDENCY is.** 8,813,054 B of asset
 destination arrays can never all be resident, so the keep list still decides what

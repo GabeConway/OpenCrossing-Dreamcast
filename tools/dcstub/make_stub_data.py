@@ -531,6 +531,23 @@ TEXPOOL_IMG_ARG = {
     "gDPLoadTextureTile":               1,
 }
 
+# 🔴 THE ONLY MACROS T1 MAY DEMAND-LOAD THROUGH. See scan_texture_operands()'s
+# docstring for the measurement. Everything else in TEXPOOL_IMG_ARG above goes
+# through emu64's TMEM emulation, which COPIES the texels out of the array
+# before any hook this port owns can substitute them — so a stubbed array is
+# read as its one-byte self and the garbage is already in
+# `texture_buffer_data` by the time the PVR upload sees a pointer.
+#
+# ⚠️ THIS SET IS DELIBERATELY SMALLER THAN "everything that is probably fine".
+# The Dolphin Load* variants may also be direct; proving it needs a read of
+# emu64's tile path, and being wrong reproduces exactly the fault this set was
+# added to fix — two bars of noise where the title screen's text belongs. The
+# cost of being conservative is a few KB of residency, which is the cheap side.
+TEXPOOL_DIRECT_MACROS = frozenset((
+    "gsDPSetTextureImage_Dolphin",
+    "gDPSetTextureImage_Dolphin",
+))
+
 # The checksums, same rule as BGTEX_ROWS_EXPECTED: a selector that silently stops
 # matching produces a probe that measures a SMALLER population than it claims and
 # reports a reassuring `interior=0` about textures it never looked at. Measured
@@ -540,15 +557,47 @@ TEXPOOL_IMG_ARG = {
 # (and is emitted as a per-row flag), but it is deliberately NOT a checksum: it
 # changes every time make_keeplist_town.py is re-run, and a hard error on it
 # would break the build on every legitimate regeneration.
-TEXPOOL_ROWS_EXPECTED = 6068
-TEXPOOL_BYTES_EXPECTED = 2992480
+TEXPOOL_ROWS_EXPECTED = 5912      # 6068 -> 6066 (S15-6, two static
+TEXPOOL_BYTES_EXPECTED = 2901152  # homonyms) -> 5912 (S15-8, 154 TMEM-path
+                                  # path. -2 rows / -256 B = exactly
+                                  # 2 x 0x80, i.e. lat_letter01_04_tex and
+                                  # lat_tegami_fusen_tex and nothing else.
+                                  # That the delta is EXACTLY those two bytes
+                                  # is the check that the linkage fix did not
+                                  # also drop something it should have kept.
 # The four exclusion counts. Asserted individually so that a change in ANY of
 # them is attributable, rather than surfacing as a single wrong row total.
 TEXPOOL_PAL_EXCLUDED_EXPECTED = 38     # swap != 0, i.e. TLUTs. Must stay resident.
 TEXPOOL_SEG_EXCLUDED_EXPECTED = 25     # 1 hnw_tmem_txt + 24 pointer-table
                                        # segment bases; see the note below
-TEXPOOL_STATIC_EXCLUDED_EXPECTED = 6   # ctl_att_w1..w6_tex, src/static/dvderr.c
+TEXPOOL_STATIC_EXCLUDED_EXPECTED = 8   # ctl_att_w1..w6_tex (src/static/dvderr.c)
+                                       # + lat_letter01_04_tex and
+                                       # lat_tegami_fusen_tex, which are STATIC
+                                       # in src/data/model/dia_win{,2,3}.c and
+                                       # GLOBAL in lat_letter64_xk_tex.c.
+                                       # ⚠️ 6 UNTIL 2026-08-09, AND THE TWO
+                                       # MISSING ONES WERE A SHIPPING GARBLED
+                                       # TEXTURE: scan_asset_declarations() let
+                                       # the sorted()-last file decide linkage,
+                                       # so the dia_win statics were stubbed to
+                                       # u8 x[1] with their pc_load_asset()
+                                       # calls dropped while their display
+                                       # lists still bound them. See that
+                                       # function's docstring; this number is
+                                       # the assertion that the fix is live.
 TEXPOOL_NPC_EXCLUDED_EXPECTED = 0      # R2's domain; asserted at 0
+TEXPOOL_TMEM_EXCLUDED_EXPECTED = 154   # Reached through a LoadTextureTile /
+                                       # LoadTextureBlock macro, i.e. emu64's
+                                       # TMEM emulation, which copies the
+                                       # texels out of the array BEFORE the
+                                       # PVR upload T1 hooks. 91,072 B goes
+                                       # back to residency and that is the
+                                       # whole price of the fix.
+                                       # ⚠️ 0 BEFORE 2026-08-09, WHICH IS WHY
+                                       # THE TITLE SCREEN'S "Press START!" AND
+                                       # COPYRIGHT LINE RENDERED AS TWO BARS
+                                       # OF NOISE. scan_texture_operands() has
+                                       # the trace that proved it.
 
 # Comments must go before anything is scanned, exactly as R3 does it: this tree
 # documents macro calls INSIDE comments (src/game/m_play.c:59 is a
@@ -642,13 +691,52 @@ def _texpool_call_args(text, lparen):
     return []
 
 
-def scan_texture_operands():
+def scan_texture_operands(unsafe_out=None):
     """Symbols named as a TEXTURE IMAGE operand by some display list in src/.
 
     Returns {symbol: n_sites}. This is the population T1 would serve, derived
     from the game's own display lists rather than from a name heuristic — the
     suffix `_txt` alone spans animation data and segment bases as well as
     textures, and `_tex` misses the Dolphin tile macros entirely.
+
+    🔴 `unsafe_out`, WHEN GIVEN, COLLECTS EVERY SYMBOL REFERENCED BY A MACRO
+    T1 CANNOT SERVE — and this is the fix for a shipping garbled-texture bug
+    (2026-08-09, S15-8), not a precaution.
+
+    T1's hook is `dc_gx_backend_texture_upload()`, i.e. the PVR upload. That
+    only works when the ARRAY'S OWN ADDRESS is what reaches the upload. Two
+    different things happen in this tree:
+
+      gsDPSetTextureImage_Dolphin(...)   emu64 records texture_gfx.image and
+                                         the address flows straight through to
+                                         the upload. T1's lookup HITS. ✅
+      gDPLoadTextureTile(...)            the pure N64 GBI macro. emu64
+      gDPLoadTextureBlock*(...)          EMULATES TMEM: setup_texture_tile /
+                                         texconv_tile COPY the texels out of
+                                         the source array into
+                                         `texture_buffer_data` (emu64.c:41),
+                                         and the upload then receives a
+                                         pointer into THAT buffer. T1's lookup
+                                         correctly returns -1 — but the copy
+                                         has already read the ONE-BYTE STUB.
+                                         The garbage is baked in upstream of
+                                         every hook T1 owns. ❌
+
+    MEASURED, and the trace is unambiguous. `-DDC_TEXPOOL_TRACE=90` on a title
+    screen run lists `logo_us_c_1_tex_txt` and `logo_us_c_2_tex_txt` being
+    fetched (they are `gsDPSetTextureImage_Dolphin`, and the "Animal Crossing"
+    logo renders perfectly) and NEVER lists `log_win_nintendo1..3_tex` or
+    `log_win_logo3/4_tex` — which are the five `gDPLoadTextureTile` calls in
+    src/actor/ac_animal_logo.c:535-583, and which rendered as two bars of noise
+    where "Press START!" and "(c) 2001-2002 Nintendo" belong. Turning T1 off
+    restored both lines exactly.
+
+    ⚠️ THE TIE-BREAK IS ALWAYS "EXCLUDE". A symbol referenced by BOTH forms is
+    unsafe, because the TMEM site alone is enough to render garbage. And only
+    the two `*SetTextureImage*_Dolphin` spellings are treated as safe: the
+    Dolphin Load* variants may well be direct too, but "may well be" buys a
+    few KB of RAM against a class of bug that looks like a renderer fault and
+    cost this project a full session to find.
     """
     names = {}
     unknown = {}
@@ -671,6 +759,8 @@ def scan_texture_operands():
                 operand = args[idx]
                 if TEXPOOL_IDENT_RE.match(operand):
                     names[operand] = names.get(operand, 0) + 1
+                    if unsafe_out is not None and macro not in TEXPOOL_DIRECT_MACROS:
+                        unsafe_out.add(operand)
     if unknown:
         raise SystemExit(
             "make_stub_data T1: found texture macro(s) not in TEXPOOL_IMG_ARG:\n"
@@ -705,8 +795,45 @@ def scan_asset_declarations():
     Returns {symbol: (byte_size, repo_relative_owner, is_static)}. .c_inc files
     are scanned alongside .c: the generator has been bitten twice by treating a
     .c_inc as invisible (kb/traps.md — the dialogue balloon and the reply box).
+
+    🔴 `is_static` IS STICKY AND SO IS AMBIGUITY, AND THAT IS A BUG FIX, NOT A
+    STYLE CHOICE (2026-08-09, S15-6). This function used to write
+    `out[name] = (...)` unconditionally, so for a symbol DECLARED IN MORE THAN
+    ONE FILE the last file in `sorted()` order silently won — and it decided
+    the linkage flag T1 uses to exclude file-statics.
+
+    That misfired on a real, shipping symbol. `lat_letter01_04_tex` and
+    `lat_tegami_fusen_tex` are **`static` in src/data/model/dia_win.c,
+    dia_win2.c and dia_win3.c** and **global in
+    src/data/model/lat_letter64_xk_tex.c**. `lat_letter64_xk_tex.c` sorts last,
+    so the recorded linkage was "global", T1's `if is_static: continue` never
+    fired, and the name went into DEMAND_STUB. `keep_symbol()` is keyed on the
+    NAME ONLY, so the rewriter then stubbed the three dia_win *statics* to
+    `u8 x[1]` and suppressed all four of their `pc_load_asset()` calls — while
+    their display lists went on binding them. `decode_gc_texture()` read 0x80
+    bytes out of a one-byte array: whatever the linker put next, indexed
+    through a live CI4 palette, i.e. **right-shaped garbage in plausible
+    colours**. Verified in the generated tree:
+    `dc/build/stubsrc/src/data/model/dia_win.c:25` is `static u8
+    lat_letter01_04_tex[1]` and its `pc_load_asset` count is 4 -> 0.
+
+    ⚠️ IT WAS INVISIBLE FOR TWO REASONS AT ONCE, which is why it survived a
+    "cleared" falsifier: `dia_win*` is the DIALOGUE BOX, and the 900 s autowalk
+    never opens one (kb/STATE.md's "a class the autowalk never binds"); and
+    T1's own probe cannot see it, because a bind that lands on a non-map
+    address is counted as `unmapped`, a bucket the report calls EXPECTED.
+
+    ⚠️ IT IS ALSO NEW WITH keeplist-full.txt. Under keeplist-town.txt the
+    dia_win files were not kept at all, so nothing drew and nothing was wrong.
+
+    So: a name is excluded from the demand path if ANY declaration of it is
+    static, or if it is declared in MORE THAN ONE FILE. Both are the same
+    condition really — T1 keys on an ADDRESS, and a name with two definitions
+    does not have one address. Being wrong here is silent and looks like a
+    renderer bug, so the tie-break is always "exclude".
     """
     out = {}
+    owners = {}
     for pat in ("*.c", "*.c_inc"):
         for f in sorted(SRC.rglob(pat)):
             text = f.read_text(encoding="utf-8", errors="surrogateescape")
@@ -714,10 +841,23 @@ def scan_asset_declarations():
                 continue
             globs, stats, _ = scan_declarations(text)
             rel = str(f.relative_to(REPO))
-            for name, size in globs:
-                out[name] = (size, rel, 0)
-            for name, size in stats:
-                out[name] = (size, rel, 1)
+            for name, size, st in ([(n, s, 0) for n, s in globs] +
+                                   [(n, s, 1) for n, s in stats]):
+                owners.setdefault(name, set()).add(rel)
+                prev = out.get(name)
+                if prev is None:
+                    out[name] = (size, rel, st)
+                else:
+                    # Sticky: once static, always static. Keep the FIRST owner
+                    # so the choice is deterministic rather than sorted()-last.
+                    out[name] = (prev[0], prev[1], 1 if (prev[2] or st) else 0)
+
+    # A name defined in two different files has no single address. Same verdict
+    # as file-static, and the same one-line reason.
+    for name, files in owners.items():
+        if len(files) > 1:
+            size, owner, _st = out[name]
+            out[name] = (size, owner, 1)
     return out
 
 
@@ -762,11 +902,12 @@ def texpool_rows(table):
     Runs every checksum the emitter used to run: a selector that silently stops
     matching does not fail, it measures a SMALLER population than it claims.
     """
-    operands = scan_texture_operands()
+    tmem_syms = set()
+    operands = scan_texture_operands(unsafe_out=tmem_syms)
     segment_syms = scan_gsp_segment_symbols() | scan_pointer_table_symbols()
     decls = scan_asset_declarations()
 
-    n_pal = n_seg = n_static = n_npc = 0
+    n_pal = n_seg = n_static = n_npc = n_tmem = 0
     rows = []
     for name in sorted(operands):
         row = table.get(name)
@@ -800,6 +941,14 @@ def texpool_rows(table):
             # File-static: dc/ cannot name it, so the map cannot take its
             # address and the loader could never key on it.
             n_static += 1
+            continue
+        if name in tmem_syms:
+            # 🔴 Reached through a LoadTextureTile/LoadTextureBlock macro, i.e.
+            # emu64's TMEM emulation, which copies the texels out of the array
+            # into texture_buffer_data BEFORE the PVR upload T1 hooks. A stub
+            # here is read as its one byte and renders as noise; T1 never gets
+            # a chance to substitute. scan_texture_operands() has the trace.
+            n_tmem += 1
             continue
         if owner.startswith(TEXPOOL_NPC_DIR):
             n_npc += 1
@@ -841,7 +990,9 @@ def texpool_rows(table):
             (n_pal, TEXPOOL_PAL_EXCLUDED_EXPECTED, "palette (swap != 0)"),
             (n_seg, TEXPOOL_SEG_EXCLUDED_EXPECTED, "gSPSegment-bound"),
             (n_static, TEXPOOL_STATIC_EXCLUDED_EXPECTED, "file-static"),
-            (n_npc, TEXPOOL_NPC_EXCLUDED_EXPECTED, "src/data/npc/**")):
+            (n_npc, TEXPOOL_NPC_EXCLUDED_EXPECTED, "src/data/npc/**"),
+            (n_tmem, TEXPOOL_TMEM_EXCLUDED_EXPECTED,
+             "TMEM-path (LoadTextureTile/Block)")):
         if got != want:
             raise SystemExit(
                 "make_stub_data T1: excluded %d %s row(s), expected %d.\n"

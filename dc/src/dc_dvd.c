@@ -171,6 +171,18 @@ static u32  dvd_pager_use[DC_DVD_PAGER_FDS];
 static u32  dvd_pager_clock = 0;
 static int  dvd_pager_inited = 0;
 
+/* S15-5's two counters. They are the ONLY evidence that the short-read branch
+ * exists on real silicon at all, because Flycast's FastGDRomLoad can never
+ * execute it (see dc_dvd_read_yielding).
+ *   dvd_short_reads  fs_read returned fewer bytes than asked and we CONTINUED.
+ *                    Nonzero on a burn and zero in every emulator run is the
+ *                    proof that the old `break` was losing texture bytes.
+ *   dvd_short_fail   the loop still ended with done < len. MUST BE 0; nonzero
+ *                    means a caller got a partially-filled buffer anyway.
+ * ⚠️ Reading these needs a burn with the console NOT muted, or the HUD. */
+static unsigned int dvd_short_reads = 0;
+static unsigned int dvd_short_fail = 0;
+
 static unsigned int dvd_pager_reads = 0;
 static unsigned int dvd_pager_bytes = 0;
 static unsigned int dvd_pager_opens = 0;
@@ -231,6 +243,13 @@ int dc_dvd_pager_read(int entry, unsigned int off, void* dst, unsigned int len) 
     (void)entry; (void)off; (void)dst; (void)len;
     return -1;
 #endif
+}
+
+/* S15-5. Read by dc_assetwin_report() so the numbers reach a log line that
+ * already exists rather than adding one. Both are cumulative for the run. */
+void dc_dvd_short_stats(unsigned int* out_short, unsigned int* out_fail) {
+    if (out_short) *out_short = dvd_short_reads;
+    if (out_fail)  *out_fail  = dvd_short_fail;
 }
 
 void dc_dvd_pager_stats(unsigned int* out_reads, unsigned int* out_bytes,
@@ -397,12 +416,47 @@ s32 dc_dvd_read_yielding(unsigned int fd, void* dst, unsigned int len,
         s32 n;
         if (want > len - done) want = len - done;
         n = (s32)fs_read((file_t)fd, (u8*)dst + done, (size_t)want);
-        if (n <= 0) break;
+        if (n <= 0) break;                      /* 0 or negative: EOF or error */
         done += (u32)n;
-        if ((u32)n < want) break;               /* short read: EOF */
+        /* ⚠️ S15-5, 2026-08-09. THIS USED TO BE
+         *     if ((u32)n < want) break;      // "short read: EOF"
+         * and that is a HARDWARE-ONLY BUG THAT FLYCAST CANNOT REPRODUCE, which
+         * is why it survived every emulator run this project has ever done.
+         *
+         * A short read is NOT EOF. `fs_read` is KOS's VFS primitive and it is
+         * permitted to return fewer bytes than asked for — the ISO9660 driver
+         * services a request out of its own sector cache and can hand back a
+         * partial buffer at a sector boundary, on a retry after a read error,
+         * or when the request straddles the end of what it currently holds.
+         * Only `n == 0` means EOF. Breaking here abandoned the rest of the
+         * request and returned `done < len`, i.e. a PARTIALLY FILLED buffer.
+         *
+         * ⭐ AND EVERY CALLER'S REPORTED SYMPTOM IS "GARBLED TEXTURE", NOT
+         * "MISSING TEXTURE". dc_assetwin.c does detect the short return
+         * (:331, :355, :379) and counts `fail=` — but T1 stages a texture into
+         * one shared buffer and the PVR uploads whatever is in it, so a
+         * partially-filled stage is the previous texture's tail behind the new
+         * texture's head. That is exactly the reported fault.
+         *
+         * WHY FLYCAST IS BLIND TO IT, and this is measurement rule 12 in its
+         * third shape: Flycast runs with FastGDRomLoad=yes, which satisfies
+         * every read from a fully-resident image in one go, so `n < want`
+         * never once occurs. `fail=0` in every emulator log is therefore not
+         * evidence that this path is sound — it is evidence that the emulator
+         * cannot execute the branch. The burn is the only instrument.
+         *
+         * Termination is unchanged: `n <= 0` still breaks, so a drive that
+         * genuinely stops delivering ends the loop rather than spinning.
+         * Kill switch -DDC_DVD_SHORT_READ_EOF restores the old break. */
+#ifdef DC_DVD_SHORT_READ_EOF
+        if ((u32)n < want) break;
+#else
+        if ((u32)n < want) dvd_short_reads++;
+#endif
         if (done < len) dc_audio_disc_yield();
         want = (u32)(DC_DVD_READ_CHUNK);        /* rule 2: only the FIRST is short */
     }
+    if (done < len) dvd_short_fail++;
     return (s32)done;
 #else
     if (seek_valid && fs_seek((file_t)fd, (off_t)off, SEEK_SET) < 0) return -1;

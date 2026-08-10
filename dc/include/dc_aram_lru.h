@@ -137,6 +137,13 @@ int dc_dvd_pager_read(int entry, unsigned int off, void* dst, unsigned int len);
 void dc_dvd_pager_stats(unsigned int* out_reads, unsigned int* out_bytes,
                         unsigned int* out_opens, unsigned int* out_usec);
 
+/* S15-5. `out_short` = fs_read returned fewer bytes than requested and
+ * dc_dvd_read_yielding CONTINUED rather than treating it as EOF; `out_fail` =
+ * the read still finished short, which must be 0. ⚠️ Both are structurally
+ * unreachable under Flycast's FastGDRomLoad — they only ever move on a burn.
+ * dc_assetwin_report() prints them as sr=/sf=. */
+void dc_dvd_short_stats(unsigned int* out_short, unsigned int* out_fail);
+
 #ifdef __cplusplus
 }
 #endif

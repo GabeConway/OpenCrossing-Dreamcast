@@ -287,6 +287,15 @@ static int   s_active = 0;
  * fault that fired once would hide it. The report labels them. */
 static unsigned int s_trin, s_cull, s_vis, s_punt, s_refs;
 static unsigned int s_reinst;
+/* S15-1's gate, per window. `lproj=` counts the batches on which the lean
+ * refresh found EMU64_DIRTY_FLAG_PROJECTION_MTX actually set, i.e. the ones
+ * where skipping dirty_check would have staled the frustum test had we not
+ * replicated its last block. It is expected to be SMALL (a projection change
+ * is a per-scene-pass event, not a per-batch one) and it must not be a large
+ * fraction of `trin=` — if it ever approaches it, the projection is being
+ * re-dirtied per batch and the replication is doing real work rather than
+ * standing guard, which is worth knowing before trusting the saving. */
+static unsigned int s_lean_proj;
 #ifdef DC_GX_VTXID
 /* G-B. `vid=` batches armed / references handed to the side channel, per
  * window. `vid=0` on a town run means the channel is dead and every memo
@@ -678,10 +687,82 @@ static int cull_batch(emu64 *self)
      * idempotent — `cds=` is the first measurement of whether idempotent also
      * means cheap). Charging them to the frustum test made the cull look ~6x
      * more expensive than the identical test costs on the late path. */
+    /* ---- S15-1: THE LEAN REFRESH. Do the two things the frustum test needs,
+     * and not the ~40 it does not. Kill switch -DDC_CULL_NO_LEANSETUP restores
+     * the two full calls above verbatim.
+     *
+     * THE ARGUMENT, and it rests on reading dc_gx_aabb_offscreen_gh()
+     * (dc_gx.c) rather than on the comment above. That function reads EXACTLY
+     * two pieces of g_gx: `projection_mtx`, and `pos_mtx[current_mtx]`. Nothing
+     * else in g_gx can change its answer. Of those:
+     *
+     *   projection_mtx      refreshed ONLY by GXSetProjection, and the only
+     *                       call inside dirty_check is its last block
+     *                       (emu64.c:3432-3435), guarded on
+     *                       EMU64_DIRTY_FLAG_PROJECTION_MTX. Replicated below.
+     *   current_mtx         set ONLY by GXSetCurrentMtx, and the only call
+     *                       inside setup_1tri_2tri_1quad is its first branch
+     *                       (emu64.c:2859-2867). Replicated below.
+     *   pos_mtx[slot]       loaded by GXLoadPosMtxImm, which dirty_check and
+     *                       setup_1tri_2tri_1quad BOTH never call — the whole
+     *                       TU has three call sites (emu64.c:547, :647, :4611)
+     *                       and :4611 is dl_G_MTX, i.e. a different command
+     *                       that has already run. So it was never ours to
+     *                       refresh and nothing here changes it.
+     *
+     * WHY DROPPING THE REST IS NOT A BEHAVIOUR CHANGE. Everything else
+     * dirty_check does is APPLY-AND-CLEAR against a sticky dirty flag; skipping
+     * a call defers the work to the next one, it does not lose it. Two cases:
+     *
+     *   batch is CULLED   the original handler never runs, so the deferred work
+     *                     lands in the NEXT batch's dirty_check instead. The
+     *                     culled batch submits no vertices, so no draw ever
+     *                     observed the difference. (This is also strictly less
+     *                     work: a texture tile dirtied for a batch we then cull
+     *                     is no longer uploaded for nobody.)
+     *   batch is VISIBLE  the original handler makes both calls itself
+     *                     (emu64.c:4812-4813 for TRIN, :4952-4953 for QUADN)
+     *                     with IDENTICAL arguments, before it submits a single
+     *                     vertex. It simply now finds the flags still set and
+     *                     does the work once instead of twice.
+     *
+     * THE SAVING IS THE DUPLICATE, NOT THE WORK. setup_1tri_2tri_1quad is
+     * unconditional — GXClearVtxDesc plus 4-6 GXSetVtxDesc/GXSetVtxAttrFmt
+     * pairs, ~10 out-of-line calls, on EVERY batch, twice — and the handler's
+     * second dirty_check was a ~25-branch scan that found everything clean
+     * because we had just cleared it. `cds=` was 2.23 ms/frame of a 3.05 ms
+     * cull (73 %) with only 175 of 2,572 batches actually culled, i.e. ~93 %
+     * of it was paid to do work the handler then did again.
+     * ⚠️ `cds=` after this change is NOT comparable to `cds=` before it — it
+     * now brackets the lean pair. The number to watch is `draw`/`us/v`.
+     *
+     * PRECEDENT: the CU_DECAL_ARM path above already returns without making
+     * either call, ships on by default, and its block comment states the same
+     * two facts (the calls are idempotent, and the handler re-makes them).
+     *
+     * ⚠️ NOT REPLICATED, DELIBERATELY: `using_nonshared_mtx`. It is written by
+     * setup_1tri_2tri_1quad (emu64.c:2862/:2866) and read by set_position
+     * (:2687, :2694), but the handler rewrites it from the same first_vtx
+     * before any vertex is submitted — same reasoning the decal path already
+     * relies on. Writing it here would be harmless; not writing it keeps this
+     * path's observable effect on `this` limited to the dirty flag we clear. */
+#ifdef DC_CULL_NO_LEANSETUP
     CU_SPLIT(s_setup_us, {
         self->dirty_check(self->texture_gfx.tile, self->texture_gfx.level, TRUE);
         self->setup_1tri_2tri_1quad((unsigned int)first_vtx);
     });
+#else
+    CU_SPLIT(s_setup_us, {
+        if (self->dirty_flags[EMU64_DIRTY_FLAG_PROJECTION_MTX]) {
+            self->dirty_flags[EMU64_DIRTY_FLAG_PROJECTION_MTX] = false;
+            GXSetProjection(self->projection_mtx, self->projection_type);
+            s_lean_proj++;
+        }
+        GXSetCurrentMtx(
+            (self->vertices[first_vtx].flag & MTX_NONSHARED) == MTX_SHARED
+                ? SHARED_MTX : NONSHARED_MTX);
+    });
+#endif
 
     /* ---- the box, over the DISTINCT referenced vertices ------------------
      * ⚠️ MIXED-FLAG BATCHES PUNT. A batch's matrix is chosen from the FIRST
@@ -926,7 +1007,7 @@ void dc_emu64_cull_report(void)
     /* The first five are this window; everything after `|` is CUMULATIVE for
      * the run and must read zero. `nocmp=` is not a fault — it is the number
      * of culls taken on a frameskipped tick, where dc_gx.c cannot answer. */
-    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u"
+    DC_LOGE("[EMU64C] trin=%u cull=%u vis=%u punt=%u refs=%u lproj=%u"
 #ifdef DC_PERF_PHASE
             /* Microseconds spent INSIDE cull_batch() this window — G3's own
              * frustum test, which [PHASE]'s `cull=` has never included. Read
@@ -948,7 +1029,7 @@ void dc_emu64_cull_report(void)
             " falsecull=%u gfxp_bad=%u nocmp=%u"
 #endif
             "\n",
-            s_trin, s_cull, s_vis, s_punt, s_refs,
+            s_trin, s_cull, s_vis, s_punt, s_refs, s_lean_proj,
 #ifdef DC_PERF_PHASE
             s_cull_us, s_setup_us, s_frustum_us,
 #endif
@@ -965,7 +1046,7 @@ void dc_emu64_cull_report(void)
             , s_falsecull, s_gfxp_bad, s_skipped
 #endif
            );
-    s_trin = s_cull = s_vis = s_punt = s_refs = 0;
+    s_trin = s_cull = s_vis = s_punt = s_refs = s_lean_proj = 0;
 #ifdef DC_PERF_PHASE
     s_cull_us = s_setup_us = s_frustum_us = 0;
 #endif

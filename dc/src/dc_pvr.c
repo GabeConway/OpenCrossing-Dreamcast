@@ -529,6 +529,29 @@ static unsigned int s_env_texel_batches;  /* how often it fired (cumulative)  */
 static int          s_p3_specular;
 static unsigned int s_p3_batches;
 static unsigned int s_p3_clamped;
+/* S15-2's four gates, cumulative, one counter each. They exist so ONE run says
+ * which gate carries the fix instead of leaving it to argument — and the first
+ * run that read them CONTRADICTED the analysis that motivated them, which is
+ * exactly what they were for.
+ *
+ * ⚠️ MEASURED 2026-08-09, town, 600 s (smoke-s15-measure-20260809-193333):
+ *     rej lit=105  fog=57933  alpha=311815  atest=134
+ * `alpha=` does 84 % of the work and `lit=` — the gate the whole
+ * collapsed-acre argument was built on — fires **105 times in a whole run**.
+ * So the 1-cycle collapse is real (kb/batch-s15.md S15-2 has the static count)
+ * but it is NOT mostly separated by geometry-mode lighting. Do not repeat the
+ * prediction that it is. The gate that finally bounded this is S15-2b's
+ * `neg=`, below, which is about the CONSTANTS rather than the combiner shape.
+ * Compiled out entirely by -DDC_PVR_TEVP3_WIDE. */
+#ifndef DC_PVR_TEVP3_WIDE
+static unsigned int s_p3_rej_lit, s_p3_rej_fog, s_p3_rej_alpha, s_p3_rej_atest;
+#endif
+#ifndef DC_PVR_TEVP3_CLAMP_OK
+/* S15-2b. Batches refused because PRIM-ENV went negative, i.e. batches this
+ * path cannot reproduce exactly. It replaces `clamped=`, which counted the
+ * same population and DREW it anyway. */
+static unsigned int s_p3_rej_neg;
+#endif
 #endif
 
 #if !defined(DC_PVR_NO_TEVCONST) && !defined(DC_PVR_NO_TEVCONST_ALPHA) && \
@@ -1143,6 +1166,77 @@ static int tev_p3_affine(float* base, float* off) {
 
     if (ts->color_op != GX_TEV_ADD)
         return 0;
+
+#ifndef DC_PVR_TEVP3_WIDE
+    /* ===== S15-2: THE GATES THAT WERE MISSING. -DDC_PVR_TEVP3_WIDE restores
+     * the 2026-08-09 predicate verbatim, i.e. the one that printed
+     * `tevp3 batches=20305 clamped=6941` and turned the town purple.
+     *
+     * 🔴 THE OLD DIAGNOSIS WAS WRONG ABOUT THE MECHANISM, AND THAT MATTERS
+     * BECAUSE IT POINTED AT THE WRONG FIX. kb/tev-map-hard-cases.md §6.6a says
+     * the predicate "is recognising a SHAPE that #037 shares with something
+     * common", which reads as "narrow the colour combine". IT CANNOT BE FIXED
+     * THAT WAY. The colliding batches do not merely resemble #037 — their
+     * recorded TEV state is BYTE-FOR-BYTE the keyboard's, because emu64
+     * MANUFACTURES it:
+     *
+     *   emu64::combine_auto (emu64.c:1191) computes
+     *   `two_cycle = (othermode_high & G_CYC_2CYCLE) != 0`, and in 1-CYCLE mode
+     *   it SILENTLY DISCARDS the cycle-1 `COMBINED * SHADE` term. A two-stage
+     *   `lerp then modulate by shade` therefore arrives here as the ONE-stage
+     *   `(C2, C1, TEXC, ZERO)` — indistinguishable, on the colour combiner
+     *   alone, from a genuine #037.
+     *
+     * Simulated over all 5,507 gsDPSetCombineLERP sites in src/: 472 produce a
+     * stage 0 the old predicate accepts, but only 150 of those are real
+     * single-stage configs. The other 322 are shade-modulated DLs collapsed by
+     * the 1-cycle path, and 214 of THOSE are src/data/field/bg/ — the acre
+     * ground, the trees and the mailboxes. That is the purple town, exactly.
+     * (Cycle type is runtime state set by m_rcp.c's z_gsCPModeSet_Data[15][6]
+     * setup DLs; the acre DLs never set it themselves, so the SAME display list
+     * bytes are a 1-stage or a 2-stage config depending on what ran before.)
+     *
+     * ⚠️ SO THE DISCRIMINATOR CANNOT BE THE COMBINER. It has to be a recorded
+     * axis the collapse does NOT touch — and geometry mode is exactly that.
+     * `combine_auto` drops the shade TERM but the DL's G_LIGHTING and G_FOG
+     * bits survive into GXSetChanCtrl/GXSetFog, so:
+     *
+     *   #037 (the keyboard)   lit = 0, fog = 0   — kb/tev-map-table.md row 37
+     *   a collapsed acre DL   lit = 1, fog = 1   — it is world geometry
+     *
+     * That single test is the whole fix. The two after it are free tightening
+     * against the OTHER eight configs that share the shape legitimately
+     * (#010/#035/#043/#051/#052/#055/#074 differ only in alpha, and #063
+     * differs from #037 on NOTHING recorded except alpha compare).
+     *
+     * Each gate has its own counter so one run says which did the work; a gate
+     * that never fires is a gate whose premise is wrong. */
+    if (g_gx.chan_ctrl_enable[0] || g_gx.chan_ctrl_enable[1]) {
+        s_p3_rej_lit++;
+        return 0;
+    }
+    if (g_gx.fog_type != GX_FOG_NONE) {
+        s_p3_rej_fog++;
+        return 0;
+    }
+    /* #037's alpha is TEXEL0's alpha alone. Written out rather than calling
+     * alpha_env_texel_only(), which is defined ~900 lines below this and only
+     * under -DDC_PVR_ALPHAENV. */
+    if (ts->alpha_a != GX_CA_ZERO || ts->alpha_b != GX_CA_ZERO ||
+        ts->alpha_c != GX_CA_ZERO || ts->alpha_d != GX_CA_TEXA) {
+        s_p3_rej_alpha++;
+        return 0;
+    }
+    /* The ONLY recorded axis separating #037 from #063. Same body as
+     * alpha_test_active() (defined below this point), restated for the same
+     * reason. */
+    if ((g_gx.alpha_comp0 == GX_GEQUAL && g_gx.alpha_ref0 > 0) ||
+        (g_gx.alpha_comp1 == GX_GEQUAL && g_gx.alpha_ref1 > 0)) {
+        s_p3_rej_atest++;
+        return 0;
+    }
+#endif /* !DC_PVR_TEVP3_WIDE */
+
     /* The texture must be the LERP WEIGHT and nothing may bypass it. */
     if (ts->color_c != GX_CC_TEXC || ts->color_d != GX_CC_ZERO)
         return 0;
@@ -1178,6 +1272,49 @@ static int tev_p3_affine(float* base, float* off) {
         base[i] = g_gx.tev_colors[creg_b][i] - g_gx.tev_colors[creg_a][i];
         off[i]  = g_gx.tev_colors[creg_a][i];
     }
+
+#ifndef DC_PVR_TEVP3_CLAMP_OK
+    /* ===== S15-2b: REJECT WHERE THE FIX IS NOT EXACT, rather than clamp.
+     * -DDC_PVR_TEVP3_CLAMP_OK restores the clamping behaviour.
+     *
+     * WHY THIS GATE EXISTS AND THE FIRST FOUR WERE NOT ENOUGH — measured, not
+     * argued. The first S15-2 run took the match count from 20,305 to 9,371,
+     * and the rejection counters said something nobody predicted: `alpha=`
+     * did 311,815 of the work and `fog=` 57,933, while `lit=` — the gate the
+     * whole analysis was built on — fired only **105 times**. So the
+     * collapsed-acre population is NOT mostly separated by lighting, and the
+     * 9,371 survivors are still far too many for a 26-display-list widget in a
+     * run that never opened the keyboard.
+     *
+     * `clamped=5205` of those 9,371 — 55 % — is the tell. base = PRIM - ENV
+     * is packed into UNSIGNED bytes, so a negative channel has to clamp to 0,
+     * and kb/tev-map-hard-cases.md §6.2 predicted exactly that. A clamped
+     * batch is one where this path does NOT reproduce the GX result: the
+     * surface flattens toward ENV and stops responding to the texture in that
+     * channel. `tmpr4.c:30-33` is the worked example — PRIM(32,48,144) minus
+     * ENV(144,128,96) is (-112,-80,+48), R and G clamp, and the ground goes
+     * purple. THAT IS THE REPORTED FAULT, and it is a property of the numbers
+     * rather than of the combiner shape, which is why no amount of TEV-state
+     * narrowing reached it.
+     *
+     * So: take the batches this fix is EXACT on and leave the rest exactly as
+     * they render today. This is not a heuristic — `base >= 0 in all three
+     * channels` is precisely the condition under which
+     * `(PRIM-ENV)*T0 + ENV == GX's result` holds in 8-bit unsigned, and top-end
+     * overflow cannot bite because base + off = PRIM <= 1 for any texel.
+     *
+     * ⚠️ IT COSTS ONE KEYBOARD ELEMENT, KNOWINGLY. kai_sousa.c:520-521 is
+     * PRIM(65,95,165) / ENV(125,45,225), base (-60,+50,-60) — so that piece
+     * stays as it is today rather than rendering flat-and-wrong. Trading one
+     * element of the widget for not recolouring the town is the right way
+     * round, and the exact remedy (invert the texture, swap the roles) is an
+     * offline asset pass that is still out of scope. */
+    if (base[0] < 0.0f || base[1] < 0.0f || base[2] < 0.0f) {
+        s_p3_rej_neg++;
+        return 0;
+    }
+#endif
+
     return 1;
 }
 #endif /* DC_PVR_TEVP3 */
@@ -4164,8 +4301,32 @@ void dc_pvr_report(void) {
      * kb/tev-map-hard-cases.md §6.6 is wrong — no screenshot needed to know it.
      * clamped= is how often PRIM < ENV forced the base to 0 (tev_p3_affine),
      * i.e. how often this fix is approximate rather than exact. */
-    DC_LOGE("[DC/PVR] tevp3 batches=%u clamped=%u of %u\n",
-            s_p3_batches, s_p3_clamped, s_batches);
+    DC_LOGE("[DC/PVR] tevp3 batches=%u clamped=%u of %u"
+#ifndef DC_PVR_TEVP3_WIDE
+            /* S15-2. rej= is the OTHER half of the falsification: `batches=`
+             * says the predicate fired, rej_lit= says the gate that used to be
+             * missing is the one doing the work. A town run should read
+             * rej_lit in the tens of thousands and batches= near zero until the
+             * keyboard is actually opened. */
+            " | rej lit=%u fog=%u alpha=%u atest=%u"
+#endif
+#ifndef DC_PVR_TEVP3_CLAMP_OK
+            /* S15-2b. Refused because PRIM-ENV went negative, i.e. the exact
+             * population `clamped=` used to count AND DRAW ANYWAY. With this
+             * gate on, `clamped=` should read 0 — a nonzero clamped= alongside
+             * a nonzero neg= means a second producer of `base` got added and
+             * did not go through the same test. */
+            " neg=%u"
+#endif
+            "\n",
+            s_p3_batches, s_p3_clamped, s_batches
+#ifndef DC_PVR_TEVP3_WIDE
+            , s_p3_rej_lit, s_p3_rej_fog, s_p3_rej_alpha, s_p3_rej_atest
+#endif
+#ifndef DC_PVR_TEVP3_CLAMP_OK
+            , s_p3_rej_neg
+#endif
+           );
 #endif
     dc_pvr_texture_report();
 }

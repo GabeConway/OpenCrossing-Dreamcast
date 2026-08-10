@@ -136,11 +136,13 @@ if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
     echo "-- DC_SRC_SHRINK=1: regenerating $REPO/dc/build/shrinksrc" \
          "(DC_AUDIO=${DC_AUDIO:-0} DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
          "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
-         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0})"
+         "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
+         "DC_NPC_SEED=${DC_NPC_SEED:-0})"
     python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
-        --npcmdl-pool="${DC_NPCMDL_POOL:-0}"
+        --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
+        --npc-seed="${DC_NPC_SEED:-0}"
 fi
 
 ENVARGS=(
@@ -229,6 +231,13 @@ ENVARGS=(
 # The model pool's slot count, same forwarding rule as DC_NPCTEX_SLOTS above.
 # This is the knob to reach for first if R3's 120,832 B does not fit.
 [ -n "${DC_NPCMDL_SLOTS+x}" ] && ENVARGS+=(-e DC_NPCMDL_SLOTS="$DC_NPCMDL_SLOTS")
+# N2c, the villager seeder. Forward-only for the same reason as the two pool
+# knobs: dc/Makefile has DC_NPC_SEED ?= 0 and the value is baked into a -D that
+# `#if defined(DC_NPC_SEED) && !DC_NPC_SEED` reads, so an empty -e would be a
+# preprocessor error rather than an off switch. make_src_shrink.py above has
+# already seen the value.
+[ -n "${DC_NPC_SEED+x}" ] && ENVARGS+=(-e DC_NPC_SEED="$DC_NPC_SEED")
+[ -n "${DC_NPC_SEED_MAX+x}" ] && ENVARGS+=(-e DC_NPC_SEED_MAX="$DC_NPC_SEED_MAX")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has
 # DC_EMU64_HIST ?= 0, so from the HOST entry point a DC_EMU64_HIST=300 build
@@ -296,9 +305,15 @@ ENVARGS=(
 #                                              # to the pre-2026-08-06 build
 #   DC_OPT_PROFILE=size bash dc/build-dc.sh    # -Os even on the hot list
 #   DC_OPT_O0_EXTRA='src/a.c src/b.c' ...      # quarantine while bisecting
+#   DC_OPT_OS_EXTRA='src/a.c' ...              # demote a HOT-LIST TU to -Os,
+#                                              # i.e. ask whether -O3's extra
+#                                              # code costs more in i-cache than
+#                                              # its instructions save. Flycast
+#                                              # cannot answer that; a burn can.
 [ -n "${DC_OPT_PROFILE+x}" ] && ENVARGS+=(-e DC_OPT_PROFILE="$DC_OPT_PROFILE")
 [ -n "${DECOMP_HOT_OPT+x}" ] && ENVARGS+=(-e DECOMP_HOT_OPT="$DECOMP_HOT_OPT")
 [ -n "${DC_OPT_O0_EXTRA+x}" ] && ENVARGS+=(-e DC_OPT_O0_EXTRA="$DC_OPT_O0_EXTRA")
+[ -n "${DC_OPT_OS_EXTRA+x}" ] && ENVARGS+=(-e DC_OPT_OS_EXTRA="$DC_OPT_OS_EXTRA")
 # The uninitialised-local diagnostic. DC_AUTOVAR_INIT=zero when an optimized
 # image misbehaves; if the symptom goes away the bug is an uninitialised read.
 [ -n "${DC_AUTOVAR_INIT+x}" ] && ENVARGS+=(-e DC_AUTOVAR_INIT="$DC_AUTOVAR_INIT")

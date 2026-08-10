@@ -75,6 +75,11 @@
  */
 #include "dc_platform.h"
 
+/* S15-5's counters, declared here rather than by pulling in dc_aram_lru.h —
+ * this file needs one function from it and nothing else. Definition and the
+ * whole argument are in dc/src/dc_dvd.c's dc_dvd_read_yielding(). */
+void dc_dvd_short_stats(unsigned int* out_short, unsigned int* out_fail);
+
 /* ⭐ DEFAULT OFF. The window LOST on every measurement that mattered — see the
  * four-row table in dc/Makefile's DC_ASSETWIN_B block and the post-mortem in
  * this file's header. It is kept, not deleted, because the emulator structurally
@@ -188,9 +193,17 @@ void dc_assetwin_drop(void) {
 }
 
 void dc_assetwin_report(void) {
+    unsigned int sr = 0, sf = 0;
+    dc_dvd_short_stats(&sr, &sf);
+    /* ⭐ sr=/sf= are S15-5's, and they are the reason this line matters on a
+     * BURN rather than in Flycast: sr= counts fs_read returning fewer bytes
+     * than asked, which FastGDRomLoad makes structurally impossible in the
+     * emulator. sr>0 on hardware with sf=0 means the old `break` was silently
+     * truncating asset reads; sf>0 means a caller got a short buffer anyway
+     * and must be treated as a fault. */
     DC_LOGE("[DC/AWIN] OFF (DC_ASSETWIN_B=0): req=%u reads=%u bytes=%u fail=%u"
-            " narrow=%u\n",
-            s_req, s_reads, s_disc_bytes, s_fail, s_narrow);
+            " narrow=%u sr=%u sf=%u\n",
+            s_req, s_reads, s_disc_bytes, s_fail, s_narrow, sr, sf);
 }
 #endif /* DC_HOST_STUB */
 

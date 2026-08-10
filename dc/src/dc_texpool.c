@@ -311,6 +311,25 @@ const void* dc_texpool_fetch(int row, unsigned int need) {
     r = &dc_texpool_map[row];
     s_fetch++;
 
+    /* S15-7. Name the first N rows the loader actually serves. Without this the
+     * only way to find out WHICH texture a garbled frame came from was to guess
+     * at the map, and `fetch=133` says nothing about which 133. Needs
+     * -DDC_TEXPOOL_PROBE=1 for the name table (DC_TEXPOOL_NAME is a placeholder
+     * otherwise), so it costs nothing in a shipping build.
+     *
+     * ⚠️ THE INTERESTING RESULT IS AN ABSENCE. A texture that renders as noise
+     * and does NOT appear here was never fetched — its bind missed the map,
+     * `src` stayed pointing at the one-byte stub, and the decoder read whatever
+     * the linker put next. That is a lookup failure, not a loader failure, and
+     * the two have completely different fixes. */
+#if defined(DC_TEXPOOL_TRACE) && (DC_TEXPOOL_TRACE) > 0
+    if (s_fetch <= (unsigned int)(DC_TEXPOOL_TRACE)) {
+        DC_LOGE("[DC/TEXPOOL] fetch#%u %s row=%d off=%u have=%u need=%u kept=%d\n",
+                s_fetch, DC_TEXPOOL_NAME(row), row, r->rom_off,
+                (unsigned int)r->size, need, (int)r->kept);
+    }
+#endif
+
     /* Still resident — either DC_TEXPOOL_DEMAND=0, or this row is in a TU the
      * keep list holds whole for some other symbol's sake. Nothing to do. */
     if (r->kept) { s_fetch_resident++; return r->src; }
