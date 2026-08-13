@@ -911,9 +911,56 @@ static void* dc_audio_stream_cb(int hnd, int req, int* done) {
 /* ==========================================================================
  * AI
  * ========================================================================== */
+/* ==========================================================================
+ * W1 — audiorom.img must be the image the compiled tables describe
+ * ==========================================================================
+ * When DC_AUDIO_S8 is on, `tools/dcaudio/s8bank.py` writes an audiorom.img
+ * whose samples are 8-bit PCM and `make_src_shrink.py` repoints
+ * audioheaders.c's wave-bank and extent tables at it. THOSE ARE TWO ARTEFACTS
+ * THAT MUST AGREE. Build one without the other -- stage the old image, or
+ * forget DC_AUDIO_S8 on a rebuild -- and every sample is read at the wrong
+ * offset with the wrong codec.
+ *
+ * 🔴 AND THE FAILURE MODE IS NOISE, NOT A CRASH. The engine happily decodes
+ * whatever bytes it finds; nothing asserts, nothing returns an error, and the
+ * result is indistinguishable from a codec bug, a residency bug or a bad
+ * conversion. That is a bad afternoon and possibly a wasted CD-R.
+ *
+ * One `fs_total()` at init turns it into one line on the console. The size is
+ * a sufficient discriminator here because s8bank.py changes it by ~4.9 MB;
+ * this is a wrong-artefact check, not an integrity check, so it deliberately
+ * does not hash 13 MB off a CD-R to catch a corruption nobody has seen.
+ * DC_AUDIO_S8_BYTES is emitted by dc/Makefile from the same JSON the shrink
+ * rule reads, so there is exactly one source of truth. */
+#if defined(DC_AUDIO_S8_BYTES) && !defined(DC_HOST_STUB)
+static void dc_audio_s8_check(void) {
+    file_t fd = fs_open("/cd/audiorom.img", O_RDONLY);
+    ssize_t got;
+    if (fd < 0) {
+        DC_LOGE("[DC/AUDIO] S8: cannot open /cd/audiorom.img to verify it\n");
+        return;
+    }
+    got = fs_total(fd);
+    fs_close(fd);
+    if ((unsigned int)got == (unsigned int)(DC_AUDIO_S8_BYTES)) {
+        DC_LOGE("[DC/AUDIO] S8 bank OK (%u B)\n", (unsigned int)got);
+        return;
+    }
+    DC_LOGE("[DC/AUDIO] *** S8 MISMATCH: /cd/audiorom.img is %u B, the linked "
+            "tables describe %u B. The disc has the WRONG audiorom.img and "
+            "every instrument will play as noise. Regenerate with "
+            "tools/dcaudio/s8bank.py and restage the disc root. ***\n",
+            (unsigned int)got, (unsigned int)(DC_AUDIO_S8_BYTES));
+}
+#else
+static void dc_audio_s8_check(void) { }
+#endif
+
 void AIInit(u8* stack) {
     (void)stack;
     if (audio_open) return;
+
+    dc_audio_s8_check();
 
     dc_mem_note(DCMEM_AUDIO, (ptrdiff_t)(sizeof(ring_buffer) + sizeof(s_stream_scratch)));
 

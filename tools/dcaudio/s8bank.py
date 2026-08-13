@@ -175,6 +175,11 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--verify", action="store_true",
                     help="re-parse the written image and check every sample")
+    ap.add_argument("--tables", default=None,
+                    help="write the audioheaders.c numbers here as JSON "
+                         "(default: alongside --out). This file is the SINGLE "
+                         "SOURCE OF TRUTH consumed by make_src_shrink.py -- do "
+                         "not retype the numbers into a rule.")
     args = ap.parse_args()
 
     kw = {}
@@ -190,10 +195,26 @@ def main() -> int:
             fh.write(img)
         digest = hashlib.sha256(img).hexdigest()
 
+        tables_path = args.tables or (os.path.splitext(args.out)[0]
+                                      + ".tables.json")
+        import json
+        with open(tables_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "img_bytes": len(img),
+                "img_sha256": digest,
+                "seq_extent": list(rom.extents[0]),
+                "ctl_extent": list(rom.extents[1]),
+                "tbl_base": rom.wave_base,
+                "tbl_size": new_tbl,
+                "wave": [list(w) for w in new_wave],
+                "wave_old": [[e.addr, e.size] for e in rom.waves],
+            }, fh, indent=1)
+
         print(f"wavetable structs patched   {patched}/{total}")
         print(f"audiorom.img  {len(rom.img):,} B  ->  {len(img):,} B")
         print(f"  tbl extent  {rom.extents[2][1]:,} B  ->  {new_tbl:,} B")
         print(f"  sha256      {digest}")
+        print(f"  tables      {tables_path}")
         print()
         print("🔴 APPLY THESE TO src/static/jaudio_NES/game/audioheaders.c VIA")
         print("   tools/dcstub/make_src_shrink.py -- the image is USELESS without")

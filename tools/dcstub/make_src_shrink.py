@@ -261,6 +261,7 @@ channels with no diagnostic at all.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -2373,6 +2374,118 @@ def _rspsim_rules(nofp):
     ])]
 
 
+# ---------------------------------------------------------------------------
+# W1 — audioheaders.c: point the wave-bank tables at an 8-bit PCM audiorom.
+# ---------------------------------------------------------------------------
+# `A_CMD_ADPCM` (rspsim.c:107) costs order 10 s16 multiply-accumulates per
+# sample; `A_CMD_PCM8DEC` (rspsim.c:591) is `*dst++ = (*src++) << 8`. The kb
+# puts ~29 % of `RspStart` on ADPCM decode and `RspStart` is 18.9 % of busy CPU
+# on real silicon -- roughly 4.2 ms of a 76.4 ms frame.
+#
+# `CODEC_S8` is a complete first-class path in the shipped engine (driver.c:815
+# skips the codebook load for non-ADPCM, :907 sets the frame geometry, :1043
+# emits Nas_PCM8dec) and the codec is a BITFIELD IN THE ROM DATA. So the whole
+# change is data -- `tools/dcaudio/s8bank.py` rewrites audiorom.img -- except
+# for the index tables, which are compiled into the game. This rule moves them.
+#
+# 🔴 THE IMAGE AND THESE TABLES ARE TWO ARTEFACTS THAT MUST AGREE. If they
+# drift, the game reads sample data at the wrong offsets and plays NOISE rather
+# than failing, which is indistinguishable from a codec bug. Two defences:
+#   - the numbers are READ FROM s8bank.py's JSON, never retyped here;
+#   - dc/src/dc_audio.c checks audiorom.img's real size against the compiled
+#     total at boot and refuses loudly on a mismatch (DC_AUDIO_S8_BYTES).
+#
+# KILL SWITCH: --audio-s8=0 (the default) emits no rule at all, audioheaders.c
+# is not swapped, and the build is byte-identical to before.
+def _audio_s8_rules(tables):
+    if not tables:
+        return []
+
+    wave = [tuple(w) for w in tables["wave"]]
+    wave_old = [tuple(w) for w in tables["wave_old"]]
+    tbl_size = int(tables["tbl_size"])
+
+    # Both tables are machine-generated and rigidly regular: every entry lists
+    # `0xXXXXXXXX,  /* rom addr */` then `0xXXXXXXXX,  /* size */`. Rewriting
+    # those two fields in document order preserves medium/cache/param exactly,
+    # which regenerating the block would not.
+    FIELD = r"(0x[0-9A-Fa-f]{8},)(\s*/\* (?:rom addr|size) \*/)"
+
+    def _retable(name, new_pairs, old_pairs):
+        def repl(m):
+            body = m.group(0)
+            want = []
+            for (a, s) in new_pairs:
+                want.append(a)
+                want.append(s)
+            got_old = []
+
+            def one(mm):
+                i = len(got_old)
+                got_old.append(int(mm.group(1)[:-1], 16))
+                if i >= len(want):
+                    raise RuleError(
+                        "%s: more addr/size fields than the JSON describes "
+                        "(%d entries)" % (name, len(new_pairs)))
+                return "0x%08X,%s" % (want[i], mm.group(2))
+
+            out = re.sub(FIELD, one, body)
+            if len(got_old) != len(want):
+                raise RuleError(
+                    "%s: found %d addr/size fields, expected %d"
+                    % (name, len(got_old), len(want)))
+            # The vendored table must still be the one these numbers were
+            # derived from. Anything else means audiorom.img and src/ have
+            # drifted apart, which is the one failure this rule must not pass.
+            flat_old = []
+            for (a, s) in old_pairs:
+                flat_old.append(a)
+                flat_old.append(s)
+            if got_old != flat_old:
+                raise RuleError(
+                    "%s: the vendored table does not match `wave_old` in the\n"
+                    "  JSON. audiorom.img and src/ have drifted -- regenerate\n"
+                    "  with tools/dcaudio/s8bank.py.\n"
+                    "    in src/: %s\n"
+                    "    in JSON: %s" % (name, got_old, flat_old))
+            return out
+        return repl
+
+    # AudiodataHeaderStart's three extents: seq and ctl keep BOTH their offset
+    # and their size (s8bank.py patches the ctl in place), so only the tbl
+    # extent's size moves.
+    data_old = [tuple(tables["seq_extent"]), tuple(tables["ctl_extent"]),
+                (int(tables["tbl_base"]), 7025632)]
+    data_new = [tuple(tables["seq_extent"]), tuple(tables["ctl_extent"]),
+                (int(tables["tbl_base"]), tbl_size)]
+
+    return [("src/static/jaudio_NES/game/audioheaders.c", "swap", [
+        (1,
+         r"(?s)ArcHeader AudiowaveHeaderStart\b.*?\n\};",
+         _retable("AudiowaveHeaderStart", wave, wave_old)),
+        (1,
+         r"(?s)ArcHeader AudiodataHeaderStart\b.*?\n\};",
+         _retable("AudiodataHeaderStart", data_new, data_old)),
+    ])]
+
+
+def _load_s8_tables(arg):
+    """Read s8bank.py's JSON, or None when W1 is off."""
+    if not arg:
+        return None
+    p = Path(arg)
+    if not p.is_absolute():
+        p = REPO / p
+    if not p.exists():
+        raise SystemExit(
+            "make_src_shrink: DC_AUDIO_S8=1 but %s is missing.\n"
+            "  Generate it with:\n"
+            "    python3 tools/dcaudio/s8bank.py --out <discroot>/audiorom.img "
+            "--tables %s" % (p, arg))
+    with open(p, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the DC_SRC_SHRINK tree.")
     ap.add_argument("--rspsim-nofp", type=int,
@@ -2386,6 +2499,20 @@ def main():
                          "on hardware at ~11 % of RspStart, which is itself "
                          "~21 % of non-idle work.")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--audio-s8-tables",
+                    default=(os.environ.get("DC_AUDIO_S8_TABLES")
+                             or ("tools/dcaudio/audiorom-s8.tables.json"
+                                 if os.environ.get("DC_AUDIO_S8") == "1"
+                                 else "")),
+                    help="W1. Path to the JSON tools/dcaudio/s8bank.py emits. "
+                         "When set, audioheaders.c's wave-bank and extent "
+                         "tables are repointed at an 8-bit-PCM audiorom.img, "
+                         "which stops rspsim's ADPCM decoder running (~29 %% of "
+                         "RspStart, itself 18.9 %% of busy CPU on silicon). "
+                         "Empty (the default) emits no rule at all -- "
+                         "audioheaders.c is not swapped and the build is "
+                         "byte-identical. Set by DC_AUDIO_S8=1. THE IMAGE MUST "
+                         "MATCH: dc_audio.c checks the file size at boot.")
     ap.add_argument("--audio", type=int, default=0, choices=(0, 1),
                     help="the build's DC_AUDIO. 0 (the default, matching "
                          "dc/Makefile) enables the S8 jaudio pool shrinks; 1 "
@@ -2466,7 +2593,8 @@ def main():
     rules_all = (RULES + [_s1c_rules(npctex, npcmdl, npcdiag)]
                  + _s11_reset_rules(npctex, npcmdl, npcseed)
                  + _s7_rules(bgtex) + _audio_rules(audio)
-                 + _rspsim_rules(bool(args.rspsim_nofp)))
+                 + _rspsim_rules(bool(args.rspsim_nofp))
+                 + _audio_s8_rules(_load_s8_tables(args.audio_s8_tables)))
     # N3's other two TUs exist ONLY at --npcdiag=1. That is what keeps 0 a
     # byte-identical revert: no extra entry in shrink.list, no extra shadow on
     # the include path. The guard for the mismatched-tree case lives in

@@ -168,14 +168,23 @@ if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
          "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
          "DC_NPC_SEED=${DC_NPC_SEED:-0}" \
          "DC_NPCDIAG=${DC_NPCDIAG:-0}" \
-         "DC_RSPSIM_NOFP=${DC_RSPSIM_NOFP:-1})"
+         "DC_RSPSIM_NOFP=${DC_RSPSIM_NOFP:-1}" \
+         "DC_AUDIO_S8=${DC_AUDIO_S8:-0})"
+    # W1. Empty unless DC_AUDIO_S8=1, and empty means "emit no rule at all",
+    # which is what keeps 0 a byte-identical revert: audioheaders.c is not
+    # swapped, so it does not appear in shrink.list either.
+    DC_AUDIO_S8_TABLES_ARG=""
+    if [ "${DC_AUDIO_S8:-0}" = "1" ]; then
+        DC_AUDIO_S8_TABLES_ARG="${DC_AUDIO_S8_TABLES:-tools/dcaudio/audiorom-s8.tables.json}"
+    fi
     python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
         --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
         --npc-seed="${DC_NPC_SEED:-0}" \
         --npcdiag="${DC_NPCDIAG:-0}" \
-        --rspsim-nofp="${DC_RSPSIM_NOFP:-1}"
+        --rspsim-nofp="${DC_RSPSIM_NOFP:-1}" \
+        --audio-s8-tables="$DC_AUDIO_S8_TABLES_ARG"
 fi
 
 ENVARGS=(
@@ -297,6 +306,11 @@ ENVARGS=(
 # compiler, so the container never needs it -- but forward it anyway so
 # dc/build/flags.stamp records which tree the objects were built against.
 [ -n "${DC_RSPSIM_NOFP+x}" ] && ENVARGS+=(-e DC_RSPSIM_NOFP="$DC_RSPSIM_NOFP")
+# W1. Unlike P3 this one reaches BOTH sides: the scratch tree (audioheaders.c's
+# wave-bank tables) AND the compiler (dc_audio.c's boot-time size check), so it
+# must be forwarded or the check silently compiles out while the tables move.
+[ -n "${DC_AUDIO_S8+x}" ] && ENVARGS+=(-e DC_AUDIO_S8="$DC_AUDIO_S8")
+[ -n "${DC_AUDIO_S8_TABLES+x}" ] && ENVARGS+=(-e DC_AUDIO_S8_TABLES="$DC_AUDIO_S8_TABLES")
 [ -n "${DC_NPCDIAG_PERIOD+x}" ] && ENVARGS+=(-e DC_NPCDIAG_PERIOD="$DC_NPCDIAG_PERIOD")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has

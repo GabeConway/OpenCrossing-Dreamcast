@@ -1313,6 +1313,47 @@ ifneq ($(DC_PMCR_HUD),)
 DEFINES += -DDC_PMCR_HUD=$(DC_PMCR_HUD)
 endif
 
+# =============================================================================
+# W1 — DC_AUDIO_S8=1: the bank is 8-bit PCM, so the ADPCM decoder never runs.
+# =============================================================================
+# `A_CMD_ADPCM` (rspsim.c:107) costs order 10 s16 multiply-accumulates per
+# sample; `A_CMD_PCM8DEC` (rspsim.c:591) is `*dst++ = (*src++) << 8`. The kb
+# puts ~29 % of `RspStart` on ADPCM decode and `RspStart` is 18.9 % of busy CPU
+# on real silicon — roughly 4.2 ms of a 76.4 ms frame, for a DATA change and no
+# runtime code (`CODEC_S8` is a complete path in the shipped engine, and the
+# codec is a bitfield in the ROM data).
+#
+# IT TAKES THREE THINGS THAT MUST AGREE, and this variable is what ties them:
+#   1. an audiorom.img written by tools/dcaudio/s8bank.py, staged in the disc
+#      root;
+#   2. audioheaders.c's tables repointed at it by make_src_shrink.py, which
+#      dc/build-dc.sh runs with DC_AUDIO_S8=1 in the environment;
+#   3. this define, so dc_audio.c can check (1) at boot.
+# All three read the SAME JSON, so there is one source of truth and no number
+# is ever retyped.
+#
+# 🔴 GET IT WRONG AND THE GAME PLAYS NOISE RATHER THAN FAILING — the engine
+# decodes whatever bytes it finds at whatever offsets it was given. That is why
+# dc_audio.c's AIInit does one fs_total() against DC_AUDIO_S8_BYTES and shouts.
+#
+# KILL SWITCH: DC_AUDIO_S8=0 (the default) emits nothing here, no shrink rule,
+# and the stock VADPCM audiorom.img is used — a byte-identical revert.
+# ⚠️ Quality: 8-bit PCM peaks ~48 dB against the 14–44 dB measured for the
+# existing VADPCM, so SNR goes UP, but its noise is CONSTANT where ADPCM's is
+# signal-proportional. Quiet sustained passages are the thing to listen to.
+# kb/audio-cheap-cpu-wins.md.
+DC_AUDIO_S8 ?= 0
+ifeq ($(DC_AUDIO_S8),1)
+DC_AUDIO_S8_TABLES ?= $(ROOT)/tools/dcaudio/audiorom-s8.tables.json
+DC_AUDIO_S8_BYTES := $(shell python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['img_bytes'])" $(DC_AUDIO_S8_TABLES) 2>/dev/null)
+ifeq ($(DC_AUDIO_S8_BYTES),)
+$(error DC_AUDIO_S8=1 but $(DC_AUDIO_S8_TABLES) is missing or unreadable. \
+        Generate it: python3 tools/dcaudio/s8bank.py --out <discroot>/audiorom.img \
+        --tables tools/dcaudio/audiorom-s8.tables.json)
+endif
+DEFINES += -DDC_AUDIO_S8_BYTES=$(DC_AUDIO_S8_BYTES)u
+endif
+
 # DC_CONSOLE_MUTE=1 — no console output from DC_CONSOLE_MUTE_FRAME onward.
 # ⚠️ IT IS DEFERRED INTO THE GAME LOOP AND MUST STAY THAT WAY: muting at the
 # top of main() cost a burn on 2026-08-08 — the game never reached the title,
