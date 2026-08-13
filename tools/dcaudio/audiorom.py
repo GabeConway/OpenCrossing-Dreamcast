@@ -285,13 +285,34 @@ class Sample:
 
     @property
     def n_samples(self) -> int:
-        """Decoded length in samples.
+        """Decoded length in samples, as THE ENGINE computes it.
 
-        `loop.sample_end` is the engine's own count and is authoritative; fall
-        back to the frame arithmetic when it is absent (one-shots record 0).
+        🔴 **IT IS `loop_end`, NOT `sample_end`.** `Nas_SynthMain` picks the end
+        position at `driver.c:785-789`:
+
+            if ((loopInfo->count == 2) && driver->stop_loop)
+                sampleEndPos = loopInfo->sample_end;
+            else
+                sampleEndPos = loopInfo->loop_end;
+
+        and **no sample in this bank has `count == 2`** (0 of 1157, verified —
+        `kb/audio-engine.md` §3.3 says the same), so the `sample_end` arm is
+        DEAD CODE and `loop_end` is always the answer.
+
+        ⚠️ This corrects an earlier version of this property that preferred
+        `sample_end` and fell back to frame arithmetic. It disagreed with
+        `loop_end` on **749 of 1157 samples** — and it disagreed *quietly*,
+        because `sample_end` is a plausible-looking field that is 0 on all 706
+        one-shots and within ~1 % on the rest. Every byte total derived from it
+        was wrong.
+
+        Neither field equals the encoded frame count: `loop_end` is under it for
+        451 samples, over it for 298 and exact for 408. The trailing frame is
+        padding, and a `loop_end` one sample past the last full frame is why
+        `vadpcm.decode()` tolerates a short final frame rather than raising.
         """
-        if self.loop.sample_end:
-            return self.loop.sample_end
+        if self.loop.loop_end:
+            return self.loop.loop_end
         fsz = frame_bytes(self.codec == CODEC_SMALL_ADPCM)
         return (self.size // fsz) * 16
 

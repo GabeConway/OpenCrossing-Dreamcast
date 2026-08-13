@@ -65,8 +65,8 @@ mechanism P3 used.
 
 ```
 VADPCM tbl payload      6,734,836 B
-as 8-bit PCM           11,972,323 B     = 1.78x
-audiorom.img now        8,300,384 B  ->  13,247,075 B   (+4,946,691)
+as 8-bit PCM           11,962,409 B     = 1.78x
+audiorom.img now        8,300,384 B  ->  13,237,161 B   (+4,936,777)
 ```
 
 Disc is not a constraint — the CDI is padded to 740 MB for a burn anyway.
@@ -74,7 +74,7 @@ Disc is not a constraint — the CDI is padded to 740 MB for a burn anyway.
 **The residency question is the real one, and it answers well:**
 
 ```
-per-sequence S8 working set: median 101,252 B   mean 149,381 B
+per-sequence S8 working set: median 101,009 B   mean 149,189 B
 246 of 249 sequences fit inside the EXISTING 1,048,576 B DC_ARAM_WINDOW
 ```
 
@@ -83,6 +83,11 @@ break every other audio plan (`kb/audio-aica-offload.md` §4). Samples reach the
 engine through the disc-backed GC-ARAM LRU window (`dc_aram.c`), so 1.78× the
 bytes means more disc traffic — but the window was measured at **106 reads per
 420 s** after it grew to 1 MB (`kb/RESUME.md` §5), so there is headroom.
+
+⚠️ **The sample lengths behind these figures were corrected the same day** —
+`n_samples` must come from `adpcmloop.loop_end`, not `sample_end`, because
+`driver.c:785-789`'s `sample_end` arm is dead code in this bank
+(`kb/audio-aica-offload.md` §3). It moved the totals ~0.1 % and changed nothing.
 
 ### Quality — it goes UP, not down
 

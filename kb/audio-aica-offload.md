@@ -92,22 +92,45 @@ runtime as `sampleAddr - GetNeosRomTop()`. That is the manifest key.
 
 ```
 unique samples   1157        VADPCM on disc   6,734,836 B
-looping 451   one-shot 706   decoded          11,972,323 samples
-as AICA 4-bit    5,986,283 B
+looping 451   one-shot 706   decoded          11,962,409 samples
+as AICA 4-bit    5,981,466 B
 ```
 
 | figure | kb said | measured | verdict |
 |---|---|---:|---|
-| everything as AICA 4-bit | 5,986,040 | **5,986,283** | ✅ |
-| bank 153 | 1,971,016 | **1,971,002** | ✅ |
-| seq 242 | 3,416,908 | **3,416,862** | ✅ |
-| median sequence | "≈49 KB" | **50,628 B** | ✅ |
+| everything as AICA 4-bit | 5,986,040 | **5,981,466** | ✅ |
+| bank 153 | 1,971,016 | **1,970,360** | ✅ |
+| seq 242 | 3,416,908 | **3,415,126** | ✅ |
+| median sequence | "≈49 KB" | **50,510 B** | ✅ |
 | sequences using one soundfont | 247/249 | **247/249** | ✅ |
 | samples over the channel limit | 24 | **24** | ✅ |
-| longest sample | 225,280 | **225,280** | ✅ |
+| longest sample | 225,280 | **225,274** | ✅ |
 
 **The ×8/9 arithmetic was sound.** Differences are rounding — the kb scaled
 byte counts, this scales exact sample counts.
+
+### ⚠️ A CORRECTION TO THIS TOOL, made the same day it was written
+
+The first version of `Sample.n_samples` took a sample's length from
+`adpcmloop.sample_end`, falling back to frame arithmetic. **That is the wrong
+field.** `Nas_SynthMain` picks the end at `driver.c:785-789`:
+
+```c
+if ((loopInfo->count == 2) && driver->stop_loop) sampleEndPos = loopInfo->sample_end;
+else                                             sampleEndPos = loopInfo->loop_end;
+```
+
+and **no sample in this bank has `count == 2`** (0 of 1157), so the
+`sample_end` arm is dead code and `loop_end` is always the answer. The two
+disagree on **749 of 1157 samples**.
+
+⭐ **It moved every total by ~0.1 % and changed no conclusion** — the table
+above is the corrected run. It is recorded because of *how* it hid: `sample_end`
+is a plausible, correctly-named field that is 0 on all 706 one-shots (so the
+fallback masked it) and within ~1 % on the rest (so nothing looked wrong).
+**A field that is right to within a rounding error is the hardest kind of wrong
+to notice.** Neither field equals the encoded frame count — `loop_end` is under
+it for 451 samples, over for 298, exact for 408.
 
 ---
 
@@ -118,14 +141,14 @@ B3 (bank 153 is 70,472 B too big for sound RAM) as separate problems. **They
 are the same problem.**
 
 ```
-bank 153                          1,971,002 B   126 samples   103.7 % of usable
-  its 19 over-limit samples       1,030,632 B
-bank 153 without them               940,370 B    49.5 % of usable   <- FITS
+bank 153                          1,970,360 B   126 samples   103.7 % of usable
+  its 19 over-limit samples       1,030,323 B
+bank 153 without them               940,037 B    49.5 % of usable   <- FITS
 ```
 
 **19 of bank 153's 126 samples are over the channel limit and are 52 % of its
 bytes.** All 24 over-limit samples in the whole game live in wave bank 5, and
-they are **1,278,432 B of the 5,986,283 B total — 21 % of everything, in 24
+they are **1,278,245 B of the 5,981,466 B total — 21 % of everything, in 24
 samples (2 % of the count).**
 
 ⭐ **CONSEQUENCE: solve the length problem and the fit problem dissolves with
@@ -143,8 +166,8 @@ already does, and what AICA's `AICA_SM_ADPCM_LS` mode exists for.
 is *"store looping samples as 8-bit PCM — 2× the bytes, still fits given §3.4"*.
 
 ```
-everything, all 4-bit                        5,986,283 B
-...with all 451 looping samples at 8-bit     9,310,243 B   = 4.9x usable
+everything, all 4-bit                        5,981,466 B
+...with all 451 looping samples at 8-bit     9,300,329 B   = 4.9x usable
 ```
 
 **It does not still fit.** As a blanket policy it is 4.9× the 1,900,544 B of
@@ -362,7 +385,7 @@ reclaiming it needs a rebuilt driver. A lever, not a recommendation.
 ## 9. The residency picture
 
 ```
-249 sequences   median 50,628 B   mean 74,692 B   max 3,416,862 B
+249 sequences   median 50,510 B   mean 74,598 B   max 3,415,126 B
 247/249 reference exactly one soundfont
 247/249 fit in 1,900,544 B on their own
 ```
@@ -371,8 +394,8 @@ reclaiming it needs a rebuilt driver. A lever, not a recommendation.
 
 | seq | cost | banks |
 |---|---:|---|
-| 242 | 3,416,862 B | 2, 155, 154, 153 |
-| 247 | 1,971,002 B | 153 |
+| 242 | 3,415,126 B | 2, 155, 154, 153 |
+| 247 | 1,970,360 B | 153 |
 
 Both are dominated by the same 19 over-limit samples (§4). Residency is
 genuinely tractable: load per sequence start on the existing
@@ -392,11 +415,11 @@ plus 32-byte-aligned 4-bit AICA ADPCM payloads.
 ```
 encoded   1133 samples
 excluded  24 over 65,534 samples (FLAG_TOO_LONG, no payload)
-payload   4,720,928 B
-file      4,753,376 B          elapsed 10.8 s
+payload   4,717,344 B
+file      4,749,792 B          elapsed 10.8 s
 ```
 
-Reconciles with §3: 5,986,283 − 1,278,432 (the over-limit samples) = 4,707,851,
+Reconciles with §3: 5,981,466 − 1,278,245 (the over-limit samples) = 4,703,221,
 plus 32-byte alignment padding. `--verify` re-derives the pack from the source
 bank and checks index ordering, payload non-overlap, the zero-payload rule for
 excluded entries, and byte-identity of sampled payloads against a fresh encode.
