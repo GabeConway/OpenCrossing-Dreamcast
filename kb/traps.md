@@ -1030,3 +1030,47 @@ margin on the build that boots, i.e. **~146 KB of real headroom, not 3.2 MB.**
   `$HOME`** — colima cannot bind-mount `/private/tmp`, and a build from there fails
   with `bash: /work/dc/build-dc-docker.sh: No such file or directory`.
 - **Always give absolute paths in scripts** — agents run from varying cwds.
+
+## `--wrap` on sh-elf: the underscore theory is wrong, and it fails green
+
+`--wrap=_Sym` with an `__asm__("__wrap__Sym")` label **matches nothing**. bfd
+strips the `_` prefix itself, so `--wrap` on a name that already carries it is
+ignored — with no diagnostic — the wrapper is left unreferenced, and
+`--gc-sections` deletes it along with its `__real_*` reference so not even an
+undefined symbol appears. The build is green and the interposition never
+happened.
+
+```
+link:  -Wl,--wrap=Sym          NO leading underscore
+code:  void __wrap_Sym(...)    plain C name, NO asm label
+```
+
+Proof that it bound: `___wrap_Sym` survives `--gc-sections` in the linked ELF.
+Always ship a runtime counter too. Measured over a four-way matrix in the SDK
+image, 2026-08-13; `kb/audio-aica-runtime.md` §3.
+⚠️ `dc/src/dc_npctex.c`'s "WHY NOT `--wrap`" note and
+`tools/dcstub/make_src_shrink.py:879` both assert the wrong version.
+
+## `DEFINES :=` at dc/Makefile:599 discards every `+=` above it
+
+A knob block placed earlier in the file builds, links and silently compiles its
+feature out. Put `DEFINES +=` blocks BELOW that line. (Link-flag variables are
+fine anywhere — they are consumed at the link recipe.)
+
+## Never touch the store queues from the audio path — it corrupts the PICTURE
+
+`spu_memload_sq()` → `sq_cpy()` → `sq_lock()` repoints **QACR0/QACR1** and
+writes through **SQ0/SQ1**. `pvr_list_begin()` has already locked the SQ for the
+TA, and `pvr_dr_target()`/`pvr_dr_commit()` alternate those same two queues
+inside that window — so an audio-side SQ copy hands the TA its bytes as a
+vertex. Reachable from anywhere, because `dc_audio_disc_yield()` fires from
+inside any blocking disc read. Use `spu_memload()` (plain `g2_write_block_32`).
+An audio-only change presenting as garbled geometry is the signature.
+
+## Disc I/O from the audio path can re-enter fs_iso9660
+
+`dc_audio_disc_yield()` runs the audio pump from *inside* somebody else's
+blocking `fs_read`. Any read issued from there re-enters the CD driver with the
+outer request in flight; nothing asserts and the OUTER read returns wrong bytes,
+so the symptom is an asset that loaded "successfully" and draws as garbage.
+`dc_audio_in_disc_yield` (dc_audio.c) is the guard flag.

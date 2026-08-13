@@ -462,6 +462,69 @@ WITHOUT --section-ordering-file (F5 is OFF for this build))
   endif
 endif
 
+# =============================================================================
+# DC_AICA — stage B: jaudio voices on the AICA's own hardware channels
+# =============================================================================
+# `RspStart` is 14.4 ms of a 76.4 ms frame on real silicon — 18.9 % of busy CPU,
+# the biggest single symbol on the machine, and 2.13x its Flycast share
+# (kb/audio-aica-offload.md). The AICA has 64 hardware channels that do the same
+# job in silicon. This switch moves eligible voices onto them.
+#
+# DEFAULT 0, AND THAT IS DELIBERATE. CLAUDE.md §1 says the default is the good
+# build — but "good" has to have been measured, and nothing on a console has yet
+# executed one line of this. It flips to 1 when a run says it should.
+#
+#   DC_AICA=1                      compile in dc_aica.c + dc_aica_seam.c and
+#                                  add the two --wrap flags below
+#   DC_AICA_DIVERT=0               wrapped and fully instrumented, but every
+#                                  voice stays in software. THE A/B CONTROL:
+#                                  it prices the interposition itself.
+#   DC_AICA_MAX_DIVERT=<n>         at most n hardware voices at once — the
+#                                  ladder in kb/audio-aica-offload.md §11
+#   DC_AICA_ALLOW_REVERB=1         divert voices with a reverb send too, DROPPING
+#                                  the send. MEASURED: the reverb send is 100 %
+#                                  of the DSP rejections and blocks ~58 % of
+#                                  eligible voice-updates, so this is the knob
+#                                  that decides how big stage B can get. Audible.
+#   DC_AICA_VOICES=<n>             AICA channels claimed (default 16)
+#   DC_AICA_ARENA=<bytes>          sound RAM for samples (default 1,572,864 of
+#                                  the 1,900,544 allocatable)
+#   DC_AICA_KEYON_DELAY=0          disable the latency-skew correction
+#   DC_AICA_SPU_LATENCY_FRAMES=<n> the one estimate in the design; tune by ear
+#   DC_AICA_SM_LOOP=2              looping samples in AICA_SM_ADPCM instead of
+#                                  the default ADPCM_LS — the A/B for §6's one
+#                                  unmeasured hardware fact (does the AICA carry
+#                                  ADPCM decoder state across the loop point?)
+#
+# ⚠️ IT NEEDS `aicabank.pak` ON THE DISC. Build it into $(DC_DISC_ROOT) with
+#      python3 tools/dcaudio/pack.py --out <discroot>/aicabank.pak
+#      python3 tools/dcaudio/pack.py --out <discroot>/aicabank.pak --verify
+# and note that --verify must repeat whatever --encoder/--leak wrote the file.
+# A missing pak is not fatal: dc_aica_init() logs and the port stays software.
+#
+# 🔴 THE SPELLING BELOW HAS NO LEADING UNDERSCORE, AND THAT IS MEASURED, NOT
+# ASSUMED. sh-elf prefixes user labels with `_`, so the tempting conclusion is
+# `--wrap=_Nas_MySeqMain` — and it is WRONG AND SILENT: bfd strips the prefix
+# itself before matching, so the underscored form matches nothing, `--wrap` on
+# an unmatched name is ignored with no diagnostic, the wrappers are left
+# unreferenced, and `--gc-sections` deletes them along with their `__real_*`
+# references so not even an undefined symbol is reported. That exact mistake was
+# made here first and the build was green. Verified in the SDK image over the
+# {asm label, plain C name} x {--wrap=foo, --wrap=_foo} matrix: only
+# `--wrap=X` + a plain C `__wrap_X` redirects.
+# The runtime prints `wrapped=` for exactly this reason — see dc_aica_seam.c.
+#
+# ⚠️ ONLY THE LINK FLAG LIVES HERE. The matching `DEFINES += -DDC_AICA=1` block
+# is with the other audio knobs, BELOW `DEFINES :=` — putting it here instead
+# builds cleanly, links cleanly, and silently compiles the whole offload out,
+# because the `DEFINES :=` further down discards everything appended above it.
+# That mistake was made once already writing this.
+DC_AICA ?= 0
+AICA_LDFLAGS :=
+ifeq ($(DC_AICA),1)
+AICA_LDFLAGS := -Wl,--wrap=Nas_MySeqMain -Wl,--wrap=Nas_smzAudioFrame
+endif
+
 # UB guards. Same set as pc/CMakeLists.txt lines 9-31 plus the two KOS/SH-4
 # additions justified in design-shelf-hazards §3.1.
 UB_GUARDS := \
@@ -1215,6 +1278,49 @@ endif
 
 ifneq ($(DC_ARAM_AUDIO_DROP),)
 DEFINES += -DDC_ARAM_AUDIO_DROP=$(DC_ARAM_AUDIO_DROP)
+endif
+
+# -----------------------------------------------------------------------------
+# DC_AICA — stage B: the -D half. The --wrap half is with ORDER_LDFLAGS above,
+# and the two MUST agree: the wrappers only exist when -DDC_AICA=1 compiled
+# them, and `__real__Nas_MySeqMain` only resolves when the --wrap fired. If they
+# disagree the link fails, which is the behaviour we want — see the sanity
+# check at the bottom of this block. Full knob table: the AICA section above.
+# -----------------------------------------------------------------------------
+ifeq ($(DC_AICA),1)
+DEFINES += -DDC_AICA=1
+ifneq ($(DC_AICA_DIVERT),)
+DEFINES += -DDC_AICA_DIVERT=$(DC_AICA_DIVERT)
+endif
+ifneq ($(DC_AICA_MAX_DIVERT),)
+DEFINES += -DDC_AICA_MAX_DIVERT=$(DC_AICA_MAX_DIVERT)
+endif
+ifneq ($(DC_AICA_ALLOW_REVERB),)
+DEFINES += -DDC_AICA_ALLOW_REVERB=$(DC_AICA_ALLOW_REVERB)
+endif
+ifneq ($(DC_AICA_VOICES),)
+DEFINES += -DDC_AICA_VOICES=$(DC_AICA_VOICES)
+endif
+ifneq ($(DC_AICA_ARENA),)
+DEFINES += -DDC_AICA_ARENA=$(DC_AICA_ARENA)
+endif
+ifneq ($(DC_AICA_KEYON_DELAY),)
+DEFINES += -DDC_AICA_KEYON_DELAY=$(DC_AICA_KEYON_DELAY)
+endif
+ifneq ($(DC_AICA_SPU_LATENCY_FRAMES),)
+DEFINES += -DDC_AICA_SPU_LATENCY_FRAMES=$(DC_AICA_SPU_LATENCY_FRAMES)
+endif
+ifneq ($(DC_AICA_SM_LOOP),)
+DEFINES += -DDC_AICA_SM_LOOP=$(DC_AICA_SM_LOOP)
+endif
+# The offload is pointless without synthesis to offload FROM: with DC_AUDIO=0
+# nothing ever calls Nas_MySeqMain, so the wrappers link, cost nothing and
+# report `wrapped=0` forever — which reads exactly like the underscore bug.
+# Say so at configure time rather than leaving a run to be misread.
+ifneq ($(DC_AUDIO),1)
+$(warning DC_AICA=1 with DC_AUDIO!=1 — the offload will link but never run, \
+and dc_aica_seam.c will report wrapped=0. Set DC_AUDIO=1 or DC_AUDIO_SCENES.)
+endif
 endif
 
 # DC_AUDIO_HEAPLOG=1 — one-shot dump of the jaudio heaps' own bookkeeping
@@ -2183,7 +2289,10 @@ endif
 # ELF. ⚠️ The DC_GPROF* -D flags DO change dc_profdump.c and they reach
 # $(FLAGSTATE) through DEFINES, which is already in it.
 LINKSTAMP  := $(BUILD)/link.stamp
-LINKSTATE  := ORDER=$(strip $(ORDER_LDFLAGS)) GPROF=$(strip $(GPROF_LDFLAGS))
+# AICA_LDFLAGS is here as well as (via DEFINES) in $(FLAGSTATE): the -D half
+# does change objects, but the two --wrap flags change only the link, and a
+# kill switch that does not force a relink is not a kill switch.
+LINKSTATE  := ORDER=$(strip $(ORDER_LDFLAGS)) GPROF=$(strip $(GPROF_LDFLAGS)) AICA=$(strip $(AICA_LDFLAGS))
 ifneq ($(LINKSTATE),$(strip $(shell cat $(LINKSTAMP) 2>/dev/null)))
 $(shell mkdir -p $(BUILD))
 $(file >$(LINKSTAMP),$(LINKSTATE))
@@ -2286,6 +2395,7 @@ $(TARGET): $(OBJS)
 	@echo "  LD  $@"
 	$(Q)$(KCXX) -o $@ @$(RSP) -lGL -lz $(GPROF_LDFLAGS) \
 		-Wl,--allow-multiple-definition $(GC_LDFLAGS) $(ORDER_LDFLAGS) \
+		$(AICA_LDFLAGS) \
 		-Wl,-Map,$(BUILD)/AnimalCrossing.map
 	@sh-elf-size $@ || true
 

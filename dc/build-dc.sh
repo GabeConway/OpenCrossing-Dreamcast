@@ -224,6 +224,20 @@ ENVARGS=(
     -e DC_PMCR_DWELL="${DC_PMCR_DWELL:-}"
     -e DC_PMCR_HUD="${DC_PMCR_HUD:-}"
     -e DC_PMCR_LOG="${DC_PMCR_LOG:-}"
+    # Stage B, the AICA offload. Same reasoning as DC_PMCR above: the Makefile
+    # gate is `ifeq ($(DC_AICA),1)` over `DC_AICA ?= 0`, so an EMPTY forward is
+    # off and the unconditional form cannot arm anything by accident. Forwarding
+    # is not optional -- a knob this script does not forward is silently off,
+    # which is exactly how DC_EMU64_HIST sat unrun for two sessions.
+    -e DC_AICA="${DC_AICA:-}"
+    -e DC_AICA_DIVERT="${DC_AICA_DIVERT:-}"
+    -e DC_AICA_MAX_DIVERT="${DC_AICA_MAX_DIVERT:-}"
+    -e DC_AICA_ALLOW_REVERB="${DC_AICA_ALLOW_REVERB:-}"
+    -e DC_AICA_VOICES="${DC_AICA_VOICES:-}"
+    -e DC_AICA_ARENA="${DC_AICA_ARENA:-}"
+    -e DC_AICA_KEYON_DELAY="${DC_AICA_KEYON_DELAY:-}"
+    -e DC_AICA_SPU_LATENCY_FRAMES="${DC_AICA_SPU_LATENCY_FRAMES:-}"
+    -e DC_AICA_SM_LOOP="${DC_AICA_SM_LOOP:-}"
     -e DC_CONSOLE_MUTE="${DC_CONSOLE_MUTE:-}"
     -e DC_CONSOLE_MUTE_FRAME="${DC_CONSOLE_MUTE_FRAME:-}"
     -e DC_SCIF_FAST="${DC_SCIF_FAST:-}"

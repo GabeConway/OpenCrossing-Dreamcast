@@ -24,6 +24,7 @@
  */
 #include "dc_platform.h"
 #include "dc_mem_ledger.h"
+#include "dc_aica.h"
 
 /* The GameCube DAC rate the game programs. rspsim will be re-rated to 22050
  * for stage A (PLAN §3.4) via AISetDSPSampleRate; this is only the default. */
@@ -40,6 +41,20 @@ static volatile u32 ring_read_pos  = 0;
 
 static int  audio_open = 0;
 static u32  ai_dsp_sample_rate = DC_AUDIO_SAMPLE_RATE;
+
+/* ⚠️ NOT `ai_dsp_sample_rate`, AND THAT WAS A REAL BUG, NOT A STYLE CHOICE.
+ *
+ * `ai_dsp_sample_rate` is whatever the game last passed to AISetDSPSampleRate,
+ * and MEASURED 2026-08-13 it is 0 by the time notes are playing — so the first
+ * version of dc_aica.c's latency correction divided by it, got 0 us, and took
+ * the immediate-key-on path every single time (`lat rate=0 -> 0 us`,
+ * `delayed=0`). The skew §11 warns about was silently uncorrected while the
+ * knob to correct it was present and looked armed.
+ *
+ * The rate that matters is the one snd_stream was actually STARTED at, which is
+ * a property of the open device and cannot change under us. Latched there. */
+static u32 s_out_rate = 0;
+
 
 /* ==========================================================================
  * DC_AUDIO DEFAULTS TO 0, AND THE REASON IS A MEASUREMENT
@@ -1099,10 +1114,27 @@ void AIInit(u8* stack) {
             DC_LOGE("[DC/AUDIO] snd_stream_alloc FAILED — silent run\n");
         } else {
             snd_stream_start(s_hnd, ai_dsp_sample_rate, 1 /* stereo */);
+            s_out_rate = ai_dsp_sample_rate;   /* see dc_audio_output_rate() */
             DC_LOGE("[DC/AUDIO] stream up: hnd=%d rate=%u stereo\n",
                     s_hnd, (unsigned)ai_dsp_sample_rate);
         }
     }
+
+    /* THE AICA OFFLOAD IS INITIALISED HERE, AND THE ORDER IS NOT NEGOTIABLE.
+     *
+     * It must run AFTER snd_stream_alloc() above, for two independent reasons:
+     *   1. Channel allocation. Both go through KOS's `snd_sfx_chn_alloc()`, so
+     *      whoever asks first gets the low channels; snd_stream taking 0 and 1
+     *      is what the rest of this port assumes (see dc_aica_pos's comment).
+     *   2. `snd_stream_init_ex()` reloads the ARM driver, and the ARM's
+     *      `aica_init()` clears all 64 channel register blocks regardless of
+     *      who owns them. Programming voices before that would have them
+     *      silently wiped.
+     * For the same reason nothing may call snd_init()/spu_enable()/spu_disable()
+     * after this point. kb/audio-aica-offload.md §8.
+     *
+     * A failure is never fatal — it logs and every voice stays in software. */
+    (void)dc_aica_init();
 #else
     (void)dc_audio_stream_cb;
     DC_LOGE("[DC/AUDIO] DC_AUDIO=0 — output device deliberately not opened\n");
@@ -1178,6 +1210,32 @@ void* DSPAddTask(void* task) { return task; }
 int pc_audio_get_buffer_fill(void) {
     return (int)(ring_write_pos - ring_read_pos);
 }
+
+/* ==========================================================================
+ * WHAT THE AICA OFFLOAD NEEDS FROM THIS FILE: HOW FAR AHEAD WE ARE
+ * ==========================================================================
+ * kb/audio-aica-offload.md §11 records the one serious objection to a hybrid
+ * software/hardware audio path, and it is not a subtlety: the software path is
+ * buffered — this ring plus snd_stream's own SPU-side buffer, order 100 ms —
+ * while a direct AICA key-on sounds IMMEDIATELY. Mix the two without
+ * correcting for that and every offloaded voice plays ~100 ms ahead of every
+ * software one, which for sequenced music is simply wrong.
+ *
+ * dc_aica.c delays its key-ons by this number of output frames (stereo pairs).
+ * Only OUR half is exact; snd_stream exposes a play position but not a queue
+ * depth, so the SPU-side term is a constant in dc_aica.c
+ * (DC_AICA_SPU_LATENCY_FRAMES) rather than a measurement, and it is the knob
+ * that gets tuned by ear.
+ *
+ * Defined unconditionally, like the tick counters above: at DC_AUDIO=0 these
+ * return 0, which is the honest answer for a build with no audio, and dc_aica.c
+ * needs no #if around the call. */
+unsigned int dc_audio_buffered_frames(void) {
+    if (!audio_open) return 0u;
+    return (unsigned int)(ring_write_pos - ring_read_pos) >> 1;  /* stereo pairs */
+}
+
+unsigned int dc_audio_output_rate(void) { return s_out_rate; }
 
 int pc_audio_is_active(void) { return audio_open; }
 
@@ -1324,6 +1382,19 @@ static u32 s_yield_frames = 0;
  * being served; it read as "did nothing at all" before 2026-08-08. */
 static u32 s_yield_polls  = 0;
 
+/* ⚠️ "WE ARE CURRENTLY NESTED INSIDE SOMEONE ELSE'S BLOCKING DISC READ."
+ *
+ * dc_aica.c must not issue its own fs_seek/fs_read while this is set: the
+ * outer caller (dc_dvd_pager_read, a keep-list load, a texture fetch) is parked
+ * inside the SAME fs_iso9660 driver, and a second read reached through the
+ * audio yield re-enters it with the outer request in flight. Nothing asserts;
+ * the outer read simply comes back with the wrong bytes, which surfaces as an
+ * asset that loaded "successfully" and draws as garbage.
+ *
+ * Unconditionally defined so dc_aica.c needs no #if; it reads 0 in a build with
+ * no audio, which is the honest answer. */
+int dc_audio_in_disc_yield = 0;
+
 void dc_audio_disc_yield(void) {
     int frames = 0;
 
@@ -1361,6 +1432,7 @@ void dc_audio_disc_yield(void) {
 
     s_audio_busy = 1;
     s_yield_calls++;
+    dc_audio_in_disc_yield++;      /* see the declaration above */
 
 #if DC_AICA_CLOCK_KICK
     /* The ARM7 wedge workaround has to keep running here too — a stall is
@@ -1385,6 +1457,7 @@ void dc_audio_disc_yield(void) {
      * the SPU's own 128 ms buffer from running dry. */
     if (s_hnd != SND_STREAM_INVALID) (void)snd_stream_poll(s_hnd);
 
+    dc_audio_in_disc_yield--;
     s_audio_busy = 0;
 }
 #else
@@ -1585,6 +1658,16 @@ void dc_audio_pump(void) {
     s_pump_frames += (u32)frames;
     s_pump_usec += (u32)(dc_time_us() - t0);
 
+    /* THE AICA VOICE FLUSH, and it belongs on this side of the poll.
+     *
+     * The seam wrote per-voice shadows during synthesis and nothing has reached
+     * the G2 bus yet; this pushes the whole batch under ONE g2 lock and keys on
+     * any voice whose latency-matching delay has expired. Once per pump is
+     * 229 Hz — jaudio's own envelope update rate — which is the rate the design
+     * in kb/audio-aica-offload.md §8 is sized for. It is a no-op when nothing
+     * is dirty, and compiles away entirely at DC_AICA=0. */
+    dc_aica_service();
+
     /* The return value matters: cb stuck at 2 for a whole 600 s run says the
      * consumer died early, and an unchecked poll cannot tell us that. */
     if (s_hnd != SND_STREAM_INVALID) {
@@ -1653,6 +1736,11 @@ void dc_audio_pump(void) {
 #endif
                 (unsigned)dc_aica_pos(0), (unsigned)dc_aica_pos(1),
                 (unsigned)dc_aica_pos(2), (unsigned)dc_aica_pos(3));
+        /* The offload's two lines. Read `wrapped=` FIRST: a --wrap that never
+         * bound is silent at link time, and every other AICA number is
+         * meaningless if it reads 0. dc/src/dc_aica_seam.c. */
+        dc_aica_report();
+        dc_aica_seam_report();
         DC_LOGE("[DC/AUDIO] yield calls=%u frames=%u pollonly=%u (audio "
                 "produced INSIDE a blocking disc read; pollonly = reads issued "
                 "BY jaudio itself, which can only be polled)\n",
