@@ -109,6 +109,36 @@ existing. What it settled:
   `AICA_CMD_CHAN` queue (no overflow check at all, ~430 Hz service). Direct G2
   register writes with SH-4 shadows; the queue only for key-on/off and setup.
 
+## 3d. ⭐ AND THREE FPS RESULTS FROM RE-MINING THE gprof LOGS (2026-08-13)
+
+No console run was needed for any of these — the flat profiles were already in
+`dc/build/gprof-runs`. `kb/audio-cheap-cpu-wins.md`.
+
+1. 🔴 **`DC_CONSOLE_MUTE=1` IS WORTH ~5.25 % OF BUSY ON A PLAY BURN AND EVERY
+   BURN EVER MADE PAID IT.** Phase-subtracting the two hardware runs: boot
+   13.34 % of busy, **steady state still 3.92 ms/frame**. KOS busy-waits the
+   SCIF FIFO with no cable attached. `dc/build-dc.sh` now warns on a
+   `DC_CDI_PAD=1` build with no explicit choice; `kb/RESUME.md` §2 has the
+   table. ⚠️ Not a default — it silences crash dumps and would blind
+   `run_report.py` mid-smoke.
+2. ⭐ **The `MAC.W` bound the kb blocked on is PROVEN** over all 748,255 frames
+   (`tools/dcaudio/bounds.py`): both operands fit s16, accumulator has 29×
+   headroom, the C never wraps. The kb's warning was true of the FORMAT and
+   false of THIS BANK. ⚠️ Margin is **one bit** — scale maxes at 12, and 13
+   would break it.
+3. ⭐ **W1 — the bank can go `CODEC_S8` and rspsim's ADPCM decoder stops**
+   (~5.5 % of busy, **zero runtime code**, quality goes up). Converter built
+   and self-verifying: `tools/dcaudio/s8bank.py`, 2147/2147 wavetables, 0
+   problems. 246/249 sequences still fit the existing `DC_ARAM_WINDOW`.
+   🔴 **Not applied**: seven numbers must move into `audioheaders.c` via a
+   `make_src_shrink.py` rule, and nothing has run.
+
+⚠️ **W1 and the AICA offload attack the SAME 18.9 % — do not count them
+additively.** W1 is roughly a third of the offload's win for a small fraction
+of the work and risk.
+
+---
+
 **Next, in order:** pack a bank (nothing emits one yet) → `dc/src/dc_aica.c`
 behind `DC_AUDIO_AICA=1` default OFF with the software path as the oracle →
 the loop-state burn. ⚠️ **Reverb has no home in the new design and nobody has
