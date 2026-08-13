@@ -100,7 +100,27 @@ Add to the prefix above, then run the harness:
 | **vertex split** | the above **+** `DC_PVR_VTXSPLIT=16` | same |
 | **screenshot** | `DC_FB_PROBE=150 DC_FB_IMAGE=2 DC_XDEFS='-DDC_PERF_PHASE -DDC_AUTOWALK=1'` | `… --timeout 900 --fb-writeback …` then `python3 tools/dcfb/fbimg_to_png.py <run>/console.log --out /tmp/shots` |
 | **opcode histogram (G1)** | `DC_EMU64_HIST=1 DC_XDEFS='-DDC_PERF_PHASE'` | same as perf |
-| **burn** | drop `DC_SCIF_FAST`, `DC_AUTOSTART`, `DC_AUTOWALK` and every probe; keep `DC_CDI_PAD=1` | burn the CDI |
+| **burn** | drop `DC_SCIF_FAST`, `DC_AUTOSTART`, `DC_AUTOWALK` and every probe; keep `DC_CDI_PAD=1`; **add `DC_CONSOLE_MUTE=1` for a PLAY burn** | burn the CDI |
+
+⭐ **`DC_CONSOLE_MUTE=1` IS WORTH ~5 % OF THE FRAME ON A PLAY BURN, AND EVERY
+BURN THIS PROJECT HAS EVER MADE PAID IT.** Measured 2026-08-13 by
+phase-subtracting the two hardware gprof runs in `dc/build/gprof-runs`
+(1,889-frame title demo minus the 69-frame boot arm):
+
+| | busy/frame | `scif_*` | % of busy |
+|---|---:|---:|---:|
+| boot-dominated (69f) | 120.6 ms | 16.09 ms/f | **13.34 %** |
+| title demo (1958f) | 76.4 ms | 4.37 ms/f | 5.71 % |
+| **steady state** | **74.8 ms** | **3.92 ms/f** | **5.25 %** |
+
+KOS busy-waits on the SCIF TX FIFO **with no cable attached**, at ~174 µs per
+logged byte. It is boot-weighted but does not go away. ⚠️ **Flycast measures
+the same code at 0.50 % and understates it ~8×** — rule 12; no emulator A/B can
+settle it. `dc/build-dc.sh` now warns when `DC_CDI_PAD=1` is built without an
+explicit choice.
+⚠️ **It is NOT the default and must not become one**: it silences crash dumps
+(so a *triage* burn wants `DC_CONSOLE_MUTE=0`), and it would blind
+`run_report.py` mid-run on any smoke, since the mute arms at frame 300.
 
 **Verdict on any run:**
 `python3 tools/dcqa/run_report.py <run>/console.log --vs <baseline>/console.log`

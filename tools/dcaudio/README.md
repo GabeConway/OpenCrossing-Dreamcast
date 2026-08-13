@@ -9,6 +9,7 @@ python3 tools/dcaudio/census.py --json /tmp/aica.json # + the sample manifest
 python3 tools/dcaudio/tests/test_vadpcm.py            # the decoder's falsifier
 python3 tools/dcaudio/pack.py --out /tmp/aicabank.pak           # build the bank
 python3 tools/dcaudio/pack.py --out /tmp/aicabank.pak --verify  # check it
+python3 tools/dcaudio/bounds.py                       # the MAC.W bound proof
 ```
 
 The full bank packs in ~11 s to **4,753,376 B** (1,133 samples encoded, 24
@@ -33,6 +34,7 @@ array compiled into the game. See `kb/audio-aica-offload.md` §2.
 | `audiorom.py` | parses `audioheaders.c`, resolves aliases, walks soundfont → instrument/drum → `smzwavetable` → sample, dedupes |
 | `aica_adpcm.py` | Yamaha/AICA 4-bit ADPCM encode + decode, round-trip SNR, and `analyse_loop()` — the loop-state convergence measurement |
 | `census.py` | the report and the manifest |
+| `bounds.py` | walks all 748,255 frames and proves the `MAC.W` operand/accumulator bounds. ⚠️ Bounds the **data**, not the format — re-run if `audiorom.img` is ever regenerated. `kb/audio-cheap-cpu-wins.md` W2 |
 | `pack.py` | builds `aicabank.pak` (device_addr-sorted index + 32-byte-aligned ADPCM payloads) and, with `--verify`, re-derives it from the source bank and diffs it |
 | `tests/ref_adpcm.c` | the oracle: `A_CMD_ADPCM`'s frame loop lifted verbatim out of `rspsim.c` |
 | `tests/test_vadpcm.py` | drives both with random frames and diffs them |

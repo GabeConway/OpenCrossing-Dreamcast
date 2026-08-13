@@ -58,6 +58,35 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     exit 2
 fi
 
+# -----------------------------------------------------------------------------
+# A BURN WITHOUT DC_CONSOLE_MUTE PAYS ~5 % OF ITS FRAME FOR A CABLE THAT IS NOT
+# THERE, AND THAT IS MEASURED (2026-08-13, hardware gprof).
+# -----------------------------------------------------------------------------
+# KOS busy-waits on the SCIF TX FIFO whether or not a cable is attached, so at
+# 57,600 baud every logged byte is ~174 us of dead frame (dc_main.c's
+# DC_CONSOLE_MUTE block). Phase-subtracting the two hardware gprof runs in
+# dc/build/gprof-runs (1,889-frame title demo minus the 69-frame boot arm):
+#
+#   boot-dominated       16.09 ms/frame of scif   13.34 % of busy
+#   steady state          3.92 ms/frame            5.25 % of busy
+#
+# So it is boot-weighted but it does NOT go away: ~3.9 ms of a ~74.8 ms frame
+# survives into steady play. Flycast measures the same code at 0.50 % and so
+# understates it ~8x -- measurement rule 12, and no emulator A/B can settle it.
+#
+# This is a WARNING and not a default, deliberately. Muting also silences crash
+# dumps, so a triage burn genuinely wants the console and silently muting it
+# would waste a CD-R. The harness needs it off too: smoke.sh parses console.log
+# and the mute arms at frame 300, which would blind run_report.py mid-run.
+if [ "${DC_CDI_PAD:-0}" = "1" ] && [ -z "${DC_CONSOLE_MUTE:-}" ]; then
+    echo "NOTE: DC_CDI_PAD=1 (a burn) with DC_CONSOLE_MUTE unset." >&2
+    echo "      The serial console costs ~3.9 ms/frame (~5 % of busy CPU) on" >&2
+    echo "      real hardware with NO CABLE ATTACHED. Measured, not estimated." >&2
+    echo "        play burn    -> DC_CONSOLE_MUTE=1   (silences crash dumps)" >&2
+    echo "        triage burn  -> DC_CONSOLE_MUTE=0   (keeps them; costs the 5 %)" >&2
+    echo "      Building unmuted. kb/RESUME.md section 2." >&2
+fi
+
 # `clean` and any other make target can be passed straight through.
 if [ "${1:-}" = "clean" ]; then
     exec docker run --rm --platform linux/arm64 \
