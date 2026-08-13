@@ -352,8 +352,23 @@ frustum test, `setup_1tri_2tri_1quad`) needs a town run to be final. The chord
 
 ## Ranked next actions
 
-⭐⭐ **USER DIRECTIVE 2026-08-09, end of session 15: the next two are VILLAGERS
-and the TEV FIX. Everything below them is the perf queue and waits.**
+⭐⭐ **SUPERSEDED 2026-08-13. THE QUEUE IS NOW: FPS, FPS, FPS.**
+The villager item is **CLOSED — it was never a bug** (`kb/villagers-n3-result.md`):
+the spawn gate is the game suppressing villagers during Nook's opening job, and
+the town is empty because the frame rate makes that opening impossible to
+finish. Content is DOWNSTREAM of FPS, not competing with it.
+
+**Ranked, 2026-08-13:**
+1. **The PMCR burn** (`AC-DC-20260813-pmcr-hud.cdi`, staged) — where does the
+   other 58 ms/frame go, and is the draw path icache-bound? Blocked since
+   2026-08-08 and it gates aiming anything else.
+2. **The AICA offload** — `RspStart` is 18.9 % of busy on silicon.
+   `kb/audio-aica-offload.md`; the host toolchain is built and tested.
+3. **Indexed submit (G-B)** — `dc_gx_backend_submit`, 9.6 %.
+⚠️ ~24 % is already available by burning `AC-DC-20260813-FAST-silent.cdi`
+(audio off + console mute). That is a playability crutch, not a fix.
+
+**The pre-2026-08-13 directive, kept for the record:**
 
 **A. ✅ N3 HAS NOW RUN (2026-08-13) — READ `kb/villagers-n3-result.md` FIRST.**
 Three of the five hypotheses are dead (`cloth=10/10`, `clip=5`,

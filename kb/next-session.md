@@ -1,184 +1,140 @@
 # Next session — the seed prompt, and the state it assumes
 
-**Written 2026-08-12, at the end of the session that got gprof running on real
-silicon.** This file exists to survive a context flush. It is NOT a second copy
-of `kb/RESUME.md` — it is the *paste-me* prompt plus the handful of facts that
-are only in one human's head right now.
+**Rewritten 2026-08-13**, at the end of the session that closed W1, finished the
+villager investigation, and re-pointed everything at the AICA offload. This file
+is the *paste-me* prompt plus the facts that live only in a human's head.
 
 ---
 
-## 1. The prompt to paste
+## 1. THE PROMPT TO PASTE (AICA offload)
 
-> Read `CLAUDE.md`, then `kb/RESUME.md` (especially §6b and §6c), then
-> `kb/STATE.md`. We got KOS `libgprof` running on a retail Dreamcast on
-> 2026-08-12 and it re-ranked the whole perf queue: **audio is ~21 % of real
-> work and 2.18× its Flycast share, while `dc_gx_backend_submit`'s share
-> SHRANK on hardware — the icache prediction in `kb/hardware-profiling.md` §7
-> is falsified.** Two fixes shipped that day (`DC_RSPSIM_NOFP`, `dc_ctz32`).
+> Read `CLAUDE.md`, then `kb/audio-aica-offload.md` in full, then
+> `kb/audio-cheap-cpu-wins.md` §"W1 — CLOSED" and `kb/closed.md`'s W1 entry.
+> We are implementing **stage B: move jaudio synthesis onto the AICA's hardware
+> channels**. It is the single largest FPS lever left — `RspStart` is **14.4
+> ms of a 76.4 ms frame, 18.9 % of busy CPU on real silicon**, the biggest
+> symbol on the machine and 2.13× its Flycast share.
 >
-> The profile we have is the **title screen's demo scene**, not the walked
-> town, so every vertex-load-dependent number in it is provisional. **The next
-> measurement is a hardware TOWN profile**: burn the `DC_GPROF_SD=1` build,
-> play to the town, walk a minute, stand still, press **L+R+START**, and bring
-> the SD card back. Then `sh-elf-gprof -b -p <matching .elf> gmon.1`.
+> **The host toolchain already exists and is tested: `tools/dcaudio/`.** A
+> VADPCM decoder proven bit-exact against `rspsim.c` by a differential test
+> (`tests/test_vadpcm.py`, 200/200), an `audiorom.img` reader, the Yamaha/AICA
+> ADPCM codec, a residency census and a bank packer with `--verify`. Do not
+> rebuild any of it. Run `python3 tools/dcaudio/census.py` to see the numbers.
 >
-> Do not quote FPS from any `DC_GPROF` build, and do not compare a
-> `keeplist-town` build's frame rate to a `keeplist-full` one.
+> **Start at `kb/audio-aica-offload.md` §8** — the runtime design, which
+> contradicts the obvious approach: voices must **NOT** be driven through KOS's
+> `AICA_CMD_CHAN` queue (`snd_sh4_to_aica` has **no overflow check at all** and
+> the ARM services at only ~430 Hz against a 229 Hz update tick). Drive
+> volume/pan/pitch by **direct G2 register writes with SH-4-side shadows**, and
+> use the queue only for key-on/key-off and voice setup.
+>
+> **And §11: the offload can be INCREMENTAL.** AICA sums all 64 hardware
+> channels to the DAC and the software path already ends at two of them, so a
+> voice on hardware and a voice from `RspStart` mix for free. Build it voice by
+> voice with the software path live as the oracle (`DC_AUDIO_SOFTWARE=1`).
+> ⚠️ The one real objection is **latency skew** — the software path is buffered
+> ~100 ms while a direct key-on is immediate. §11 has two candidate fixes,
+> neither tried.
+>
+> Do not re-propose the `CODEC_S8` bank (W1). It is **closed with arithmetic**:
+> it needs +4,839,936 B of audio ARAM that the graph half cannot spare, and a
+> mixed bank inside the real headroom converts 2.00 % of the bank. The AICA
+> offload does not have that problem because its samples live in the
+> Dreamcast's own 2 MB sound RAM, not the emulated GameCube ARAM.
 
 ---
 
 ## 2. What only exists in a human's head
 
-- **The SD adapter is the SCIF type** (jj1odm-style), confirmed by
-  `iface SCIF` in `/sd/gprof.txt`. `DC_GPROF_SD_IF` defaults to 0 for that
-  reason. ⚠️ **Do not set it to 1 or 2** — KOS's `sci_spi_rw_byte` waits on RDRF
-  with no cycle cap and wedges forever with the console already muted.
-- **The card must be MBR with the FAT32 volume in PRIMARY entry 0.** The first
-  card failed because macOS had it as a *logical* partition inside an extended
-  partition (`diskNs5`, offset 2112 = 2048 + an EBR).
-  `diskutil eraseDisk FAT32 DCLOG MBRFormat /dev/diskN` produces the right
-  layout; 4 KB clusters matter because `fat_fs_init_ex` allocates 8
-  cluster-sized cache buffers.
-- **The disc the human has been playing is the PROFILING build**, which is
-  handicapped four ways against a play build: F5 off, gprof sampler armed,
-  console unmuted, `keeplist-town`. A human read it as *"running noticeably
-  better"* — ⚠️ **that is the missing content, not a win.**
-- **Holding L auto-advances dialogue** under `TARGET_PC` (`kb/traps.md`). It is
-  the difference between reaching Tom Nook and giving up.
-- **The title screen runs a live demo scene** — actors, camera, music. That is
-  why the profile has `Player_actor_move` and `Camera2_*` in it.
+- **FPS IS THE GATE ON EVERYTHING, and that is a human verdict, 2026-08-13:**
+  *"i havent done it because the game runs so badly that it feels impossible to
+  get that far."* The town has no villagers because nobody has finished Nook's
+  opening job, and nobody has because the game is too slow. Do not treat FPS
+  and content as competing priorities — content is downstream of FPS.
+- **Audio sounds GOOD on hardware** and has since S14. Do not regress it. The
+  offload's first working version drops reverb (`kb/audio-aica-offload.md` §12),
+  which is an audible change, not a transparent one.
+- **The SD adapter is the SCIF type**; `DC_GPROF_SD_IF` must stay 0 — probing
+  for an absent card WEDGES with the console already muted.
+- **The card must be MBR with FAT32 in PRIMARY entry 0.**
+- **Holding L auto-advances dialogue** (`kb/traps.md`) — the difference between
+  reaching Tom Nook and giving up.
 
 ---
 
-## 3. The artefacts, and where they are
+## 3. Burns staged on the NAS, all built 2026-08-13, none burned yet
 
-On the NAS at `/Volumes/Gabe/AC-DC/` (durable) — `dc/build/gprof-runs/` has the
-same files locally but **`make clean` does `rm -rf dc/build`**:
-
-| file | what |
+| file | what it is |
 |---|---|
-| `AC-DC-20260812b-gprof-sd.{cdi,elf,cdi.src.json}` | the hardware profiling image. ⚠️ **Keep the `.elf`** — `sh-elf-gprof` needs the exact one, checked against the sidecar sha256 |
-| `…hw-title-1958f.{gmon.out,flat.txt,gprof.txt}` | the good hardware run |
-| `…hw-title-69f.*` | the 69-frame run — **boot-dominated**, useful only as the phase-subtraction arm |
-| `AC-DC-20260812a-gprof.*` | 🔴 **pre-fix, do not burn.** Its SD path cannot write |
+| **`AC-DC-20260813-FAST-silent.cdi`** | ⭐ **the one to try first.** Audio OFF (18.9 % of busy) + console muted (5.25 %) + villager knobs on. ~24 % of the frame back. **Silent by design** — it exists to make the opening completable |
+| `AC-DC-20260813-pmcr-hud.cdi` | `cyc` / `istall` / `dstall` on the TV. **The only instrument that can say where the remaining frame goes**; blocked since 2026-08-08. Town, standing still, ~12 s after boot |
+| `AC-DC-20260813-villagers-mute.cdi` | villager knobs on + mute, audio ON. Boot-verified (`margin=3364020 OK`) |
+| `AC-DC-20260813-play-mute.cdi` | shipping config + mute, villager knobs off |
+| `AC-DC-20260813-s8*.cdi` | 🔴 the W1 A/B pair. **Do not burn** — the S8 one is the broken bank |
 
-⚠️ The card file is opened `"w"`, so **every run overwrites `GMON.1`**. Copy it
-off before the next run.
-
----
-
-## 3b. ⚠️ THE NEXT BURN IS THE TOWN PROFILE, AND THAT IS A DECISION
-
-**User directive, end of session 16b: do NOT burn the play build.** A
-`keeplist-full` + F5-on + no-gprof build carrying P3 and `dc_ctz32` was built and
-passed the regression gate (`no regression detected`, `ASSET MISSING 0`,
-`fps_p50` 22.8 unchanged), but it was **deliberately not shipped** — the two
-fixes are ~2.4 % of CPU and a CD-R is better spent on the measurement that
-unblocks everything else.
-
-It is NOT on the NAS. It is at `scratchpad/play.{cdi,elf,cdi.src.json}` and that
-scratchpad does not survive; **rebuild it from the shipping config in
-`kb/RESUME.md` §2** (nothing extra is needed — P3 and `dc_ctz32` are defaults).
-
-⚠️ **`fps_p50` unchanged in Flycast is NOT evidence the fixes did nothing.**
-Audio is 9.4 % of busy time in Flycast against 23.9 % on hardware, so the
-emulator understates P3 by ~2.5×. Measurement rule 12.
+⭐ **`DC_CONSOLE_MUTE=1` IS WORTH ~5.25 % AND EVERY BURN BEFORE TODAY PAID IT.**
+`dc/build-dc.sh` now warns when `DC_CDI_PAD=1` is built without an explicit
+choice. It is NOT a default: it silences crash dumps and would blind
+`run_report.py` mid-smoke.
 
 ---
 
-## 3c. ⭐ THE AUDIO OFFLOAD IS STARTED (2026-08-13) — READ `kb/audio-aica-offload.md`
+## 4. What this session settled, so it is not re-litigated
 
-The user directed the session at audio offload. **The host toolchain exists and
-is `tools/dcaudio/`**; no runtime code was written and none should be quoted as
-existing. What it settled:
+- ✅ **The villagers are NOT broken — it is a progression gate.**
+  `kb/villagers-n3-result.md`. Six N3 runs; every wall is the game deliberately
+  suppressing spawns during the intro. **Retired as live defects:** "nothing
+  constructs a villager ACTOR", the save-path theory, the FGDATA/reserve-scan
+  theory, N2b, and `mEv_CheckFirstIntro()` as culprit.
+  ⚠️ Still unproven: no run has actually spawned a villager. The clean proof is
+  a human finishing Nook's job on the FAST build.
+- 🔴 **W1 (`CODEC_S8`) is CLOSED** — `kb/closed.md`. The codec was fine
+  (38.56 dB median vs the VADPCM's 14-44); it does not fit ARAM.
+- ⭐ **`MAC.W` on the ADPCM filter is PROVEN SAFE** over all 748,255 frames
+  (`tools/dcaudio/bounds.py`) — the kb's warning was true of the FORMAT and
+  false of THIS BANK. ⚠️ Margin is **one bit**: scale maxes at 12, 13 breaks it.
+  ⚠️ Moot if the offload lands; its independent value is the resampler FIRs.
 
-- ✅ The kb's ×8/9 sizing arithmetic is **confirmed** against the real bank
-  (bank 153, seq 242, the median sequence, the 24 over-limit samples — all
-  reproduce to within rounding).
-- ⭐ **Two of the four blockers are one.** Bank 153 does not fit *because* 19
-  of its 126 samples exceed the 65,534-sample channel limit and are 52 % of its
-  bytes. Strip them and it is 940,370 B — 49 % of usable. All 24 over-limit
-  samples in the game are in wave bank 5 and are 21 % of all bytes in 2 % of
-  the count. **They are long-form material and want streaming, not residency.**
-- 🔴 **The "store looping samples as 8-bit PCM, still fits" mitigation is
-  FALSIFIED** — 9,310,243 B, i.e. **4.9× usable**, against 3.1× for all-4-bit.
-- ⭐ **The loop-discontinuity blocker is measured for the first time** and its
-  size is **0 or ~163 samples**, depending entirely on whether AICA resets
-  decoder state at the loop point. That one hardware fact is worth a burn.
-- 🔴 **The runtime design changed**: voices must NOT go through KOS's
-  `AICA_CMD_CHAN` queue (no overflow check at all, ~430 Hz service). Direct G2
-  register writes with SH-4 shadows; the queue only for key-on/off and setup.
+### ⚠️ The lesson this session paid for, in full
 
-## 3d. ⭐ AND THREE FPS RESULTS FROM RE-MINING THE gprof LOGS (2026-08-13)
-
-No console run was needed for any of these — the flat profiles were already in
-`dc/build/gprof-runs`. `kb/audio-cheap-cpu-wins.md`.
-
-1. 🔴 **`DC_CONSOLE_MUTE=1` IS WORTH ~5.25 % OF BUSY ON A PLAY BURN AND EVERY
-   BURN EVER MADE PAID IT.** Phase-subtracting the two hardware runs: boot
-   13.34 % of busy, **steady state still 3.92 ms/frame**. KOS busy-waits the
-   SCIF FIFO with no cable attached. `dc/build-dc.sh` now warns on a
-   `DC_CDI_PAD=1` build with no explicit choice; `kb/RESUME.md` §2 has the
-   table. ⚠️ Not a default — it silences crash dumps and would blind
-   `run_report.py` mid-smoke.
-2. ⭐ **The `MAC.W` bound the kb blocked on is PROVEN** over all 748,255 frames
-   (`tools/dcaudio/bounds.py`): both operands fit s16, accumulator has 29×
-   headroom, the C never wraps. The kb's warning was true of the FORMAT and
-   false of THIS BANK. ⚠️ Margin is **one bit** — scale maxes at 12, and 13
-   would break it.
-3. ⭐ **W1 — the bank can go `CODEC_S8` and rspsim's ADPCM decoder stops**
-   (~5.5 % of busy, **zero runtime code**, quality goes up). Converter built
-   and self-verifying: `tools/dcaudio/s8bank.py`, 2147/2147 wavetables, 0
-   problems. 246/249 sequences still fit the existing `DC_ARAM_WINDOW`.
-   🔴 **Not applied**: seven numbers must move into `audioheaders.c` via a
-   `make_src_shrink.py` rule, and nothing has run.
-
-⚠️ **W1 and the AICA offload attack the SAME 18.9 % — do not count them
-additively.** W1 is roughly a third of the offload's win for a small fraction
-of the work and risk.
+**Four counters were green while the S8 build was badly broken** —
+`S8 bank OK`, `ASSET MISSING 0`, zero asserts, and `[NEOS_OUT]` peak 5807 vs a
+baseline 5806, which was argued in writing as proof the conversion was correct.
+It is not: peak amplitude is set by the loudest voices and **cannot see a
+subset of instruments playing noise**. `aram_mapped` exceeded the 16 MB ARAM
+address space *in the very table used to declare success*, and it was read past.
+**A human listening for ten seconds was the only instrument that worked.**
 
 ---
 
-**Next, in order:** pack a bank (nothing emits one yet) → `dc/src/dc_aica.c`
-behind `DC_AUDIO_AICA=1` default OFF with the software path as the oracle →
-the loop-state burn. ⚠️ **Reverb has no home in the new design and nobody has
-costed it** — a first offload ships with reverb dropped, which is audible.
+## 5. The FPS picture, re-derived from the profile rather than quoted
+
+`dc/build/gprof-runs/hw-title-1958f.flat.txt`, 1,889 frames, **busy = 76.4
+ms/frame** — the machine is ~13 FPS CPU-bound at the *title screen*.
+
+| | ms/frame | % busy |
+|---|---:|---:|
+| `RspStart` (audio) | 14.44 | **18.9** |
+| `dc_gx_backend_submit` | 7.32 | **9.6** |
+| `scif_write` + `scif_flush` | 4.33 | 5.7 ← muted now |
+| `emu64_taskstart_r` | 2.94 | 3.9 |
+| `set_position` | 2.82 | 3.7 |
+| `cull_batch` | 2.67 | 3.5 |
+| `memset` | 2.59 | 3.4 ← **never attributed** |
+
+Top 10 symbols are 55 % of the frame. **There is no cheap win left**: the
+audio offload (~19 %) and the indexed-submit rewrite (~9.6 %) are the only two
+large ones, both multi-session.
+
+⚠️ **`memset` at 3.4 % has never been attributed to a caller** and gprof here
+is flat-only by design, so it needs instrumentation rather than inspection.
 
 ---
 
-## 4. The three things to do next, in order
+## 6. Recommended order
 
-1. **A hardware TOWN profile.** Everything vertex-load-dependent is provisional
-   without it: G-B's 9.34 %, the frustum test's 30 %-of-G3, and
-   `setup_1tri_2tri_1quad`'s 0.6 %. Same disc, `DC_CONSOLE_MUTE=1` next time.
-2. **Run N3 (`DC_NPCDIAG=1`).** The profile shows ~22 distinct `aNPC_*` procs
-   with samples and `aNPC_dma_draw_data_proc` at **zero** — the first evidence
-   the villager actors may EXIST and the break is inside DRAW, which is a
-   different branch of `dc_npcdiag.c`'s decision table than the kb has been
-   aiming at. ⚠️ It may be the demo's villagers, not the player's.
-3. **Decide on audio.** Cheap and measured: the reverb bus mixes 2.17× more
-   samples than the engine produces (`DMEM_2CH_SIZE` is sized for 48 kHz;
-   `DC_AUDIO_MIXRATE=24000` makes 96 samples, the constant says 416). Expensive
-   and now justified: AICA stage B, which deletes `RspStart` outright.
-
-⚠️ **`DC_AUDIO_VOICES`, `DC_AUDIO_MIXRATE` and `DC_AUDIO_SUBDELAY` are already
-applied.** They are spent. Do not re-propose them as new wins.
-
----
-
-## 5. The instrument's own traps, so nobody re-learns them
-
-- **Samples accrue per RESCHEDULE, not per timer tick**, while the gmon header
-  claims `profrate = thd_get_hz()`. Idle is structurally over-represented and
-  `thd_block_now` is the sampler counting its own trigger — **neither is work**.
-  Use non-idle, and say which denominator you used.
-- **There is no call graph** and there never will be: `-pg` is on the link line
-  only, by design. Flat self time only; do not infer callers. A gmon.out from
-  this port has **zero bytes** after the histogram record.
-- **`fopen(…,"a")` is unusable on `fs_fat`** — `O_APPEND` sits inside
-  `O_MODE_MASK`, so every append write returns `EBADF` while the open succeeds.
-- **F5's `section-order.txt` is link-specific.** With `keeplist-town` it hangs
-  Flycast before `main()`; hardware boots it anyway. Profiling builds run
-  `DC_SECTION_ORDER=0`.
-- **A wedge behind a muted console is indistinguishable from a game hang.** It
-  cost four runs and two wrong diagnoses in one session.
+1. **The PMCR burn**, before either rewrite — it says where the other 58
+   ms/frame goes and whether the draw path is icache-bound. Cheapest way to
+   stop guessing.
+2. **The AICA offload** (§1). Incremental, voice by voice.
+3. The indexed-submit rewrite (G-B), `kb/research-sh4zam-gap.md`.

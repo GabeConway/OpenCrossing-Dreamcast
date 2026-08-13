@@ -23,6 +23,22 @@ RATE IS NOT.** Human verdict, restated 2026-08-10 and **authoritative**:
 *"hardware does not run better than the emulator, it runs much worse. the audio
 sounds good though."*
 
+🔴🔴 **AND AS OF 2026-08-13 THE FRAME RATE IS THE GATE ON EVERYTHING ELSE, NOT
+ONE ITEM AMONG SEVERAL.** Human verdict: *"i havent done it because the game
+runs so badly that it feels impossible to get that far."* The town has no
+villagers because nobody has finished Nook's opening job, and nobody has
+because the game is too slow — the villager "bug" was a **progression gate**
+all along (§7 item 1, `kb/villagers-n3-result.md`). **Content is DOWNSTREAM of
+FPS. Do not rank them against each other.**
+
+⭐ **Measured on silicon, from the gprof flat profile: busy CPU is 76.4
+ms/frame at the TITLE SCREEN** — ~13 FPS CPU-bound before the town loads.
+`RspStart` 18.9 %, `dc_gx_backend_submit` 9.6 %, `scif_*` 5.7 %; the top ten
+symbols are 55 % of the frame. **There is no cheap win left.**
+⚠️ ~24 % is available today by burning `AC-DC-20260813-FAST-silent.cdi`
+(audio off + `DC_CONSOLE_MUTE=1`). That is a playability crutch to get the
+opening finished, **not** a fix.
+
 ⚠️ **THIS CORRECTS A CLAIM THIS FILE CARRIED FROM 2026-08-09 TO 2026-08-10.**
 The S14 burn verdict *"definitely runs better on real hardware"* was a
 comparison against **the previous hardware build**, not against Flycast, and
@@ -704,7 +720,25 @@ gprof is **self**. Label it or it will be misread.
 
 ## 7. Still broken, ranked
 
-1. 🔴 **THE TOWN HAS NO VILLAGERS. IT IS NOT A SAVE BUG AND IT IS NOT A FIELD
+1. ✅ **THE VILLAGERS ARE NOT BROKEN — IT IS A PROGRESSION GATE (2026-08-13).
+   READ `kb/villagers-n3-result.md`; EVERYTHING BELOW IN THIS ITEM IS RETIRED.**
+   Six N3 runs traced the whole chain.
+   `aSNMgr_chk_arbeit_and_demo_and_halloween()`'s five terms are "not doing
+   Nook's job", "not in the first intro", "no demo running", "no second demo",
+   "not Halloween" — **every one is the game deliberately suppressing villager
+   spawns during the opening**, and forcing one false just reveals the next.
+   The NPC manager works. `mk: ent=14632 gate=14632 slot=0 called=0` — actor
+   construction is never ASKED, because the spawn list is correctly empty.
+   ⭐ **The town has no villagers because nobody has finished Nook's job, and
+   nobody has because the game is too slow to get there** (human verdict).
+   **The fix is the FRAME RATE.** ⚠️ Still unproven: no run has actually
+   spawned a villager — the clean proof is a human completing the opening on
+   `AC-DC-20260813-FAST-silent.cdi`.
+   🔴 **Do NOT act on the text below. It is kept only as the record of four
+   wrong theories:** the save-path one, the FGDATA/reserve-scan one, N2b, and
+   "nothing constructs a villager ACTOR".
+
+1-old. 🔴 **THE TOWN HAS NO VILLAGERS. IT IS NOT A SAVE BUG AND IT IS NOT A FIELD
    DATA BUG — BOTH DIAGNOSES ARE FALSIFIED (2026-08-09, S15).**
    ⚠️ **This item used to read "it is a save bug, not an asset bug … the VMU
    path is unwired … N2b is the prerequisite". Do not act on that.** The
