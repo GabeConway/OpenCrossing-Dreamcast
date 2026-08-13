@@ -309,6 +309,9 @@ ENVARGS=(
 # W1. Unlike P3 this one reaches BOTH sides: the scratch tree (audioheaders.c's
 # wave-bank tables) AND the compiler (dc_audio.c's boot-time size check), so it
 # must be forwarded or the check silently compiles out while the tables move.
+# N3's arbeit-clear DIAGNOSTIC. Reaches the compiler only (dc/src/dc_npcseed.c),
+# not the scratch tree, but it must be forwarded or it silently compiles out.
+[ -n "${DC_NPC_ARBEIT_CLEAR+x}" ] && ENVARGS+=(-e DC_NPC_ARBEIT_CLEAR="$DC_NPC_ARBEIT_CLEAR")
 [ -n "${DC_AUDIO_S8+x}" ] && ENVARGS+=(-e DC_AUDIO_S8="$DC_AUDIO_S8")
 [ -n "${DC_AUDIO_S8_TABLES+x}" ] && ENVARGS+=(-e DC_AUDIO_S8_TABLES="$DC_AUDIO_S8_TABLES")
 [ -n "${DC_NPCDIAG_PERIOD+x}" ] && ENVARGS+=(-e DC_NPCDIAG_PERIOD="$DC_NPCDIAG_PERIOD")

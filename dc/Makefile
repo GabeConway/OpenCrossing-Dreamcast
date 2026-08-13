@@ -733,6 +733,21 @@ endif
 DC_NPC_SEED ?= 0
 DEFINES += -DDC_NPC_SEED=$(DC_NPC_SEED)
 
+# DC_NPC_ARBEIT_CLEAR=1 — clear this player's personal event flags once, at the
+# roster seeder's hook, so mEv_CheckArbeit() stops returning TRUE.
+# 🔴 A DIAGNOSTIC, NOT A FIX. N3 proved the villager spawn loop never executes
+# because aSNMgr_chk_arbeit_and_demo_and_halloween()'s leftmost term
+# (!mEv_CheckArbeit()) is false on every tick -- the port never finishes Nook's
+# starting job, so FIRSTJOB/HRAWAIT/HRATALK stay set forever. Clearing them
+# skips content the player is meant to play; what it buys is the answer to
+# "is arbeit the LAST wall or only the first visible one".
+# ⚠️ It also clears FIRSTINTRO, so a positive result does not isolate arbeit
+# from the intro. Default 0 = not compiled in. kb/villagers-n3-result.md.
+DC_NPC_ARBEIT_CLEAR ?= 0
+ifneq ($(DC_NPC_ARBEIT_CLEAR),0)
+DEFINES += -DDC_NPC_ARBEIT_CLEAR=$(DC_NPC_ARBEIT_CLEAR)
+endif
+
 # DC_NPC_SEED_MAX=<N> — how many of the 14 roster slots to fill, default 14.
 # ⚠️ IT IS ALSO THE FPS DIAL, and that is not a side effect. now_npc_max is
 # raised to this, and mNpcW_GET_WALK_NUM (m_npc_walk.h:12) is now_npc_max / 3,

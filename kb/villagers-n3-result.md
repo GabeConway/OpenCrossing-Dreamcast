@@ -1,5 +1,64 @@
 # N3 RAN — the villager wall is named (2026-08-13)
 
+## ⭐⭐ THE ANSWER, after four runs: `mEv_CheckArbeit()` IS STUCK TRUE
+
+**Read this first; §4 below is superseded.** The guest pass's OUTER gate was
+split into its five terms and read:
+
+```
+arb[pass]: work=0 intro=0 demo1=0 demo2=0 hallo=0
+gst: calls=10403 arb=10403 blkmax=0 exist=0(ea=0 jevt=0)
+```
+
+The five counters count PASSES and **short-circuit**, so `work` — the leftmost
+term, `!mEv_CheckArbeit()` — is the wall. It is false on every one of 10,403
+ticks. The other four are 0 because they were **never evaluated**, not because
+they failed.
+
+`mEv_CheckArbeit()` (`m_event.c:173`) is TRUE while any of
+`mEv_SAVED_FIRSTJOB_PLR0` / `HRAWAIT` / `HRATALK` is set for this player.
+Those are the flags Nook sets when he hands out the starting job and clears
+when it is finished. **This port never finishes it, so they stay set forever
+and `aSNMgr_chk_arbeit_and_demo_and_halloween()` blocks the villager loop by
+design.** It is not a bug in the NPC manager at all.
+
+### 🔴 THREE READINGS THIS DOCUMENT GOT WRONG, corrected
+
+1. **`ea=0` is NOT an appear-type mismatch** (§4 below). The guest body is
+   `if (!arb && !blkmax)`, so with `arb` TRUE every tick the per-villager loop
+   **never executes** and `ea` counts code that never runs. §4's "two candidate
+   causes" were both wrong because the premise was.
+2. **`mEv_CheckFirstIntro()` is NOT the culprit**, despite `kb/RESUME.md` §8
+   naming it. `intro=0` means it was never even evaluated — `work` fails first.
+3. **`arb=` counts BLOCKED, not passed.** `dc_npcdiag.h` said so in writing
+   ("Its two outer gates count BLOCKED, not passed") and the first analysis
+   here read it as a pass anyway.
+
+⭐ **And the kb's oldest claim about this — `kb/STATE.md` §A and
+`kb/RESUME.md` §7.1's "nothing constructs a villager ACTOR" — is wrong.**
+Construction is never *asked*: `mk: ent=10442 gate=10442 slot=0 called=0`.
+
+### ✅ Also settled by the same run: the villagers config BOOTS
+
+`MEMLEDGER FIT image_span=10705868 additive_heap=2576256 margin=3364020 OK`,
+`ASSET MISSING 0`, deepest scene 18, with `DC_NPCTEX_POOL=1 DC_NPCMDL_POOL=1
+DC_NPC_SEED=1` **and audio on** — i.e. the RAM profile of the villagers burn.
+
+### The next step, and what it is not
+
+`DC_NPC_ARBEIT_CLEAR=1` (`dc/src/dc_npcseed.c`) calls the game's own
+`mEv_ClearPersonalEventFlag()` once at the seeder hook.
+🔴 **It is a DIAGNOSTIC, not the fix** — it skips content the player is meant
+to play. It answers exactly one question: is arbeit the LAST wall, or the first
+visible one? ⚠️ It also clears `FIRSTINTRO`, so a positive result does **not**
+isolate arbeit from intro; splitting them is the follow-up.
+
+**The real fix is making Nook's starting job completable and persisted**, which
+is the same save-path problem that keeps the town reseeding every boot.
+
+---
+
+
 **The diagnostic the kb has been asking to run since 2026-08-10 has now run.**
 `DC_NPCDIAG=1 DC_NPC_SEED=1 DC_NPCTEX_POOL=1 DC_NPCMDL_POOL=1`, plus
 `DC_AUTOSTART=300` and `-DDC_AUTOWALK=1`, 900 s in Flycast, 12,087 logic ticks.

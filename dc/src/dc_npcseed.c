@@ -163,6 +163,73 @@ static const dc_npc_seed_row s_roster[] = {
 };
 #define DC_NPC_ROSTER_N ((int)(sizeof(s_roster) / sizeof(s_roster[0])))
 
+/* ==========================================================================
+ * DC_NPC_ARBEIT_CLEAR — the ONE experiment that says whether arbeit is the
+ * last villager blocker, or only the first one we can see.
+ * ==========================================================================
+ * N3, 2026-08-13, four runs in: the villager spawn loop NEVER EXECUTES. The
+ * guest pass is `if (!aSNMgr_chk_arbeit_and_demo_and_halloween() && ...)` and
+ * the split counters read
+ *
+ *     arb[pass]: work=0 intro=0 demo1=0 demo2=0 hallo=0
+ *
+ * with `work` the leftmost term. They short-circuit, so the other four are 0
+ * because they were never evaluated -- `!mEv_CheckArbeit()` is false on every
+ * tick and nothing to its right ever runs.
+ *
+ * mEv_CheckArbeit() (m_event.c:173) is TRUE while any of FIRSTJOB / HRAWAIT /
+ * HRATALK is set for this player. Those are SAVED flags: the game sets them
+ * when Nook hands out the starting job and clears them when it is finished.
+ * This port never finishes it, so they are set forever and the villager pass
+ * is blocked BY DESIGN rather than by a bug in the NPC manager.
+ *
+ * 🔴 THIS IS A DIAGNOSTIC, NOT THE FIX. Clearing the flags skips content the
+ * player is supposed to play. What it buys is a decisive answer to the only
+ * question left: is arbeit the LAST wall, or just the first one visible?
+ *   villagers appear  -> the whole chain works and the real fix is making
+ *                        Nook's job completable (and persisting it).
+ *   villagers do NOT  -> there is another wall behind this one, and N3 gets
+ *                        pointed at whatever `gst:` stalls on next.
+ *
+ * mEv_ClearPersonalEventFlag (m_event.c:135) is the game's own function for
+ * this and clears FIRSTJOB, FIRSTINTRO, HRAWAIT, HRATALK, FJOPENQUEST and
+ * GATEWAY together -- deliberately reused rather than poking flags by hand, so
+ * the set cleared is the set the game itself considers "this player's personal
+ * event state". ⚠️ It clears FIRSTINTRO too, which is the OTHER long-standing
+ * suspect (kb/RESUME.md §8), so a positive result here does NOT isolate arbeit
+ * from intro. Splitting them is the follow-up if this comes back positive.
+ *
+ * Default 0 -- the call is not compiled in at all. */
+#ifndef DC_NPC_ARBEIT_CLEAR
+#define DC_NPC_ARBEIT_CLEAR 0
+#endif
+
+#if (DC_NPC_ARBEIT_CLEAR) > 0
+extern void mEv_ClearPersonalEventFlag(int player_no);
+extern int  mEv_CheckArbeit(void);
+
+static void dc_npc_arbeit_clear(void)
+{
+    int pno = (int)Common_Get(player_no);
+    int before, after;
+
+    if (pno < 0 || pno >= PLAYER_NUM) {
+        DC_LOGE("[DC/ARBEIT] player_no=%d out of range, not clearing\n", pno);
+        return;
+    }
+
+    before = mEv_CheckArbeit();
+    mEv_ClearPersonalEventFlag(pno);
+    after = mEv_CheckArbeit();
+
+    DC_LOGE("[DC/ARBEIT] player %d: mEv_CheckArbeit %d -> %d "
+            "(DC_NPC_ARBEIT_CLEAR=1, DIAGNOSTIC -- skips Nook's job)\n",
+            pno, before, after);
+}
+#else
+static void dc_npc_arbeit_clear(void) { }
+#endif
+
 void dc_npc_seed(void)
 {
     Animal_c *animals = Save_GetPointer(animals[0]);
@@ -170,6 +237,10 @@ void dc_npc_seed(void)
     int pre_ids = 0, pre_homed = 0;
     int made_id = 0, made_home = 0;
     int i;
+
+    /* Independent of the roster, so order against the `pre` measurement does
+     * not matter -- it touches event flags, never animals[]. */
+    dc_npc_arbeit_clear();
 
     if (want > DC_NPC_ROSTER_N) want = DC_NPC_ROSTER_N;
     if (want > ANIMAL_NUM_MAX)  want = ANIMAL_NUM_MAX;
