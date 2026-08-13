@@ -307,6 +307,42 @@ Full result, the three traps it cost, and the two build lines:
 
 ---
 
+## 🔴 THE QUEUE IS RE-RANKED BY THE FIRST HARDWARE PROFILE (2026-08-12)
+
+The evidence is `kb/RESUME.md` §6c. Three things moved:
+
+1. ⭐⭐ **AUDIO IS NOW THE TOP PERF ITEM AND IT WAS BOTTOM OF THE QUEUE.**
+   `RspStart` is **15.7 % of non-idle / ~21 % of work** on silicon and **2.18×
+   its Flycast share**; audio as a group is ~25 % of work and 2.13×. It is the
+   ONLY subsystem that measurably gets worse on hardware. Old ranked action 8
+   (AICA stage B) was priced at nothing because no instrument had ever seen it.
+   ⚠️ Its blockers are unchanged and hard (`kb/audio-cpu-cost.md` §3.5).
+2. 🔴 **THE ICACHE PREDICTION FOR `dc_gx_backend_submit` IS FALSIFIED** — its
+   share **shrank** 0.81× on hardware, as did the whole GX setter family. This
+   does NOT clear the draw path of being icache-bound (a share cannot see a
+   uniform stall); it kills one named suspect. `istall` on a PMCR burn is still
+   the only instrument for the general claim.
+3. ⭐ **G-B IS SMALLER THAN ADVERTISED, AND NOW SPLIT.** The 13.31 ms block is
+   ~1.10 % of work index expansion and ~9.34 % setters/staging. G-B targets the
+   staging half only. Re-size it in the TOWN before starting a multi-session
+   rewrite.
+
+**Shipped the same day, both with kill switches:** P3 (`DC_RSPSIM_NOFP`, the
+bit-exact `f32`→`s32` in `A_CMD_ENVMIXER`, ~11 % of `RspStart`) and `dc_ctz32`
+(`-DDC_NO_CTZ_LUT`, ~0.62 % of work).
+
+🔴 **`DC_CONSOLE_MUTE=1` IS NOW A PRECONDITION FOR EVERY HARDWARE MEASUREMENT.**
+`scif_*` is ~4.8 % of non-idle with no cable attached; Flycast reads it at
+0.50 % and so understates it ~8× as a share of work.
+
+⚠️ **THE PROFILE IS THE TITLE SCREEN'S DEMO SCENE**, not the walked town. It has
+live actors, camera and music, so it transfers further than "title screen"
+implies — but every vertex-load-dependent number in it (G-B's share, the
+frustum test, `setup_1tri_2tri_1quad`) needs a town run to be final. The chord
+(L+R+START) exists for exactly that and has now been used twice.
+
+---
+
 ## Ranked next actions
 
 ⭐⭐ **USER DIRECTIVE 2026-08-09, end of session 15: the next two are VILLAGERS

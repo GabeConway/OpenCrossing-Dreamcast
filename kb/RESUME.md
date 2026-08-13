@@ -488,6 +488,200 @@ by a four-build matrix. ⚠️ **Hardware boots it anyway**, so this is Flycast-
 
 ---
 
+## 6c. 🔴 WHAT THE FIRST HARDWARE PROFILE ACTUALLY SAID (2026-08-12)
+
+**The scene was the TITLE SCREEN RUNNING ITS DEMO** — a live town with actors,
+camera and music, not a static card (human confirmed). So these shares transfer
+to gameplay far better than "title screen" suggests, but the vertex load is not
+the walked town's. 1,958 presented frames, 100 Hz, F5 OFF, console UNMUTED.
+
+🔴🔴 **THE IDLE SHARE IS NOT A SHARE — IT IS A WRAPPED 16-BIT COUNTER, AND SO IS
+`thd_block_now`. NEVER QUOTE EITHER.** Verified against KOS source and against a
+disassembly of `hw.elf`, 2026-08-12:
+
+- `HIST_COUNTER_TYPE` (`gmon.c`) is a **uint16**. With the profiler armed the
+  histogram thread sits in `STATE_POLLING` forever, so `thd_idle_task`'s
+  `thd_has_polls()` branch takes `thd_pass()` instead of `arch_sleep()` — **idle
+  SPINS**. It self-samples at order 10^5/s into one bin that **wraps every
+  0.2-0.5 s of idle**. "65.78 %" is modular residue. Proof: the `sleep`
+  instruction's bin has **zero** samples in all three runs while the
+  `thd_block_now` call site one bin away is saturated.
+- `thd_block_now` saves **PR as the "PC"** (`thdswitch.s`, `sts.l pr,@-r4`), so
+  its bin is context-switch accounting, not blocking time. At 100 Hz, ticks
+  landing in that 5-instruction window would need ~10^9 switches.
+- ⚠️ **AND THE BIAS RUNS THE OTHER WAY FROM WHAT THIS KB SAID.** The callback
+  only counts if the outgoing thread is still `STATE_RUNNING`, so **voluntarily
+  blocked threads are NEVER sampled** and blockers are **under**-represented.
+  Device-IRQ reschedules never sample either. That is why
+  `dc_dvd_read_yielding()` has **zero** samples — not because it is cheap.
+
+✅ **WHAT SURVIVES IS THE USEFUL HALF.** The non-idle, non-`thd_block_now` bins
+are **honest 100 Hz timer-IRQ samples of real CPU time** — they cannot wrap
+(that would need >10 min of CPU in one 8-byte bin) and no game code yields while
+runnable. Quote those, in **ms/frame**, and say "busy" not "non-idle".
+
+⭐⭐ **THE NUMBER THIS PROJECT NEVER HAD: 13,580 busy ticks / 1,889 frames =
+71.9 ms of CPU PER PRESENTED FRAME. The title/demo is capped at ~14 FPS by CPU
+alone, before any waiting.**
+
+| family | ms/frame | % of busy |
+|---|---:|---:|
+| **audio** (`RspStart` + Nas/Jac/snd/spu) | **17.2** | **23.9** |
+| emu64 (incl. `cull_batch`) | 15.4 | 21.4 |
+| `dc_gx`/`dc_pvr` backend | 15.3 | 21.2 |
+| GX shim (`GX*`/`PSMTX*`) | 7.0 | 9.7 |
+| game logic (`cKF_*`, `mCoBG_*`, actors) | 5.9 | 8.3 |
+| `mem*` (incl. newlib's hidden `L_*` labels) | 4.8 | 6.7 |
+| **console/serial — removable** | **3.9** | **5.4** |
+
+⭐ **Steady-state disc work is 0.02 ms/frame.** Whatever makes the TITLE slow on
+hardware, it is not I/O. (Says nothing about the town with T1 demand loading.)
+
+🔴 **THE INSTRUMENT DISTORTS THE MACHINE, IN A FLYCAST-INVISIBLE WAY.** Armed,
+idle spins the full context save/restore (~464 B through the operand cache per
+iteration, `movca.l` allocating lines) instead of sleeping — every idle episode
+cache-scrubs the next busy period. Flycast models no cache, so this perturbation
+exists **only on the machine P2 exists to measure**.
+
+⭐ **THE FIX IS ONE LINE**, in `gmon.c:histogram_callback`:
+`if(!irq_inside_int()) return cxt->running_thread ? 0 : 1;` — tick-driven
+scheduler entries run inside the timer IRQ, voluntary passes do not. That makes
+P2 a true 100 Hz time-proportional sampler and idle/seconds/wall-clock/FPS all
+become real. Needs a patched `libgprof.a` in the SDK image. **Do this before the
+next profiling burn.**
+
+⚠️ The `%ni` / `%work` renormalisations quoted in the first writeup of this
+session are superseded by the ms/frame table above.
+
+### ⭐⭐ THE ICACHE PREDICTION IS FALSIFIED, AND AUDIO IS THE REAL OUTLIER
+
+`kb/hardware-profiling.md` §7 predicted in writing that `dc_gx_backend_submit`
+(10,036 B = 1.24× the icache) is "where the hardware run's share grows".
+
+| symbol / family | Flycast | hardware | HW/FC |
+|---|---:|---:|---:|
+| `RspStart` | 7.20 | **15.69** | **2.18** |
+| `dc_gx_backend_submit` | 9.79 | 7.96 | **0.81** |
+| `GXPosition3f32` | 3.26 | 1.21 | 0.37 |
+| `vid_waitvbl` | 12.62 | 1.51 | **0.12** |
+| **audio as a group** | 9.05 | **19.26** | **2.13** |
+
+⚠️ These are shares of a denominator that includes the wrapped idle bin, so read
+them as **ratios between the two platforms** (which is what they are for) and
+not as fractions of the frame. The honest per-frame figures are the ms/frame
+table above. Audio's growth also survives in ms/frame: it is the largest busy
+family at 17.2 ms of a 71.9 ms frame, against 9.4 % of Flycast's busy time.
+
+**It shrank.** So does the whole GX setter family. ⚠️ **Read this precisely: a
+SHARE only detects DIFFERENTIAL slowdown.** A uniformly icache-starved draw path
+would leave every share unchanged, so "the draw path is icache-bound" is
+UNTOUCHED and `dc_pmcr.c`'s `istall` is still its only instrument. What is dead
+is "`dc_gx_backend_submit` is the icache outlier."
+
+⭐ **`vid_waitvbl` collapsing 12.6 → 1.5 % is the quantitative form of the
+standing human verdict.** Per presented frame: Flycast 0.68 samples, hardware
+0.13. **The hardware run essentially never waits for vblank — the frame has no
+slack.**
+
+### ⭐ AUDIO IS THE LARGEST ACTIONABLE SUBSYSTEM ON SILICON
+
+`RspStart` (`src/static/jaudio_NES/internal/rspsim.c`, the software N64 RSP
+microcode simulator) is **14.1 ms/frame of a 71.9 ms frame — the #1 symbol on
+the machine**, and audio as a group is **17.2 ms/frame, 23.9 % of busy CPU**.
+Its hot bins cluster at `RspStart+0x138..+0x158` (~250 ticks in one 6,248 B
+function), which is where an objdump should start. Source-line attribution
+through the histogram's 8-byte bins splits it: ADPCM decode 29 %, ENVMIXER 26 %,
+RESAMPLE 21 %, `Jac_Resample16` 11 %, MIXER 11 %.
+⚠️ Part of the 2.18× is confounded — the hardware run had more music playing
+(`Nas_MainCtrl` 2/1624 vs 75/17382). The ABSOLUTE share is not confounded.
+🔴 **`DC_AUDIO_VOICES=12`, `DC_AUDIO_MIXRATE=24000` and `DC_AUDIO_SUBDELAY=0`
+were ALREADY APPLIED in this build — they are spent, not available wins.**
+⭐ **This re-prices `kb/STATE.md` ranked action 8 (AICA stage B) from a
+content/RAM project to a ~20 %-of-CPU project.** Its blockers (the ADPCM
+step-index discontinuity, the 65,536-sample channel limit, bank 153's
+1,971,016 B) are unchanged — better justification does not make them cheaper.
+
+### ⭐ THE 13.31 ms BLOCK SPLITS, AND IT IS ~1 : 12
+
+`kb/STATE.md` has said for weeks that the block is "`dl_G_TRIN`'s index
+expansion PLUS our own `GX*` setters, never separated". A flat profile separates
+them by construction:
+
+| half | %work |
+|---|---:|
+| `dl_G_TRIN` + `TRIN_INDEPEND` + `TRI1` + `TRI2` — index expansion | **1.10** |
+| setters + `set_position` + `dc_gx_commit_vertex` — the staging half | **9.34** |
+
+**G-B targets the 9.34 % and can touch almost none of the 1.10 %.**
+⚠️ Quote `dl_G_TRIN*` as 145 samples TOGETHER — `dl_G_TRIN_INDEPEND` alone shows
+3, which for the town's dominant opcode means it inlined into `dl_G_TRIN` in the
+`-O3` `emu64.c` TU. ⚠️ And G1's "TRIN is 73 % of the draw" is **inclusive**;
+gprof is **self**. Label it or it will be misread.
+
+### Free money, already banked or one flag away
+
+- 🔴 **`scif_write` is 4.17 %ni + `scif_flush` 0.54 % — ~4.8 % of non-idle in
+  the serial console, with NO CABLE ATTACHED.** `DC_CONSOLE_MUTE=1` (armed at
+  `DC_CONSOLE_MUTE_FRAME`, never at `main()`) is now a **precondition for every
+  hardware measurement**, not an optimization. Flycast measures it at 0.50 % and
+  therefore understates it ~8× as a share of work.
+- ✅ **P3 SHIPPED** — `A_CMD_ENVMIXER`'s four `f32` accumulators retyped to
+  `s32` via `make_src_shrink.py`. **Bit-exact and provably so**: the terms are
+  `>>16/18/19` of an s16 × u16, so the sum is < 46,000 and the final add < 2^24,
+  which f32 represents exactly — truncation is the identity. ~11 % of
+  `RspStart`. Kill switch `DC_RSPSIM_NOFP=0`.
+- ✅ **`dc_ctz32` SHIPPED** — `__ctzsi2` was 0.62 % of work because SH-4 has no
+  CTZ and every `__builtin_ctz` was a `jsr` into a 96-byte libgcc loop, on the
+  per-referenced-vertex mark walks in `cull_batch` and in `dc_gx_mark_dirty`.
+  De Bruijn LUT in `dc_platform.h`. Kill switch `-DDC_NO_CTZ_LUT`. Changes no
+  logic, so the gate is `[EMU64C]` counters byte-identical.
+
+### Still on the table, priced, NOT done
+
+- **The texture-bind hit path is ~3.65 % of work and still hashes.**
+  `tlut_content_hash()` walks up to 512 B byte-at-a-time on EVERY bind (~109 a
+  frame) — the exact cost T1 removed for textures and left for palettes — plus
+  a ~132 B `memset` of which only 28 B is the key, plus `tlut_is_be()`'s 16-slot
+  scan. 🔴 **Not attempted: `probe` is NOT lookup-only** (`memcpy(e, &probe,
+  sizeof …)` on the miss path, and `probe.aprof` is written), so the memset is
+  load-bearing and any key change risks aliasing — which is how T1 shipped two
+  garbled-texture bugs. Needs a screenshot pair.
+- **The reverb bus is sized by a constant, not the mixrate.** `DMEM_2CH_SIZE` =
+  416 samples, sized for 48 kHz; at `DC_AUDIO_MIXRATE=24000` the engine makes
+  96. **It mixes 2.17× more samples than exist.** Another instance of "re-cost
+  what a lifted constraint sized". ~0.9 %, medium confidence — the attribution
+  of `A_CMD_MIXER` to the reverb bus is inferred, not measured.
+- **`MAC.W` the resampler FIRs** — up to ~2.7 %, medium. ⚠️ Do NOT extend it to
+  the ADPCM chain without a proven bound: `sp9C[l] << temp_r19` with
+  `temp_r19 ∈ 0..15` can exceed s16.
+
+### Corrections this profile forces on the kb
+
+1. `kb/hardware-profiling.md` §8 calls `dc_dvd_read_yielding()` "the worst
+   offender" for reschedule over-representation. **It has ZERO samples.** A
+   function that calls a blocking primitive accrues no self time — the
+   primitive does. The real artefact is `thd_block_now`.
+2. `kb/STATE.md`'s `fus=` figure put the frustum test at 4.5 % of G3. Hardware
+   says `dc_gx_aabb_offscreen_gh` is **~30 % of G3** (1.69 % of work). The
+   conclusion (G-F retired) probably survives at 1.69 %; the number does not.
+   ⚠️ `fus=` was measured pre-S14 on a different implementation.
+3. `dc_pvr_texture.c`'s comment "512 × 68 (sizeof `dc_tex_entry_t`)" is **stale
+   by ~64 B** — it predates `aprof[64]`.
+4. `icache_map.py`'s `DEFAULT_HOT` does **not** include `^_RspStart`, so the
+   "16.40× the icache" hot-set figure omits a 6,248 B function that is 20 % of
+   the work. ⚠️ And ordering cannot save it: at 6,248 B in an 8 KB
+   direct-mapped cache it aliases 76 % of the sets wherever it is placed.
+5. 🔴 **VILLAGER ACTOR PROCS HAVE SAMPLES.** ~22 distinct `aNPC_*` functions
+   (`_actor_move`, `_think_main_proc`, `_anime_proc`, `_ctrl_umbrella`,
+   `_circleRangeCheck`, …) form a coherent think→move→draw tree, with
+   `aNPC_dma_draw_data_proc` at **zero**. §7.1 and `kb/STATE.md` §A both say
+   nothing constructs a villager actor. This is the first evidence the actors
+   may EXIST and the break is INSIDE DRAW — a different branch of
+   `dc_npcdiag.c`'s decision table. ⚠️ It may be the demo's town rather than the
+   player's. **Run N3 before more construction work.**
+
+---
+
 ## 7. Still broken, ranked
 
 1. 🔴 **THE TOWN HAS NO VILLAGERS. IT IS NOT A SAVE BUG AND IT IS NOT A FIELD

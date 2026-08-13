@@ -83,7 +83,8 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 
 | order | file | why |
 |---|---|---|
-| 0 | **`kb/RESUME.md`** | **fresh context: start here.** Where the port is, the build lines, the **twelve measurement rules**, the instruments, what is still broken |
+| 0 | **`kb/RESUME.md`** | **fresh context: start here.** Where the port is, the build lines, the **twelve measurement rules**, the instruments, what is still broken. §6b/§6c are the hardware profiler and what it measured |
+| 0.5 | **`kb/next-session.md`** | **the paste-me seed prompt after a context flush**, plus the handful of facts that live only in a human's head (which SD interface, how the card must be partitioned, which disc is safe to burn) and where the profile artefacts are |
 | 1 | **`kb/STATE.md`** | the current numbers, the fit inequality, the ranked queue. Short by design |
 | 2 | `kb/closed.md` | **read before proposing any RAM / size / architecture idea** — what is already dead, and why |
 | 3 | `kb/traps.md` | read before touching the build, harness, prelude, or instrumentation |

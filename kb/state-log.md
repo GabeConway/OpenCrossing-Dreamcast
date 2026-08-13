@@ -7,6 +7,81 @@ of it and no longer do. Entries are dated snapshots: a number here was true when
 it was written and is **not** a claim about today. For what is true now, read
 `kb/STATE.md`.
 
+## 2026-08-12 (session 16b) — THE PROFILE READ: AUDIO IS THE FRAME, THE ICACHE
+## SUSPECT IS CLEARED, AND THE INSTRUMENT'S IDLE NUMBER IS A WRAPPED COUNTER
+
+Four agents read the two hardware `gmon.out`s. Two of them went under gprof and
+parsed the ELF, the DWARF line table and the raw 8-byte bins directly.
+
+⭐⭐ **THE NUMBER THIS PROJECT NEVER HAD.** 13,580 busy ticks / 1,889 presented
+frames = **71.9 ms of CPU per frame — the title/demo is capped at ~14 FPS by CPU
+alone**, before any waiting.
+
+| family | ms/frame | % of busy |
+|---|---:|---:|
+| **audio** | **17.2** | **23.9** |
+| emu64 | 15.4 | 21.4 |
+| `dc_gx`/`dc_pvr` | 15.3 | 21.2 |
+| GX shim | 7.0 | 9.7 |
+| game logic | 5.9 | 8.3 |
+| `mem*` | 4.8 | 6.7 |
+| console (removable) | 3.9 | 5.4 |
+
+🔴 **THE IDLE SHARE IS AN ARTEFACT AND SO IS `thd_block_now`.** `HIST_COUNTER_TYPE`
+is a **uint16**; with the profiler armed the histogram thread sits in
+`STATE_POLLING`, so `thd_idle_task` spins on `thd_pass()` instead of
+`arch_sleep()` and self-samples ~10^5/s into a bin that **wraps every 0.2-0.5 s**.
+Proof: the `sleep` instruction's bin has zero samples in all three runs.
+`thd_block_now` saves **PR as the "PC"**. And the callback only counts a thread
+still `STATE_RUNNING`, so **blocked threads are never sampled** — blockers are
+UNDER-represented, the opposite of what `kb/hardware-profiling.md` §8 claimed,
+which is why `dc_dvd_read_yielding()` shows zero samples.
+⚠️ **Two readings were built on the bad half before this was found**, mine
+included: "hardware blocks 5× more than Flycast" (it is boot, and 85 % of those
+samples were banked by frame 69) and the `%ni` renormalisations. The busy-side
+bins are honest 100 Hz timer samples and everything above rests only on those.
+⭐ **One line fixes it** — `if(!irq_inside_int()) return …` in
+`gmon.c:histogram_callback`. Needs a patched `libgprof.a` in the SDK image.
+
+🔴 **THE ICACHE PREDICTION IS FALSIFIED.** `kb/hardware-profiling.md` §7 said
+`dc_gx_backend_submit` (1.24× the icache) is "where the hardware run's share
+grows". It **shrank** — 9.79 → 7.96 (0.81×), and the whole GX setter family with
+it (`GXPosition3f32` 0.37×). The one grower is audio, 2.13× as a family.
+⚠️ A share only sees DIFFERENTIAL slowdown, so "the draw path is icache-bound"
+is untouched; one named suspect died. `istall` is still its only instrument.
+⭐ `vid_waitvbl` collapsed 12.62 → 1.51 % (0.68 → 0.13 samples/frame): **the
+hardware frame never waits for vblank.**
+
+⭐ **THE 13.31 ms BLOCK SPLITS ~1 : 12** — index expansion 1.10 % of work, the
+setters/staging half 9.34 %. G-B targets the staging half and can touch almost
+none of the expansion.
+
+**Shipped the same evening, both with kill switches and both compile-verified:**
+P3 (`DC_RSPSIM_NOFP`) retypes `A_CMD_ENVMIXER`'s four `f32` accumulators to
+`s32` through `make_src_shrink.py` — **bit-exact**, because the terms are
+`>>16/18/19` of an s16 × u16 so the sum is < 46,000 and the final add < 2^24,
+which f32 represents exactly; ~11 % of `RspStart`. And `dc_ctz32`
+(`-DDC_NO_CTZ_LUT`), a de Bruijn LUT replacing `__builtin_ctz`, which on SH-4
+was a `jsr` into a 96-byte libgcc loop on the per-referenced-vertex mark walks —
+0.62 % of work, changes no logic.
+
+**Priced and deliberately NOT attempted:** the texture-bind hit path (~3.65 % of
+work — `tlut_content_hash()` still walks up to 512 B per bind, the cost T1
+removed for textures and left for palettes). `probe` is **not** lookup-only
+(`memcpy(e, &probe, …)` on the miss path), so the oversized `memset` is
+load-bearing and any key change risks the aliasing that shipped two garbled-
+texture bugs in S15. Needs a screenshot pair.
+
+🔴 **VILLAGER ACTOR PROCS HAVE SAMPLES** — ~22 distinct `aNPC_*` functions in a
+coherent think→move→draw tree, with `aNPC_dma_draw_data_proc` at **zero**. First
+evidence the actors may EXIST and the break is inside DRAW. Run N3.
+
+⚠️ **The scene was the title screen's DEMO** (human confirmed) — live actors,
+camera and music, so it transfers further than "title screen" implies, but every
+vertex-load-dependent figure needs a town run.
+
+---
+
 ## 2026-08-12 (session 16) — P2 WORKS. THE §6 INSTRUMENT PRODUCED A REAL FLAT
 ## PROFILE, AFTER THREE BUGS THAT ALL FAILED SILENTLY
 

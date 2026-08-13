@@ -2337,8 +2337,54 @@ def apply_rules(text, rel, rules):
     return text
 
 
+# ---------------------------------------------------------------------------
+# P3 — rspsim.c: take the floating point out of A_CMD_ENVMIXER.
+# ---------------------------------------------------------------------------
+# ⭐ MEASURED ON REAL HARDWARE, 2026-08-12. The first gprof profile off a retail
+# Dreamcast put `RspStart` at 15.7 % of non-idle / ~21 % of real work — the
+# second-largest symbol on the machine and 2.18x its Flycast share, i.e. the one
+# subsystem that genuinely gets WORSE on silicon. Localising samples to source
+# lines through the histogram's 8-byte bins put 11.4 % of RspStart on these four
+# declarations and the four adds that consume them.
+#
+# THE CHANGE IS BIT-EXACT, AND THAT IS PROVABLE RATHER THAN HOPED:
+#   var_r4_7 and friends are s16-derived, so |x| <= 32768.
+#   envParam1_0 is a u16, so |x * envParam1_0| < 2^31.
+#   The three terms are >>16, >>18, >>19, so their sum is < 46,000.
+#   var_r20[] is s16, so the final sum is < 78,000 < 2^24.
+# Every value is therefore exactly representable in an f32, and truncating an
+# exactly-represented integer back to s32 is the identity. No rounding mode, no
+# denormal, no edge case — this is a decomp artifact, not a design decision.
+# kb/audio-cpu-cost.md §8 suspected it; the hardware profile priced it.
+#
+# WHY A SHRINK RULE AND NOT AN EDIT: CLAUDE.md §1 — `src/` is never edited to
+# make it compile or to make it fast. The whole decomp tree carries five
+# TARGET_DC branches and this does not deserve a sixth.
+#
+# KILL SWITCH: --rspsim-nofp=0 emits no rule at all, so rspsim.c is not swapped,
+# nothing lands in shrink.list, and the build is byte-identical to before.
+def _rspsim_rules(nofp):
+    if not nofp:
+        return []
+    return [("src/static/jaudio_NES/internal/rspsim.c", "swap", [
+        (4,
+         r"^(\s*)f32 (var_f[2456]) = ",
+         lambda m: "%ss32 %s = " % (m.group(1), m.group(2))),
+    ])]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the DC_SRC_SHRINK tree.")
+    ap.add_argument("--rspsim-nofp", type=int,
+                    default=int(os.environ.get("DC_RSPSIM_NOFP", "1") or "1"),
+                    choices=(0, 1),
+                    help="P3. 1 (the default) retypes A_CMD_ENVMIXER's four "
+                         "f32 accumulators to s32 in rspsim.c. The values are "
+                         "provably < 2^24 so the rewrite is BIT-EXACT, not an "
+                         "approximation. 0 emits no rule and rspsim.c is not "
+                         "swapped at all -- a byte-identical revert. Measured "
+                         "on hardware at ~11 % of RspStart, which is itself "
+                         "~21 % of non-idle work.")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--audio", type=int, default=0, choices=(0, 1),
                     help="the build's DC_AUDIO. 0 (the default, matching "
@@ -2419,7 +2465,8 @@ def main():
     # src/actor/npc/ac_npc_ctrl.c_inc entry, and all need the parsed flags.
     rules_all = (RULES + [_s1c_rules(npctex, npcmdl, npcdiag)]
                  + _s11_reset_rules(npctex, npcmdl, npcseed)
-                 + _s7_rules(bgtex) + _audio_rules(audio))
+                 + _s7_rules(bgtex) + _audio_rules(audio)
+                 + _rspsim_rules(bool(args.rspsim_nofp)))
     # N3's other two TUs exist ONLY at --npcdiag=1. That is what keeps 0 a
     # byte-identical revert: no extra entry in shrink.list, no extra shadow on
     # the include path. The guard for the mismatched-tree case lives in

@@ -642,7 +642,7 @@ static int cull_batch(emu64 *self)
         for (w = 0; w < 4 && agree; w++) {
             unsigned int m = mark[w];
             while (m) {
-                int b = __builtin_ctz(m);
+                int b = dc_ctz32(m);
                 m &= m - 1u;
                 if ((self->vertices[w * 32 + b].flag & MTX_NONSHARED)
                         != want_d) {
@@ -782,7 +782,7 @@ static int cull_batch(emu64 *self)
         for (w = 0; w < 4; w++) {
             unsigned int m = mark[w];
             while (m) {
-                int b = __builtin_ctz(m);
+                int b = dc_ctz32(m);
                 Vertex *v = &self->vertices[w * 32 + b];
                 float a, c, d;
                 m &= m - 1u;

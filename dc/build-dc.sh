@@ -138,13 +138,15 @@ if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
          "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
          "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
          "DC_NPC_SEED=${DC_NPC_SEED:-0}" \
-         "DC_NPCDIAG=${DC_NPCDIAG:-0})"
+         "DC_NPCDIAG=${DC_NPCDIAG:-0}" \
+         "DC_RSPSIM_NOFP=${DC_RSPSIM_NOFP:-1})"
     python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
         --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
         --npc-seed="${DC_NPC_SEED:-0}" \
-        --npcdiag="${DC_NPCDIAG:-0}"
+        --npcdiag="${DC_NPCDIAG:-0}" \
+        --rspsim-nofp="${DC_RSPSIM_NOFP:-1}"
 fi
 
 ENVARGS=(
@@ -262,6 +264,10 @@ ENVARGS=(
 # be a preprocessor error rather than an off switch. make_src_shrink.py above
 # has already seen the value.
 [ -n "${DC_NPCDIAG+x}" ] && ENVARGS+=(-e DC_NPCDIAG="$DC_NPCDIAG")
+# P3, the rspsim ENVMIXER de-float. It reaches the SCRATCH TREE (above), not the
+# compiler, so the container never needs it -- but forward it anyway so
+# dc/build/flags.stamp records which tree the objects were built against.
+[ -n "${DC_RSPSIM_NOFP+x}" ] && ENVARGS+=(-e DC_RSPSIM_NOFP="$DC_RSPSIM_NOFP")
 [ -n "${DC_NPCDIAG_PERIOD+x}" ] && ENVARGS+=(-e DC_NPCDIAG_PERIOD="$DC_NPCDIAG_PERIOD")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has

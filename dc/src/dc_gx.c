@@ -563,13 +563,13 @@ void dc_gx_mark_dirty(unsigned int flag) {
     DC_GXAPI(s_api_dirty);
 #endif
     if (s_flush_pending_attr) {
-        pc_gx_flush_reason[__builtin_ctz(flag)]++;
+        pc_gx_flush_reason[dc_ctz32(flag)]++;
         s_flush_pending_attr = 0;
     }
     g_gx.dirty |= flag;
     m = flag & DC_GX_DIRTY_UNIFORM_MASK;
     while (m) {
-        g_gx.group_gen[__builtin_ctz(m)]++;
+        g_gx.group_gen[dc_ctz32(m)]++;
         m &= m - 1;
     }
 }

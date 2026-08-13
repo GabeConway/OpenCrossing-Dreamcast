@@ -764,6 +764,23 @@ endif
 DC_NPCDIAG ?= 0
 DEFINES += -DDC_NPCDIAG=$(DC_NPCDIAG)
 
+# =============================================================================
+# DC_RSPSIM_NOFP — P3: take the float out of A_CMD_ENVMIXER (KILL SWITCH: =0)
+# =============================================================================
+# ⭐ EARNED BY THE FIRST HARDWARE PROFILE (2026-08-12). `RspStart` is 15.7 % of
+# non-idle / ~21 % of real work on a retail Dreamcast and 2.18x its Flycast
+# share — the ONE subsystem that measurably gets worse on silicon, against a
+# renderer whose share actually SHRANK. Source-line attribution through the
+# gmon histogram put ~11 % of RspStart on four `f32` accumulators that hold
+# provably-integer values (< 2^24, so f32 represents them exactly and the
+# truncation back to s32 is the identity — the rewrite is BIT-EXACT).
+#
+# It is applied by tools/dcstub/make_src_shrink.py, NOT by a -D and NOT by
+# editing src/ (CLAUDE.md §1). This variable exists only so the choice is
+# recorded in flags.stamp and so a changed value forces the rebuild it should.
+# =0 emits no rule, rspsim.c is not swapped, and the tree is byte-identical.
+DC_RSPSIM_NOFP ?= 1
+
 # DC_NPCDIAG_PERIOD=<N> — presented frames between [DC/NPCDIAG] lines, default
 # 300 (~15 s at the town's 20 FPS). Rounded UP to a multiple of 30: dc_vi.c only
 # offers the instrument a call once per 30-frame window. Turn it DOWN only on
@@ -2086,6 +2103,7 @@ FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DC_NPCMDL_POOL=$(DC_NPCMDL_POOL) \
              DC_NPC_SEED=$(DC_NPC_SEED) \
              DC_NPCDIAG=$(DC_NPCDIAG) \
+             DC_RSPSIM_NOFP=$(DC_RSPSIM_NOFP) \
              DC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE) \
              DC_OPT_PROFILE=$(DC_OPT_PROFILE) \
              DECOMP_OPT=$(DECOMP_OPT) DECOMP_HOT_OPT=$(DECOMP_HOT_OPT) \

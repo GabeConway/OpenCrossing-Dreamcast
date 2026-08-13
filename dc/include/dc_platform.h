@@ -543,7 +543,47 @@ void dc_emu64_cull_report(void);
 /* --- Timing helper shared by dc_os.c / dc_vi.c / dc_mem_ledger.c ----------- */
 u64 dc_time_us(void);   /* free-running microseconds, safe before OSInit() */
 
+/* ---------------------------------------------------------------------------
+ * dc_ctz32 — count trailing zeros WITHOUT calling libgcc.
+ * ---------------------------------------------------------------------------
+ * ⭐ MEASURED ON REAL HARDWARE, 2026-08-12 (the first gprof profile off a
+ * retail Dreamcast): `__ctzsi2` is 82 samples, 0.62 % of real work — more than
+ * `dc_gx_flush_vertices` and about the same as `dc_sins_u16`. The SH-4 has no
+ * count-trailing-zeros instruction, so every `__builtin_ctz` becomes a `jsr`
+ * into a 96-byte libgcc loop, and the four call sites in this port are all on
+ * per-batch or per-referenced-vertex paths:
+ *
+ *   dc_emu64_cull.cpp  cull_batch()          the two `while (m)` mark walks,
+ *                                            once per referenced vertex
+ *   dc_gx.c            dc_gx_mark_dirty()    fully inlined, so its libgcc calls
+ *                                            are charged to its callers
+ *
+ * The de Bruijn sequence 0x077CB531 has the property that the 32 rotations of
+ * its top 5 bits are all distinct, so `(x & -x) * debruijn >> 27` indexes a
+ * 32-entry table uniquely — a multiply, a shift and a load, all inline, with no
+ * branch and no call.
+ *
+ * ⚠️ UB GUARD: like `__builtin_ctz`, this is undefined for 0. Every current
+ * caller tests the mask first (`while (m)` / `if (flag)`), which is why the
+ * assert is debug-only rather than a branch on the hot path.
+ *
+ * KILL SWITCH: -DDC_NO_CTZ_LUT falls back to `__builtin_ctz` verbatim. The
+ * change alters no logic whatsoever, so the correctness gate is that
+ * `[EMU64C]`'s trin/cull/vis/punt counters are BYTE-IDENTICAL across the A/B.
+ */
 #ifdef __cplusplus
+}
+#endif
+
+#if defined(DC_NO_CTZ_LUT)
+#define dc_ctz32(x) __builtin_ctz(x)
+#else
+static const unsigned char dc_ctz32_tab[32] = {
+     0,  1, 28,  2, 29, 14, 24,  3, 30, 22, 20, 15, 25, 17,  4,  8,
+    31, 27, 13, 23, 21, 19, 16,  7, 26, 12, 18,  6, 11,  5, 10,  9
+};
+static inline int dc_ctz32(unsigned int x) {
+    return dc_ctz32_tab[((unsigned int)(x & (~x + 1u)) * 0x077CB531u) >> 27];
 }
 #endif
 
