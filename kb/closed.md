@@ -387,6 +387,60 @@ Two corrections banked with it, both of which were live misconceptions:
   (`dc_main.c:885-1135`), entirely inside `#ifdef DC_ASSET_STUB`.**
 - **`rom_src=0` means `SRC_REL`**, not "row 0".
 
+## W1 — a CODEC_S8 audiorom does not fit ARAM (2026-08-13)
+
+Converting the bank from VADPCM to 8-bit PCM stops rspsim's ADPCM decoder
+(~29 % of `RspStart`, itself 18.9 % of busy CPU on silicon) for a pure data
+change and zero runtime code. **It was built, wired, run, and a human listened:
+*"sounds like dogshit"*.** The cause is not the codec — measured on 60 real
+samples, 8-bit round-trip SNR is a median **38.56 dB** against the 14-44 dB of
+the VADPCM it replaces.
+
+**It does not fit the ARAM address space, and the arithmetic is decisive:**
+
+```
+audio ARAM reservation (jsyswrap.cpp:487, game64.c_inc:1857)   8,454,144
+stock audiorom + AUDIO_ARAM_HEAP_SIZE                          8,349,536
+                                                    headroom     104,608
+
+full S8 image + heap                                          13,294,080
+                                                   SHORTFALL   4,839,936
+```
+
+`JKRAram::JKRAram` (`JKRAram.cpp:50-51`) ARAllocs audio first and graph second,
+so an image larger than the reservation is silently overwritten by graph ARAM
+from 8,454,144 up — most of wave bank 5, which is why it sounded broken.
+
+**Both ways out fail inside 16 MB:**
+
+- **Grow the reservation.** Leaves `16,777,216 − 13,294,080 = 3,483,136 B` for
+  graph+user; `forest_2nd.arc` alone is **4,132,608 B**. Does not fit.
+- **A MIXED bank** (legal — the codec is per `smzwavetable`) inside the
+  104,608 B headroom converts `104,608 / (1/0.5625 − 1) = 134,496 B` of VADPCM
+  = **2.00 % of the bank**. Negligible.
+
+⭐ **THIS REDIRECTS THE AUDIO CPU WIN TO THE AICA OFFLOAD, WHICH DOES NOT HAVE
+THE PROBLEM**: its samples live in the Dreamcast's own 2 MB AICA sound RAM, not
+in the emulated GameCube ARAM, so the 16 MB budget never applies.
+`kb/audio-aica-offload.md`.
+
+⚠️ **Reopen ONLY if `DC_ARAM_SIZE` is deliberately widened.** ARAM here is an
+address space, not an allocation (`dc_platform.h:148-152`) — only
+`DC_ARAM_WINDOW_SIZE` (1 MB) is resident — so widening costs almost no
+Dreamcast RAM. **The user declined that on 2026-08-13** ("the 16mb is the
+dreamcast's limit"); it is a fidelity call, not a memory one. The tooling
+survives either way: `tools/dcaudio/s8bank.py` + `--verify` + the shrink rule
++ the boot-time size guard all work and are committed.
+
+⚠️ **AND THE LESSON, WHICH IS THE MOST VALUABLE PART**: four counters were
+green while the build was broken — `S8 bank OK`, `ASSET MISSING 0`, zero
+asserts, and `[NEOS_OUT]` peak 5807 vs a baseline 5806. That last was argued in
+writing as proof the conversion was correct; **peak amplitude is set by the
+loudest voices and cannot see a subset of instruments playing noise.**
+`aram_mapped` exceeded the 16 MB address space (18,227,328 B) *in the very
+table used to declare success*. **A human listening for ten seconds was the
+only instrument that worked.**
+
 ## AICA's 2 MB cannot hold a C array
 
 DMA-only over a 16-bit 25 MHz G2 bus. Still viable as a *destination* for

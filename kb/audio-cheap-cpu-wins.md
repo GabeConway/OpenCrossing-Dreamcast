@@ -31,6 +31,19 @@ source-line attribution through a histogram, so treat the sub-shares as
 
 ---
 
+## 🔴 W1 — CLOSED (2026-08-13). IT DOES NOT FIT ARAM.
+
+🔴🔴 **DEAD. DO NOT REBUILD IT. `kb/closed.md`.** Built, wired, run, listened to
+("sounds like dogshit"), diagnosed, and closed on arithmetic: the full S8 image
+needs **+4,839,936 B** of audio ARAM that the graph half cannot spare
+(`forest_2nd.arc` alone is 4,132,608 B), and a mixed bank inside the 104,608 B
+of existing headroom converts **2.00 %** of the bank. The codec was never the
+problem — 8-bit round-trip SNR is a median **38.56 dB** against the VADPCM's
+14-44 dB.
+⭐ **The audio CPU win goes to the AICA offload instead**, whose samples live in
+the Dreamcast's own 2 MB sound RAM and never touch this budget.
+Everything below is kept as the record of how it failed.
+
 ## 🔴 W1 — SWITCH THE BANK TO `CODEC_S8` — BUILT, RUN, AND **BROKEN**
 
 **~29 % of `RspStart` ≈ 5.5 % of busy ≈ 4.2 ms/frame** in principle, for an
