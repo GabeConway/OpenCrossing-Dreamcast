@@ -199,6 +199,26 @@ static const dc_npc_seed_row s_roster[] = {
  * suspect (kb/RESUME.md §8), so a positive result here does NOT isolate arbeit
  * from intro. Splitting them is the follow-up if this comes back positive.
  *
+ * 🔴 RESULT OF THE FIRST ATTEMPT (2026-08-13): CLEARING AT THIS HOOK IS TOO
+ * EARLY AND PROVES NOTHING. The run printed
+ *
+ *     [DC/ARBEIT] player 0: mEv_CheckArbeit 0 -> 0
+ *
+ * i.e. arbeit was ALREADY false when the seeder runs, and the guest pass was
+ * still blocked (`arb[pass]: work=0`) for the whole run. The flags are not
+ * stale leftovers from a previous session -- the game SETS them after init,
+ * when Nook hands out the starting job, which is exactly what it is supposed
+ * to do. So the villagers being absent may be correct behaviour for a player
+ * who has not finished that job, not a port fault.
+ *
+ * MODE 2 exists because of that: it re-clears on every NPCDIAG report window,
+ * i.e. long after Nook has set the flags, which is the only way to ask "if
+ * arbeit were false DURING PLAY, would villagers spawn?" without playing
+ * through the job. Mode 1 is kept only to reproduce the null result above.
+ *
+ *   DC_NPC_ARBEIT_CLEAR=1  clear ONCE at the seeder hook. Proven useless.
+ *   DC_NPC_ARBEIT_CLEAR=2  clear on every diag report window. The real probe.
+ *
  * Default 0 -- the call is not compiled in at all. */
 #ifndef DC_NPC_ARBEIT_CLEAR
 #define DC_NPC_ARBEIT_CLEAR 0
@@ -207,6 +227,8 @@ static const dc_npc_seed_row s_roster[] = {
 #if (DC_NPC_ARBEIT_CLEAR) > 0
 extern void mEv_ClearPersonalEventFlag(int player_no);
 extern int  mEv_CheckArbeit(void);
+
+void dc_npc_arbeit_clear_tick(void);
 
 static void dc_npc_arbeit_clear(void)
 {
@@ -226,8 +248,32 @@ static void dc_npc_arbeit_clear(void)
             "(DC_NPC_ARBEIT_CLEAR=1, DIAGNOSTIC -- skips Nook's job)\n",
             pno, before, after);
 }
+/* Mode 2's entry: called from dc_npcdiag.c's report window, i.e. long after
+ * Nook has set the flags. Silent after the first line so it cannot flood the
+ * console at ~174 us/byte on hardware. */
+void dc_npc_arbeit_clear_tick(void)
+{
+#if (DC_NPC_ARBEIT_CLEAR) >= 2
+    static int said = 0;
+    int pno = (int)Common_Get(player_no);
+    int before;
+
+    if (pno < 0 || pno >= PLAYER_NUM) return;
+
+    before = mEv_CheckArbeit();
+    if (before == 0) return;              /* nothing to do this window */
+
+    mEv_ClearPersonalEventFlag(pno);
+    if (!said) {
+        said = 1;
+        DC_LOGE("[DC/ARBEIT] tick clear: arbeit was %d, cleared "
+                "(DC_NPC_ARBEIT_CLEAR=2)\n", before);
+    }
+#endif
+}
 #else
 static void dc_npc_arbeit_clear(void) { }
+void dc_npc_arbeit_clear_tick(void) { }
 #endif
 
 void dc_npc_seed(void)

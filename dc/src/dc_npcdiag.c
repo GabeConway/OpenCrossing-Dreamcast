@@ -122,6 +122,10 @@
 #include "m_npc.h"
 #include "m_name_table.h"
 
+/* dc/src/dc_npcseed.c. Defined unconditionally there, empty unless
+ * DC_NPC_ARBEIT_CLEAR >= 2, so this link never depends on the knob. */
+extern void dc_npc_arbeit_clear_tick(void);
+
 /* Restated rather than pulled from m_field_info.h, for the same reason
  * dc_npcseed.c restates npc_def_list: one prototype is a smaller dependency
  * than a header this TU otherwise has no use for. Pinned against
@@ -327,6 +331,11 @@ void dc_npcdiag_report(void)
     /* ONE line, CUMULATIVE for the run. Walk it left to right: the first field
      * that is zero while its left neighbour is not is the wall. `oob=` must be
      * zero — a non-zero is a rewriter/header slot drift, not a game fault. */
+    /* Mode 2 of DC_NPC_ARBEIT_CLEAR: re-clear here, long after Nook has set the
+     * flags. Clearing at the seeder hook was proven useless -- arbeit is
+     * already false there. dc/src/dc_npcseed.c carries the argument. */
+    dc_npc_arbeit_clear_tick();
+
     dc_loge_impl(
         "[DC/NPCDIAG] w=%u t=%u | ct: mgr=%u ctl=%u clip=%u cloth=%d/%d"
         " | wade: none=%u start=%u prog=%u end=%u err=%u mode=%d"

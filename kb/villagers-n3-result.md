@@ -1,4 +1,57 @@
-# N3 RAN — the villager wall is named (2026-08-13)
+# N3 RAN — and the villagers are NOT BROKEN (2026-08-13)
+
+## 🔴🔴 THE CONCLUSION: THIS WAS NEVER A BUG. IT IS A PROGRESSION GATE.
+
+**Six runs. Every wall found is a legitimate gate the game closes on a player
+who has not finished Nook's starting job — not a defect in the port.**
+
+`DC_NPC_ARBEIT_CLEAR=2` re-clears the arbeit flags on every diag window, long
+after Nook sets them. It worked, and the wall simply moved one term to the
+right:
+
+```
+[DC/ARBEIT] tick clear: arbeit was 1, cleared
+arb[pass]: work=28800 intro=28800 demo1=0 demo2=0 hallo=0
+```
+
+`work` and `intro` now PASS 28,800 times each. **`demo1=0` is the new wall:
+`CLIP(demo_clip) == NULL` is false, i.e. a demo/cutscene clip is installed and
+never ends** — which is exactly what you would expect of a save still sitting
+inside the opening sequence.
+
+The gate is `aSNMgr_chk_arbeit_and_demo_and_halloween()`, and its five terms
+are, in order, "not doing Nook's job", "not in the first intro", "no demo
+running", "no second demo running", "not Halloween". **Every one of them is the
+game deliberately suppressing villager spawns during the intro.** Forcing them
+false one at a time just reveals the next one.
+
+⭐ **SO THE VILLAGER WORK IS DONE, AND ITS ANSWER IS "FIX THE FRAME RATE".**
+The town has no villagers because nobody has ever played far enough to finish
+the opening, and nobody has played that far because the game is too slow to get
+there. Human verdict, 2026-08-13: *"i havent done it because the game runs so
+badly that it feels impossible to get that far."*
+
+🔴 **DO NOT "FIX" THE NPC MANAGER. IT IS WORKING.** Specifically retire these,
+all of which this kb has carried as live defects:
+- `kb/STATE.md` §A / `kb/RESUME.md` §7.1's *"nothing constructs a villager
+  ACTOR"* — construction is never ASKED (`mk: slot=0 called=0`), because the
+  spawn list is empty by design during the intro.
+- The save-path theory, the FGDATA/reserve-scan theory, and N2b. All were
+  aimed at a roster that was fine all along (`pre ids=6 homed=6`).
+- `mEv_CheckFirstIntro()` as the culprit — it passes once arbeit is cleared.
+
+⚠️ **WHAT IS STILL UNPROVEN**: no run has actually SPAWNED a villager, because
+no run has cleared all five terms at once. The inference that the chain is
+healthy rests on each wall being a normal gate, not on seeing an actor appear.
+**The clean proof is a human completing Nook's job on a build fast enough to
+play** — which is what `AC-DC-20260813-FAST-silent.cdi` (audio off, ~19 % of
+busy CPU; console muted, ~5 %) exists to make possible.
+
+⚠️ `DC_NPC_ARBEIT_CLEAR` is a DIAGNOSTIC and must never ship: it skips content
+the player is meant to play, and mode 2 clears `FIRSTINTRO` every window.
+
+---
+
 
 ## ⭐⭐ THE ANSWER, after four runs: `mEv_CheckArbeit()` IS STUCK TRUE
 
