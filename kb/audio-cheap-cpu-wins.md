@@ -31,10 +31,16 @@ source-line attribution through a histogram, so treat the sub-shares as
 
 ---
 
-## ⭐ W1 — SWITCH THE BANK TO `CODEC_S8` AND THE ADPCM DECODER STOPS RUNNING
+## 🔴 W1 — SWITCH THE BANK TO `CODEC_S8` — BUILT, RUN, AND **BROKEN**
 
-**~29 % of `RspStart` ≈ 5.5 % of busy ≈ 4.2 ms/frame**, for an offline data
-conversion and **zero lines of runtime code**.
+**~29 % of `RspStart` ≈ 5.5 % of busy ≈ 4.2 ms/frame** in principle, for an
+offline data conversion and zero lines of runtime code.
+
+🔴🔴 **STOP: AS BUILT ON 2026-08-13 IT SOUNDS BAD ON A HUMAN LISTEN, AND THE
+CAUSE IS KNOWN.** The audio ARAM reservation is a hardcoded `0x810000` that
+does not scale with the image, so graph ARAM overwrites the top ~4.8 MB of the
+enlarged audiorom. **Read "W1 IS BROKEN AS BUILT" below before doing anything
+in this section.** The codec is fine; the address-space budget is not.
 
 ### Why this is possible at all
 
@@ -89,7 +95,12 @@ bytes means more disc traffic — but the window was measured at **106 reads per
 `driver.c:785-789`'s `sample_end` arm is dead code in this bank
 (`kb/audio-aica-offload.md` §3). It moved the totals ~0.1 % and changed nothing.
 
-### Quality — it goes UP, not down
+### Quality — the codec is fine; see the ARAM bug above for what actually broke
+
+⭐ **MEASURED, 60 real samples**: 54 of 60 peak above 16,000 of 32,767 (median
+32,393) and the 8-bit round-trip SNR is a median **38.56 dB**, against the
+14–44 dB measured for the VADPCM it replaces. **8-bit quantisation is not what
+made the build sound bad.**
 
 8-bit linear PCM is ~48 dB peak SNR. Round-trip SNR of the *existing* 4-bit
 VADPCM, measured on real bank samples, is **14–44 dB**
@@ -153,7 +164,76 @@ guard is the cheap detector for exactly the drift below; do not weaken it.
 3. **A listening pass.** Everything above is arithmetic; the noise-character
    risk is not something a counter can see.
 
-### ✅ IT RUNS, AND IT IS +8.6 % FPS IN FLYCAST (2026-08-13)
+### 🔴🔴 W1 IS BROKEN AS BUILT — A HUMAN LISTENED AND IT SOUNDS BAD (2026-08-13)
+
+**Standing verdict, and it overrides everything in this section: *"sounds like
+dogshit"*.** Read the rest of this section knowing that.
+
+🔴 **THE +8.6 % FPS BELOW IS CONTAMINATED. DO NOT QUOTE IT AS W1'S RESULT.**
+It was measured on a build in which most of wave bank 5 was garbage.
+
+**THE BUG — and it is NOT the codec.** Measured on 60 real samples: 54 of 60
+peak above 16,000 of 32,767 (median peak 32,393), and the 8-bit round-trip SNR
+is a median **38.56 dB** — *better* than the 14–44 dB the VADPCM it replaces
+measures. 8-bit quantisation was never the problem.
+
+The problem is **ARAM address space**, and the evidence was in the A/B table
+below the whole time:
+
+```
+[DC/ARAM] audio half = [0, 8454144)      <- IDENTICAL in both builds
+aram_mapped   baseline 13,282,784        S8 18,227,328   (ARAM is 16,777,216)
+```
+
+`JKRAram::JKRAram` (`JKRAram.cpp:35-51`) takes the audio reservation as a
+**caller-supplied constant** and ARAllocs it first:
+
+```cpp
+mAudioMemorySize = bufSize;                      // 0x810000 = 8,454,144
+mAudioMemoryPtr  = ARAlloc(mAudioMemorySize);    // the first ARAlloc
+mGraphMemoryPtr  = ARAlloc(mGraphMemorySize);    // graph starts at 8,454,144
+```
+
+`bufSize` is hardcoded `0x810000` at **`src/static/jsyswrap.cpp:487`** and
+**`src/static/jaudio_NES/game/game64.c_inc:1857`**. It is sized for the stock
+8,300,384 B audiorom. **It did not scale with the 13,244,928 B S8 image**, so
+graph/user ARAM begins *inside* the audiorom and overwrites everything above
+8,454,144 — which is most of wave bank 5. Those instruments play graphics data.
+
+⚠️ **AND THE NAIVE FIX DOES NOT FIT.** Raising `bufSize` to cover 13.2 MB
+leaves `16,777,216 − 13,271,040 = 3,506,176 B` for graph+user, and
+`forest_2nd.arc` alone is **4,132,608 B**. The S8 bank at 1.78× does not fit
+the GameCube's 16 MB ARAM address space alongside the graphics. **That is a
+hard constraint this document missed.**
+
+### The two ways out, neither tried
+
+1. **Raise `DC_ARAM_SIZE`.** The 16 MB is the *GameCube's* ARAM; on this port
+   ARAM is an emulated, disc-backed address space with only a 1 MB resident
+   window (`DC_ARAM_BLOCK_SIZE` 32,768 × `DC_ARAM_MAX_BLOCKS` 64), so the
+   address space is ours to choose and costs almost no RAM to widen. Needs
+   `DC_ARAM_SIZE` raised in `dc/` **plus** shrink rules for the two `0x810000`
+   constants, since `JKRAram` derives graph size as `aramSize − bufSize`.
+   ⚠️ `jsyswrap.cpp` already carries one of the project's five `TARGET_DC`
+   branches — check before adding a sixth.
+2. **A MIXED bank.** The codec is per `smzwavetable`, so converting only some
+   samples is legal and needs no extra machinery. Convert only enough to stay
+   inside the existing 8,454,144 B budget, choosing by CPU-per-byte. Gets a
+   fraction of the win with **zero** layout risk.
+
+### ⚠️ What this cost, so the lesson survives
+
+**Four counters were green and the build was broken.** `S8 bank OK`,
+`ASSET MISSING 0`, zero asserts, and `[NEOS_OUT]` peak 5807 vs the baseline's
+5806 — that last one was read here as *"the strongest cheap evidence the
+conversion is correct"*. **It is not.** Peak amplitude is dominated by whichever
+voices are loudest; it cannot see a subset of instruments playing noise. The
+`aram_mapped` figure exceeded the ARAM address space **in the very table that
+was used to declare success**, and it was read past.
+
+**The only instrument that found this was a human listening for ten seconds.**
+
+### The (contaminated) A/B, kept for its ARAM evidence
 
 Matched A/B, `DC_AUDIO_S8=1` vs `=0`, everything else identical, 240 s each at
 the title screen's live demo (which has actors, camera **and music**, so audio
@@ -172,10 +252,11 @@ is genuinely exercised):
 ⭐ **The boot guard fired green: `[DC/AUDIO] S8 bank OK (13244928 B)`** — the
 image and the linked tables agree.
 
-⭐ **`[NEOS_OUT]` peaking at 5807 against the baseline's 5806 is the strongest
-cheap evidence available that the conversion is CORRECT**, not merely
-non-crashing: the engine is producing the same waveform amplitude from the same
-sequences. A misread bank would not land within 1 part in 5,800.
+🔴 **THE `[NEOS_OUT]` 5807-vs-5806 ARGUMENT WAS WRONG AND IS RETRACTED.** It
+was read here as proof the conversion was correct. Peak amplitude is set by
+whichever voices are loudest and **cannot see a subset of instruments playing
+noise** — which is exactly what was happening. A near-identical peak is
+consistent with a badly broken bank.
 
 ⚠️ **`run_report.py --vs` says REGRESSED and it is the documented false
 positive.** The three counters it names — `emu_punt`, `emu_vid_batches`,
