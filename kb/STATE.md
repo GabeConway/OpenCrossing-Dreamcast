@@ -355,7 +355,16 @@ frustum test, `setup_1tri_2tri_1quad`) needs a town run to be final. The chord
 ⭐⭐ **USER DIRECTIVE 2026-08-09, end of session 15: the next two are VILLAGERS
 and the TEV FIX. Everything below them is the perf queue and waits.**
 
-**A. 🔴 VILLAGERS — run the N3 diagnostic. ⚠️ THIS ITEM USED TO PRESCRIBE N2b
+**A. ✅ N3 HAS NOW RUN (2026-08-13) — READ `kb/villagers-n3-result.md` FIRST.**
+Three of the five hypotheses are dead (`cloth=10/10`, `clip=5`,
+`ut: calls=0`). **The break is NOT actor construction**: `aSNMgr_make_npc`
+runs every tick and finds `make[]` empty (`mk: ent=12087 slot=0 called=0`).
+The wall is `aSNMgr_chk_exist_and_appear_and_event`, which passes **0 times in
+12,048 GUEST calls** while the plain `chk_exist_and_appear` passes fine in
+REGULAR (`exist=28`). Two candidate causes remain and one line of extra
+instrumentation separates them. Everything below is the pre-run text.
+
+**A-old. 🔴 VILLAGERS — run the N3 diagnostic. ⚠️ THIS ITEM USED TO PRESCRIBE N2b
 ("wire the VMU save path"); THAT DIAGNOSIS IS FALSIFIED — see the top of this
 file — AND N2b WOULD NOT HAVE FIXED IT.** The roster is fine and always was.
 The break is **actor construction**, downstream of `npclist`.
