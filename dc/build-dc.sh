@@ -137,12 +137,14 @@ if [ "${DC_SRC_SHRINK:-1}" = "1" ]; then
          "(DC_AUDIO=${DC_AUDIO:-0} DC_BGTEX_DEMAND=${DC_BGTEX_DEMAND:-1}" \
          "DC_NPCTEX_POOL=${DC_NPCTEX_POOL:-0}" \
          "DC_NPCMDL_POOL=${DC_NPCMDL_POOL:-0}" \
-         "DC_NPC_SEED=${DC_NPC_SEED:-0})"
+         "DC_NPC_SEED=${DC_NPC_SEED:-0}" \
+         "DC_NPCDIAG=${DC_NPCDIAG:-0})"
     python3 "$REPO/tools/dcstub/make_src_shrink.py" --audio="${DC_AUDIO:-0}" \
         --bgtex-demand="${DC_BGTEX_DEMAND:-1}" \
         --npctex-pool="${DC_NPCTEX_POOL:-0}" \
         --npcmdl-pool="${DC_NPCMDL_POOL:-0}" \
-        --npc-seed="${DC_NPC_SEED:-0}"
+        --npc-seed="${DC_NPC_SEED:-0}" \
+        --npcdiag="${DC_NPCDIAG:-0}"
 fi
 
 ENVARGS=(
@@ -185,6 +187,21 @@ ENVARGS=(
     -e DC_CONSOLE_MUTE="${DC_CONSOLE_MUTE:-}"
     -e DC_CONSOLE_MUTE_FRAME="${DC_CONSOLE_MUTE_FRAME:-}"
     -e DC_SCIF_FAST="${DC_SCIF_FAST:-}"
+    # P2, the gprof flat profile. Same reasoning as DC_PMCR above: every one of
+    # these is guarded in dc/Makefile with `ifneq ($(DC_GPROF...),)`, so EMPTY
+    # means off and the unconditional form cannot arm anything by accident.
+    # ⚠️ Forwarding is not optional — a knob dc/build-dc.sh does not forward is
+    # silently off, which is exactly how DC_EMU64_HIST sat unrun for two
+    # sessions (kb/RESUME.md §10).
+    -e DC_GPROF="${DC_GPROF:-}"
+    -e DC_GPROF_SD="${DC_GPROF_SD:-}"
+    -e DC_GPROF_SD_IF="${DC_GPROF_SD_IF:-}"
+    -e DC_GPROF_DUMP_FRAME="${DC_GPROF_DUMP_FRAME:-}"
+    -e DC_GPROF_HZ="${DC_GPROF_HZ:-}"
+    -e DC_GPROF_SPAN="${DC_GPROF_SPAN:-}"
+    -e DC_GPROF_LOW="${DC_GPROF_LOW:-}"
+    -e DC_GPROF_COLS="${DC_GPROF_COLS:-}"
+    -e DC_GPROF_CHORD="${DC_GPROF_CHORD:-}"
     -e DC_XDEFS="${DC_XDEFS:-}"
 )
 [ -n "${DC_AUDIO_SCENES+x}" ] && ENVARGS+=(-e DC_AUDIO_SCENES="$DC_AUDIO_SCENES")
@@ -238,6 +255,14 @@ ENVARGS=(
 # already seen the value.
 [ -n "${DC_NPC_SEED+x}" ] && ENVARGS+=(-e DC_NPC_SEED="$DC_NPC_SEED")
 [ -n "${DC_NPC_SEED_MAX+x}" ] && ENVARGS+=(-e DC_NPC_SEED_MAX="$DC_NPC_SEED_MAX")
+
+# N3, the villager-construction diagnostic. Forward-only for the same reason as
+# DC_NPC_SEED above: dc/Makefile has DC_NPCDIAG ?= 0 and the value is baked into
+# a -D that `#if defined(DC_NPCDIAG) && !DC_NPCDIAG` reads, so an empty -e would
+# be a preprocessor error rather than an off switch. make_src_shrink.py above
+# has already seen the value.
+[ -n "${DC_NPCDIAG+x}" ] && ENVARGS+=(-e DC_NPCDIAG="$DC_NPCDIAG")
+[ -n "${DC_NPCDIAG_PERIOD+x}" ] && ENVARGS+=(-e DC_NPCDIAG_PERIOD="$DC_NPCDIAG_PERIOD")
 # G1, and it must be the FORWARD-ONLY form. Omitting it entirely is how the
 # histogram came to be "in the tree, never run": dc/Makefile has
 # DC_EMU64_HIST ?= 0, so from the HOST entry point a DC_EMU64_HIST=300 build

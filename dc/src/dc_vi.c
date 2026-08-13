@@ -12,6 +12,12 @@
 #include "dc_pmcr.h"    /* P1: the SH-4 PMCR profiler. All no-op macros when
                          * DC_PMCR is unset, so this include is unconditional
                          * and every call site below reads the same either way. */
+#include "dc_npcdiag.h" /* N3: the villager-construction diagnostic. Every entry
+                         * point is defined unconditionally (empty at
+                         * DC_NPCDIAG=0), so the include is unconditional too. */
+#include "dc_profdump.h"/* P2: the gprof-over-serial dump. DC_GPROF_TICK() is a
+                         * no-op macro when DC_GPROF is unset, same contract as
+                         * dc_pmcr.h above. */
 
 /* ==========================================================================
  * DC_AUDIO_HEAPLOG — the falsifier for "audiomemory can be shrunk further"
@@ -709,6 +715,14 @@ void VIWaitForRetrace(void) {
 #if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
             dc_emu64_cull_report();
 #endif
+            /* N3, and it is guarded here rather than inside dc_npcdiag.c so
+             * that a DC_NPCDIAG=0 build has no call at all and --gc-sections
+             * can drop the whole TU. The instrument does its own division: it
+             * is offered this window every 30 presented frames and prints one
+             * line every DC_NPCDIAG_PERIOD (default 300) of them. */
+#if defined(DC_NPCDIAG) && (DC_NPCDIAG) > 0
+            dc_npcdiag_report();
+#endif
 #ifdef DC_PERF_GXAPI
             DC_LOGE("[GXAPI] pos=%u clr=%u tc=%u nrm=%u begin=%u dirty=%u "
                     "posms=%.2f\n",
@@ -818,6 +832,29 @@ void VIWaitForRetrace(void) {
         probe_tick++;
     }
 #endif
+
+    /* P2 — the gprof dump (dc/src/dc_profdump.c). One compare per presented
+     * frame, then once ever it stalls the machine for several seconds while
+     * ~700 KB of histogram goes down the serial line.
+     *
+     * PLACED HERE ON PURPOSE, and the placement has two halves:
+     *
+     *  - AFTER the 30-frame [PERF]/[PMCR] report block above, so the window
+     *    that the stall lands in has already been reported. The stall still
+     *    poisons the NEXT window's wall clock; that is unavoidable and it is
+     *    why the dump is a one-shot at the END of a run rather than periodic.
+     *
+     *  - BEFORE G3/G1/G2 arm below. Those three rewrite the emu64 opcode
+     *    thunk table for the frame that is about to open, and the ordering
+     *    comments on them ("G3 FIRST", "arm LAST") are a real constraint. A
+     *    multi-second stall wedged between the arming and the frame it arms
+     *    would make that frame's counters describe a frame that mostly did not
+     *    happen. Dumping first leaves the arming adjacent to its own frame.
+     *
+     * It takes no frame number ON PURPOSE and counts its own: reaching this
+     * line IS a presented frame, whereas pc_frame_counter is incremented on
+     * frameskipped ticks too, before their early return (kb/traps.md). */
+    DC_GPROF_TICK();
 
 #if defined(DC_EMU64_CULL) && DC_EMU64_CULL > 0
     /* ⚠️ G3 FIRST, same reason as the frameskip site above: its tripwire

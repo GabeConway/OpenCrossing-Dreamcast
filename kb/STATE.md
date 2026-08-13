@@ -181,8 +181,15 @@ next step is an OOM pair on the current config, not more arithmetic.
 column** — `dec` omits inter-section alignment and counts `.ocram`, which lives
 at `0x7c001000` and is not in the image.
 
-⭐ **THE PIVOT, 2026-08-09: FPS is "good enough on hardware"; the workstream is
-now PLAYABILITY.** ⚠️ **"Eliminate stub loading" is not the lever** — a full
+🔴 **THE PIVOT OF 2026-08-09 IS WITHDRAWN (2026-08-10). FPS IS NOT "GOOD ENOUGH
+ON HARDWARE".** Standing human verdict: *"hardware does not run better than the
+emulator, it runs much worse. the audio sounds good though."* The S14 burn
+quote that this file read as "better than the emulator" was a comparison against
+the **previous hardware build**; only the AUDIO result survives. **The FPS
+deficit is on silicon and Flycast cannot see it** — `kb/RESUME.md` §1 and §6.
+**Both workstreams are live: hardware FPS AND playability.**
+
+⚠️ **"Eliminate stub loading" is not the lever** — a full
 `DC_ASSET_STUB=0` image is refuted by a boot and has LESS content than the
 stubbed one (below). **The stub system already IS the demand loader**
 (`dc_stub_keep_load_one()` / `dc_keep_sweep()`); what limits the game is that
@@ -281,22 +288,70 @@ contiguous malloc, and comes back with all 14,495 assets MISSING
 
 ---
 
+## ⭐ P2 landed 2026-08-12 — hardware profiling is no longer a plan
+
+The gprof flat profile works. `-pg` on the link line only, our `gprof_init()`
+override wins in the map, 31,010 samples recovered from a Flycast run through
+the console sink and symbolised by `sh-elf-gprof`. **The emulator half of the
+§6 experiment is captured; the hardware half is a burn away**
+(`AC-DC-20260812b-gprof-sd`, on the NAS with its ELF and sha256 sidecar).
+
+⚠️ **Do not compare that build's FPS to anything here.** It is `keeplist-town`
+(≈900 KB less resident geometry than shipping, to buy the 1.53 MB the gmon
+buffers need) with **F5 off**. It is a MEASUREMENT build; its frame rate is a
+different workload, not a result. A human read it as "runs noticeably better"
+on hardware — that is the missing content, not a win.
+
+Full result, the three traps it cost, and the two build lines:
+`kb/RESUME.md` §6b, `kb/hardware-profiling.md`, `tools/dcprof/README.md`.
+
+---
+
 ## Ranked next actions
 
 ⭐⭐ **USER DIRECTIVE 2026-08-09, end of session 15: the next two are VILLAGERS
 and the TEV FIX. Everything below them is the perf queue and waits.**
 
-**A. 🔴 N2b — wire the VMU save path, then turn R2/R3 on.** This is the whole
-villager problem and it is a SAVE bug, not an asset bug: `mNpc_SetNpcList`
-populates the town from the save's `Animal_c animals[]`
-(`m_start_data_init.c:559`), the VMU path is unwired, so `[PC] No save file
-found` and **not one villager actor is ever constructed** — measured, two 900 s
-runs to scene 9 printed zero `[DC/NPCTEX]`/`[DC/NPCMDL]` lines. R2 (236 villager
-texture sets) and R3 (32 species, with its 933-word gsSPVertex relocation table)
-are BUILT, tested to compile, and **defaulted OFF for exactly this reason** —
-nothing on the NPC path can be exercised until a villager exists. Order: save
-path → villager appears → turn R2/R3 on → then their pools can finally be
-measured. `kb/save-plan.md`, `dc/src/dc_card.c`, `dc/src/dc_npctex.c`,
+**A. 🔴 VILLAGERS — run the N3 diagnostic. ⚠️ THIS ITEM USED TO PRESCRIBE N2b
+("wire the VMU save path"); THAT DIAGNOSIS IS FALSIFIED — see the top of this
+file — AND N2b WOULD NOT HAVE FIXED IT.** The roster is fine and always was.
+The break is **actor construction**, downstream of `npclist`.
+
+**N3 is built and wired (2026-08-10): `DC_NPCDIAG=1`.** The chain from
+`npclist` to a live actor is five functions with nine serial gates that say
+nothing when they refuse, so N3 wraps every one in `dc_npcdiag_gate()` — which
+returns its argument untouched, preserving every `&&` short-circuit — and
+prints one cumulative `[DC/NPCDIAG]` line. **One town run is decisive**;
+`dc/src/dc_npcdiag.c` carries the decision table mapping each printed shape to
+its candidate.
+
+Run line: `DC_NPCDIAG=1 DC_NPC_SEED=1 DC_NPCTEX_POOL=1 DC_NPCMDL_POOL=1`.
+
+Live candidates, ranked (full chain and line numbers in `dc_npcdiag.c`):
+1. **The REGULAR pass only runs on an acre transition** — `aSNMgr_actor_move`
+   (`ac_set_npc_manager.c:1254-1276`) clears `make[]` on `mFI_WADE_NONE` before
+   `set_proc` runs, and `aSNMgr_set_npc_regular` tails into `GUEST`. If
+   `mFI_GetPlayerWade()` never leaves `WADE_NONE`, zero villagers ever.
+2. **All ten cloth banks failed to reserve** — `aNPC_keep_cloth_data_area`
+   (`ac_npc_cloth.c_inc:226-259`); every slot `mSC_BANK_NONE` makes
+   `aNPC_setupNpc_check` FALSE forever, silently.
+3. **`CLIP(npc_clip)` NULL** — set in exactly one place,
+   `ac_npc_ctrl.c_inc:814`.
+4. **`aSNMgr_get_safe_utnum` rejects every unit** — `mNpc_CheckNpcSet_fgcol`
+   (`m_npc.c:4590`). Suspicious: the FGDATA reserve scan already finds nothing.
+5. **Benign** — the run never entered a villager's acre. N3 logs the player's
+   `next_block` against the roster's block numbers so this is distinguishable.
+
+✅ **Candidate 6 is already RULED OUT with no run**: the missing `return` at
+`ac_npc_ctrl.c_inc:519` is present in the built shrink tree.
+
+⚠️ **`[DC/NPCTEX]`/`[DC/NPCMDL]` silence is a WEAKER signal than this file used
+to claim** — `dc_npctex_ensure()` returns silently on four separate conditions
+(`dc/src/dc_npctex.c:333-345`), so zero lines is consistent with actors
+existing. Do not treat it as proof.
+
+R2/R3 remain OFF and remain untestable until a villager exists; that ordering
+was the one correct part of the old item. `dc/src/dc_npctex.c`,
 `dc/src/dc_npcmdl.c`.
 
 **B. 🔴 TEV P3 — the predicate, not the maths.** `-DDC_PVR_TEVP3` was run for
@@ -326,18 +381,27 @@ rather than optional.**
    `kb/research-sh4zam-gap.md` G-B. ⚠️ S14 deliberately did **not** touch it —
    a multi-session rewrite inside a bundled A/B tells you nothing about the
    other seven changes.
-2. 🔴 **`cds=` — 2.2 ms/frame of emu64 state work inside G3's cull, and NOBODY
-   HAS EVER COSTED IT.** Found 2026-08-09 by S14-8's split bracket:
-   `cull_batch()` is 3.05 ms/frame, of which the frustum test is **0.139** and
-   emu64's `dirty_check` + `setup_1tri_2tri_1quad` are **2.23 (73 %)**. They are
-   there because the frustum test reads `g_gx.projection_mtx` and
-   `g_gx.current_mtx` **live**, so G3 must make emu64 refresh them before it can
-   test anything — and in a typical window only **175 of 2,572** TRIN batches
-   are culled, so ~93 % of that cost is on batches whose original handler then
-   calls the same two functions again. The in-file comment asserts the second
-   call is "idempotent"; **idempotent is not cheap and it has never been
-   measured.** Measure the handler's second call first, then decide whether the
-   ordering rule can be satisfied without a full `dirty_check`.
+2. ✅ **`cds=` — SUPERSEDED BY S15-1, AND THE 2.23 ms FIGURE HERE IS STALE
+   (corrected 2026-08-10).** This item used to read "2.2 ms/frame of emu64 state
+   work inside G3's cull, and nobody has ever costed it". **`cull_batch()` no
+   longer calls `dirty_check` or `setup_1tri_2tri_1quad` at all** — S15-1
+   replaced them with the lean refresh (`dc_emu64_cull.cpp:749-765`: the
+   `EMU64_DIRTY_FLAG_PROJECTION_MTX` test plus one `GXSetCurrentMtx`), shipped
+   default-ON 2026-08-09. `cds=` now brackets the lean pair, so the 2.23 ms is
+   pre-S15-1 and **nobody has read the post-S15-1 value.**
+   ⚠️ Two corrections to what this item asserted:
+   - **`dirty_check()` (`emu64.c:3154-3442`) really is idempotent AND cheap** on
+     a second call — every block is `IS_DIRTY(x) { CLEAR_DIRTY(x); … }`, so a
+     repeat runs ~14 flag tests, the tile loop and one projection test, with **no
+     calls**. The 2.23 ms was never this function's.
+   - **`setup_1tri_2tri_1quad()` (`emu64.c:2854-2899`) is the one that was
+     costly, and it is not dirty-guarded at all** — 8-11 unconditional
+     out-of-line `GXClearVtxDesc`/`GXSetVtxDesc`/`GXSetVtxAttrFmt` calls per
+     batch.
+   **Action: no run of its own.** Read `cds=` and `lproj=` off the next
+   `-DDC_PERF_PHASE` run. The handler's own copy cannot be elided from `dc/`
+   (no flag exists and `src/` is not editable) — it disappears as a by-product
+   of item 1, because a consumed batch never reaches the handler.
    ⭐ **This retired G-F entirely** — see `kb/research-sh4zam-gap.md`.
 3. 🔴 **The S14 PMCR burn.** Was "the hardware PMCR burn"
    (`AC-DC-20260808g-pmcr.cdi`); rebuild it on the S14 tree instead, because

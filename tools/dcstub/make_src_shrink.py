@@ -165,6 +165,25 @@ S12 villager models out of a 16-slot pool (R3)                  +115,296 .bss
     make_stub_data.py's own flag. The rewritten TUs carry an #error for the
     mismatch, in both directions.
 
+N3  the villager-construction diagnostic                        0 BYTES
+    `src/actor/ac_set_npc_manager.c` (swap), `src/actor/npc/ac_npc_cloth.c_inc`
+    and `src/actor/npc/ac_npc_ctrl.c_inc` (shadows). NOT A SHRINK AND NOT A
+    FEATURE — an instrument, off by default, that answers "why is no villager
+    actor ever constructed" in ONE Flycast town run instead of five.
+    The roster is already known good ([DC/NPCSEED] pre ids=6 homed=6 | seeded
+    id=8 home=8), so the break is downstream, and the chain from there is five
+    functions long with nine serial gates that say nothing when they refuse.
+    Every one of them gets wrapped in `dc_npcdiag_gate(SLOT, <predicate>)`,
+    which returns its second argument untouched — no branch changes shape and
+    every `&&` keeps its short-circuit order. dc/src/dc_npcdiag.c carries the
+    five hypotheses and the field on the printed line that kills each.
+    ⚠️ Its gate slot NUMBERS are parsed out of dc/include/dc_npcdiag.h rather
+    than restated: two copies of an enum compared only by number would relabel
+    a counter without breaking a build.
+    Kill switch: --npcdiag=0, matching dc/Makefile's DC_NPCDIAG. Unlike R1/R2/R3
+    the #error guard is emitted AT 0 AS WELL, because a mismatched tree here
+    prints a diagnostic line of zeroes and zero is a meaningful reading.
+
 S7  data_bgd collision split (kb/levers.md P7)                -246,064
     `.data`, not `.bss`.  `data_bgd[295]` is 317,420 B of `.data` and 302,080 B
     of that (95.2 %) is the `mCoBG_Collision_u collision[16][16]` member — a
@@ -227,6 +246,8 @@ USAGE
                                             [--bgtex-demand 0|1]
                                             [--npctex-pool 0|1]
                                             [--npcmdl-pool 0|1]
+                                            [--npc-seed 0|1|2]
+                                            [--npcdiag 0|1]
                                             [--dry-run] [--quiet]
 
 Default --out is dc/build/shrinksrc.  Files are written only when their content
@@ -1001,10 +1022,10 @@ def NPCMDL_GUARD(pool):
         "#endif")
 
 
-def _s1c_rules(npctex_pool, npcmdl_pool):
+def _s1c_rules(npctex_pool, npcmdl_pool, npcdiag=0):
     """src/actor/npc/ac_npc_ctrl.c_inc — S1c's four arenas, the setupActor
-    return fix, and S11's + S12's load seam. One entry, because this tool writes
-    one scratch copy per TU.
+    return fix, S11's + S12's load seam, and N3's two diagnostic seams. One
+    entry, because this tool writes one scratch copy per TU.
 
     SHADOW.  ac_npc_ctrl.c_inc is #included as
     "../src/actor/npc/ac_npc_ctrl.c_inc" from src/actor/npc/ac_npc.c:130 AND
@@ -1129,7 +1150,510 @@ def _s1c_rules(npctex_pool, npcmdl_pool):
     )
     rules.append((1, body, head + tail))
 
+    # -- N3: the villager-construction diagnostic --------------------------
+    # Appended LAST so none of the rules above can be disturbed by it, and
+    # UNCONDITIONALLY — at --npcdiag=0 it contributes only the stale-tree
+    # guard, which is the whole reason it is not simply omitted. See
+    # _npcdiag_ctrl_rules() for the argument.
+    rules += _npcdiag_ctrl_rules(npcdiag)
+
     return ("src/actor/npc/ac_npc_ctrl.c_inc", "shadow", rules)
+
+
+# ===========================================================================
+# N3 — the villager-construction diagnostic (dc/src/dc_npcdiag.c).
+# ===========================================================================
+# WHAT IT REPLACES.  Nothing.  N3 inserts calls and deletes no code; every
+# rewritten predicate is wrapped in `dc_npcdiag_gate(SLOT, <predicate>)`, which
+# returns its second argument untouched, so not one branch changes shape and the
+# short-circuit order of every `&&` is preserved exactly.
+#
+# WHY IT IS ONE INSTRUMENT AND NOT FIVE.  The question — "why is no villager
+# actor ever constructed" — has five live answers and they live in four
+# different files, five functions apart.  Testing them one at a time is five
+# burns; every gate on the chain is counted here so ONE Flycast town run is
+# decisive.  dc/src/dc_npcdiag.c's header enumerates the five and names the
+# field on the printed line that kills each.
+#
+# THE THREE TUs, AND WHY THOSE THREE.
+#
+#   src/actor/ac_set_npc_manager.c   SWAP.  The manager: the wade dispatch, the
+#       REGULAR and GUEST passes with their five serial gates each, the make
+#       list, and aSNMgr_check_safe_ut (the inside of the utnum gate).  A .c
+#       compiled directly, so -I can never reach it; not in stub.list.
+#   src/actor/npc/ac_npc_cloth.c_inc SHADOW.  aNPC_keep_cloth_data_area, the one
+#       place the ten cloth banks are reserved.  Included as
+#       "../src/actor/npc/ac_npc_cloth.c_inc" from BOTH src/actor/npc/ac_npc.c
+#       :114 and src/actor/npc/ac_npc2.c:136 — the same relative form as
+#       ac_npc_ctrl.c_inc, which cannot resolve against the includer's own
+#       directory and therefore falls through to -I and lands here.
+#   src/actor/npc/ac_npc_ctrl.c_inc  SHADOW, and it RIDES S1c's entry rather
+#       than getting one of its own: main() refuses two rule entries for one
+#       path.  aNPC_setupActor_sub's two gates and aNPC_actor_ct_c's clip
+#       install.
+#
+# ⚠️ THE STALE-TREE GUARD IS EMITTED AT --npcdiag=0 TOO, and that is the one
+# place N3 differs from R1/R2/R3.  Their failure mode is a wrong image; N3's is
+# worse, because every counter reading ZERO IS A MEANINGFUL RESULT.  A tree
+# generated with --npcdiag=0 built with -DDC_NPCDIAG=1 would print a full
+# [DC/NPCDIAG] line with every field at zero and nothing to say it was lying.
+# So the guard goes into ac_npc_ctrl.c_inc — the one N3 TU that is in the tree
+# at every setting — and it points BOTH ways.  The other two entries only exist
+# at 1, which is what keeps --npcdiag=0 a byte-identical revert: no extra file
+# in shrink.list, no extra shadow, nothing.
+#
+# ⚠️ THE SLOT NUMBERS ARE PARSED OUT OF dc/include/dc_npcdiag.h, not restated.
+# Two copies of an enum whose members are only ever compared by NUMBER is a
+# silent-relabelling bug waiting to happen: the build would succeed and the
+# counter named `scope=` would be reporting `appear=`.  _npcdiag_slots() reads
+# the header, requires every name this file emits, and hard-errors otherwise.
+NPCDIAG_HDR = "dc/include/dc_npcdiag.h"
+
+# Every slot this generator emits. Checked against the header, so adding a call
+# site without adding its enum row is a generator error rather than an `oob=`
+# nobody reads.
+NPCDIAG_REQUIRED = (
+    "DC_NPCDIAG_G_REG_CALL", "DC_NPCDIAG_G_REG_EXIST", "DC_NPCDIAG_G_REG_SCOPE",
+    "DC_NPCDIAG_G_REG_APPEAR", "DC_NPCDIAG_G_REG_UTNUM", "DC_NPCDIAG_G_REG_MAKE",
+    "DC_NPCDIAG_G_GST_CALL", "DC_NPCDIAG_G_GST_ARBEIT", "DC_NPCDIAG_G_GST_BLKMAX",
+    "DC_NPCDIAG_G_GST_EXIST", "DC_NPCDIAG_G_GST_SCOPE", "DC_NPCDIAG_G_GST_APPEAR",
+    "DC_NPCDIAG_G_GST_UTNUM", "DC_NPCDIAG_G_GST_MAKE",
+    "DC_NPCDIAG_G_MK_ENT", "DC_NPCDIAG_G_MK_GATE", "DC_NPCDIAG_G_MK_SLOT",
+    "DC_NPCDIAG_G_MK_IDX", "DC_NPCDIAG_G_MK_CALLED", "DC_NPCDIAG_G_MK_RET",
+    "DC_NPCDIAG_G_SU_ENT", "DC_NPCDIAG_G_SU_CHK", "DC_NPCDIAG_G_SU_ACTOR",
+    "DC_NPCDIAG_G_UT_CALL", "DC_NPCDIAG_G_UT_COL", "DC_NPCDIAG_G_UT_FGCOL",
+    "DC_NPCDIAG_G_UT_HGAP",
+)
+
+_NPCDIAG_SLOT_CACHE = {}
+
+
+def _npcdiag_slots():
+    """Parse the gate enum out of dc/include/dc_npcdiag.h.
+
+    Returns an ordered list of (name, value). The header is the single source
+    of truth; this refuses to guess. Cached because three rule builders ask.
+    """
+    if _NPCDIAG_SLOT_CACHE:
+        return _NPCDIAG_SLOT_CACHE["slots"]
+
+    hdr = REPO / NPCDIAG_HDR
+    if not hdr.exists():
+        raise SystemExit(
+            "make_src_shrink N3: %s is missing. It is the single source of\n"
+            "  truth for the gate slot numbers this generator emits into the\n"
+            "  vendored TUs; without it the rewrite would have to restate them\n"
+            "  and could relabel a counter silently." % NPCDIAG_HDR)
+
+    text = hdr.read_text(encoding="utf-8", errors="surrogateescape")
+    m = re.search(r"^enum \{$(.*?)^\};$", text, re.MULTILINE | re.DOTALL)
+    if m is None or "DC_NPCDIAG_G_NUM" not in m.group(1):
+        raise SystemExit(
+            "make_src_shrink N3: could not find the `enum { ... DC_NPCDIAG_G_NUM"
+            " ... };`\n  block in %s. Re-derive this parser against the header "
+            "rather than\n  hardcoding the slot numbers here." % NPCDIAG_HDR)
+
+    names = re.findall(r"^\s*(DC_NPCDIAG_G_[A-Z0-9_]+)", m.group(1), re.MULTILINE)
+    if not names or names[-1] != "DC_NPCDIAG_G_NUM":
+        raise SystemExit(
+            "make_src_shrink N3: the gate enum in %s must END with "
+            "DC_NPCDIAG_G_NUM;\n  got %r." % (NPCDIAG_HDR, names[-1:] or None))
+    # The first row must pin itself to 0 explicitly. Without that the C enum
+    # would still start at 0, but the header would no longer SAY so, and this
+    # parser's contract is that it reads what the header states.
+    if not re.search(r"^\s*%s\s*=\s*0\s*," % names[0], m.group(1), re.MULTILINE):
+        raise SystemExit(
+            "make_src_shrink N3: the first gate row in %s must be spelled "
+            "`%s = 0,`."
+            % (NPCDIAG_HDR, names[0]))
+
+    slots = [(n, i) for i, n in enumerate(names[:-1])]
+    have = {n for n, _ in slots}
+    missing = [n for n in NPCDIAG_REQUIRED if n not in have]
+    if missing:
+        raise SystemExit(
+            "make_src_shrink N3: %s does not declare %s.\n"
+            "  This generator emits those slots into the vendored TUs; a call "
+            "site with\n  no enum row would land on `oob=` and be counted "
+            "nowhere." % (NPCDIAG_HDR, ", ".join(missing)))
+
+    _NPCDIAG_SLOT_CACHE["slots"] = slots
+    return slots
+
+
+def NPCDIAG_GUARD(diag):
+    """N3's stale-tree guard, both directions. See the block comment above:
+    unlike R1/R2/R3 this one is emitted at 0 as well, because a mismatched tree
+    produces a diagnostic line full of zeroes and zero is a RESULT here."""
+    if diag:
+        return (
+            "#if defined(DC_NPCDIAG) && !DC_NPCDIAG\n"
+            "#error \"DC_SRC_SHRINK N3: dc/build/shrinksrc was generated with "
+            "--npcdiag=1, so the villager-construction gates are instrumented -- "
+            "but this build defines DC_NPCDIAG=0, where every dc_npcdiag_*() is "
+            "an empty function. Re-run tools/dcstub/make_src_shrink.py with "
+            "--npcdiag=0 (or rm -rf dc/build/shrinksrc) before building.\"\n"
+            "#endif")
+    return (
+        "#if defined(DC_NPCDIAG) && DC_NPCDIAG\n"
+        "#error \"DC_SRC_SHRINK N3: dc/build/shrinksrc was generated with "
+        "--npcdiag=0, so NOTHING calls dc_npcdiag_gate() -- but this build "
+        "defines DC_NPCDIAG nonzero. The [DC/NPCDIAG] line would print every "
+        "counter as zero, which is a MEANINGFUL READING and would be a lie. "
+        "Re-run tools/dcstub/make_src_shrink.py with --npcdiag=1 (or rm -rf "
+        "dc/build/shrinksrc) before building.\"\n"
+        "#endif")
+
+
+def NPCDIAG_HEAD():
+    """The declarations every N3-rewritten TU needs, emitted before its first
+    injected call.
+
+    Self-guarded with DC_NPCDIAG_DECLS_ because ac_npc.c and ac_npc2.c each
+    include BOTH ac_npc_cloth.c_inc and ac_npc_ctrl.c_inc, in that order — so
+    two copies of this block land in one translation unit.
+
+    Declared here rather than pulled from dc/include/dc_npcdiag.h for the same
+    reason S10/S11/S12 declare theirs: these TUs are vendored decomp and must
+    not grow a dc/ include (CLAUDE.md §1)."""
+    slots = _npcdiag_slots()
+    out = [
+        "/* " + "-" * 68,
+        " * DC_SRC_SHRINK N3: the villager-construction diagnostic",
+        " * (dc/src/dc_npcdiag.c). dc_npcdiag_gate() RETURNS ITS SECOND ARGUMENT",
+        " * UNTOUCHED, so every wrapped predicate keeps its value, its type and",
+        " * its position in the enclosing short-circuit chain -- no branch in",
+        " * this file changes shape.",
+        " *",
+        " * The slot numbers below are GENERATED from " + NPCDIAG_HDR + ",",
+        " * which is their single source of truth; do not edit them here.",
+        " * " + "-" * 68 + " */",
+        "#ifndef DC_NPCDIAG_DECLS_",
+        "#define DC_NPCDIAG_DECLS_",
+        "extern int  dc_npcdiag_gate(int slot, int val);",
+        "extern void dc_npcdiag_tick(int wade, int set_mode, int next_bx,",
+        "                            int next_bz, int now_bx, int now_bz,",
+        "                            unsigned int exist, unsigned int appear,",
+        "                            const void* npclist);",
+        "extern void dc_npcdiag_mgr_ct(void);",
+        "extern void dc_npcdiag_ctrl_ct(int is_npc2, int clip_was_already_set);",
+        "extern void dc_npcdiag_clip_set(int is_npc2);",
+        "extern void dc_npcdiag_cloth_begin(void);",
+        "extern void dc_npcdiag_cloth_bank(int ok);",
+        "/* Which NPC controller this TU is being compiled as. ac_npc2.c defines",
+        " * aNPC_NPC2 before it includes either .c_inc, and only the non-NPC2",
+        " * flavour installs CLIP(npc_clip)->setupActor_proc",
+        " * (ac_npc_ctrl.c_inc:817-821) -- so a clip installed by the NPC2",
+        " * controller is non-NULL and STILL fails aSNMgr_make_npc's gate. That",
+        " * is exactly the shape hypothesis 3 predicts, and it is why the",
+        " * one-shot reports which controller it came from. */",
+        "#ifdef aNPC_NPC2",
+        "#define DC_NPCDIAG_IS_NPC2 1",
+        "#else",
+        "#define DC_NPCDIAG_IS_NPC2 0",
+        "#endif",
+    ]
+    out += ["#define %-28s %d" % (n, v) for n, v in slots]
+    out.append("#endif /* DC_NPCDIAG_DECLS_ */")
+    return "\n".join(out) + "\n"
+
+
+def _lit(text):
+    """An anchor for a verbatim multi-line block.
+
+    re.escape rather than hand-written escaping: these blocks are 5-15 lines of
+    C with parentheses, brackets, `*`, `|` and `+` in them, and one missed
+    backslash is a rule that silently stops matching -- the exact failure this
+    whole file is built around. `^`/`$` are MULTILINE-anchored by apply_rules,
+    so the block must start at a line start and end at a line end."""
+    return "^" + re.escape(text) + "$"
+
+
+# --- N3's three rule builders ---------------------------------------------
+# Each is anchored on a WHOLE function or a whole contiguous gate chain, never
+# on a single line, so a mis-anchor is impossible rather than merely unlikely
+# (the standard set by the block comment above NPCTEX_GUARD).
+
+def _npcdiag_mgr_rules():
+    """src/actor/ac_set_npc_manager.c — SWAP. Only built at --npcdiag=1."""
+    return ("src/actor/ac_set_npc_manager.c", "swap", [
+        # 1. The declarations, after the last include and before every use.
+        (1, _lit('#include "m_event_map_npc.h"'),
+         '#include "m_event_map_npc.h"\n\n' + NPCDIAG_HEAD()),
+
+        # 2. aSNMgr_actor_ct's tail. Anchored through the closing brace because
+        #    this setup_set_proc(REGULAR) line also appears in
+        #    aSNMgr_actor_move's mFI_WADE_START arm, where it is followed by
+        #    `break;` instead. Without this counter, every zero below is
+        #    ambiguous: "the gate failed" and "the manager was never
+        #    constructed" would look identical.
+        (1, _lit("    aSNMgr_setup_set_proc(manager, aSNMgr_SET_MODE_REGULAR);\n"
+                 "}"),
+         "    aSNMgr_setup_set_proc(manager, aSNMgr_SET_MODE_REGULAR);\n"
+         "    dc_npcdiag_mgr_ct(); " + MARK + "\n"
+         "}"),
+
+        # 3. aSNMgr_check_safe_ut — the INSIDE of the utnum gate, split three
+        #    ways so "the field data says no NPC may stand here"
+        #    (mNpc_CheckNpcSet_fgcol) is distinguishable from "the ground steps"
+        #    (mCoBG_ExistHeightGap_KeepAndNow). Hypothesis 4 lives here.
+        (1, _lit(
+            "static int aSNMgr_check_safe_ut(int bx, int bz, int ux, int uz, mActor_name_t item, mCoBG_Collision_u* col_p) {\n"
+            "    int ret = FALSE;\n"
+            "\n"
+            "    if (col_p != NULL) {\n"
+            "        xyz_t pos;\n"
+            "\n"
+            "        if (mNpc_CheckNpcSet_fgcol(item, col_p->data.unit_attribute)) {\n"
+            "            mFI_BkandUtNum2Wpos(&pos, bx, bz, ux, uz);\n"
+            "\n"
+            "            if (!mCoBG_ExistHeightGap_KeepAndNow(pos)) {"),
+         "static int aSNMgr_check_safe_ut(int bx, int bz, int ux, int uz, mActor_name_t item, mCoBG_Collision_u* col_p) {\n"
+         "    int ret = FALSE;\n"
+         "\n"
+         "    dc_npcdiag_gate(DC_NPCDIAG_G_UT_CALL, 1); " + MARK + "\n"
+         "    if (dc_npcdiag_gate(DC_NPCDIAG_G_UT_COL, col_p != NULL)) {\n"
+         "        xyz_t pos;\n"
+         "\n"
+         "        if (dc_npcdiag_gate(DC_NPCDIAG_G_UT_FGCOL, mNpc_CheckNpcSet_fgcol(item, col_p->data.unit_attribute))) {\n"
+         "            mFI_BkandUtNum2Wpos(&pos, bx, bz, ux, uz);\n"
+         "\n"
+         "            if (dc_npcdiag_gate(DC_NPCDIAG_G_UT_HGAP, !mCoBG_ExistHeightGap_KeepAndNow(pos))) {"),
+
+        # 4. aSNMgr_make_npc's head and its CLIP gate. `ent` vs `gate` is what
+        #    separates hypothesis 3 (npc_clip NULL / no setupActor_proc) from
+        #    "the make list was empty", which look the same from outside.
+        (1, _lit(
+            "static void aSNMgr_make_npc(SET_NPC_MANAGER_ACTOR* manager, GAME_PLAY* play) {\n"
+            "    aSNMgr_make_c* make_p = manager->npc_info.make;\n"
+            "    mNpc_NpcList_c* list_p = manager->npc_info.list_p;\n"
+            "    int idx;\n"
+            "    int make_ret;\n"
+            "    int i;\n"
+            "\n"
+            "    if (CLIP(npc_clip) != NULL && CLIP(npc_clip)->setupActor_proc != NULL) {"),
+         "static void aSNMgr_make_npc(SET_NPC_MANAGER_ACTOR* manager, GAME_PLAY* play) {\n"
+         "    aSNMgr_make_c* make_p = manager->npc_info.make;\n"
+         "    mNpc_NpcList_c* list_p = manager->npc_info.list_p;\n"
+         "    int idx;\n"
+         "    int make_ret;\n"
+         "    int i;\n"
+         "\n"
+         "    dc_npcdiag_gate(DC_NPCDIAG_G_MK_ENT, 1); " + MARK + "\n"
+         "    if (dc_npcdiag_gate(DC_NPCDIAG_G_MK_GATE, CLIP(npc_clip) != NULL && CLIP(npc_clip)->setupActor_proc != NULL)) {"),
+
+        # 5. The spawn call itself. `slot` counts make entries that held an NPC
+        #    name at all, so an empty make list is not read as a failed spawn.
+        (1, _lit(
+            "                case NAME_TYPE_NPC:\n"
+            "                    idx = make_p->idx;\n"
+            "                    if (idx != -1) {\n"
+            "                        make_ret = CLIP(npc_clip)->setupActor_proc(play, make_p->make_name, idx, idx, -1, make_p->bx, make_p->bz, make_p->ux, make_p->uz);"),
+         "                case NAME_TYPE_NPC:\n"
+         "                    dc_npcdiag_gate(DC_NPCDIAG_G_MK_SLOT, 1); " + MARK + "\n"
+         "                    idx = make_p->idx;\n"
+         "                    if (dc_npcdiag_gate(DC_NPCDIAG_G_MK_IDX, idx != -1)) {\n"
+         "                        dc_npcdiag_gate(DC_NPCDIAG_G_MK_CALLED, 1); " + MARK + "\n"
+         "                        make_ret = dc_npcdiag_gate(DC_NPCDIAG_G_MK_RET, CLIP(npc_clip)->setupActor_proc(play, make_p->make_name, idx, idx, -1, make_p->bx, make_p->bz, make_p->ux, make_p->uz));"),
+
+        # 6. aSNMgr_set_npc_regular's loop and its first two gates. The whole
+        #    `for` header is in the anchor because `for (i = 0; i <
+        #    ANIMAL_NUM_MAX; i++) {` alone appears eleven times in this file;
+        #    the mNpcW_APPEAR_STATUS_REGULAR line is what makes it unique.
+        (1, _lit(
+            "    for (i = 0; i < ANIMAL_NUM_MAX; i++) {\n"
+            "        int set = TRUE;\n"
+            "\n"
+            "        if (aSNMgr_chk_exist_and_appear(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE) {\n"
+            "            if (aSNMgr_check_in_scope(list_p->position, &manager->scope) == TRUE) {"),
+         "    dc_npcdiag_gate(DC_NPCDIAG_G_REG_CALL, 1); " + MARK + "\n"
+         "    for (i = 0; i < ANIMAL_NUM_MAX; i++) {\n"
+         "        int set = TRUE;\n"
+         "\n"
+         "        if (dc_npcdiag_gate(DC_NPCDIAG_G_REG_EXIST, aSNMgr_chk_exist_and_appear(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE)) {\n"
+         "            if (dc_npcdiag_gate(DC_NPCDIAG_G_REG_SCOPE, aSNMgr_check_in_scope(list_p->position, &manager->scope) == TRUE)) {"),
+
+        # 7. The REGULAR pass's last three gates.
+        (1, _lit(
+            "                    aSNMgr_get_block_ut_num_set_npc(&bx, &bz, &ux, &uz, list_p);\n"
+            "                    make_flag = aSNMgr_set_appear_info_regular(manager, bx, bz, i);\n"
+            "                    if (make_flag == TRUE) {\n"
+            "                        if (((joint_event >> i) & 1) == 0) {\n"
+            "                            make_flag = aSNMgr_get_safe_utnum(&ux, &uz, bx, bz, *winfo_p);\n"
+            "                        }\n"
+            "\n"
+            "                        if (make_flag == TRUE &&\n"
+            "                            aSNMgr_set_make_npc(manager->npc_info.make, animal_p->id.npc_id, bx, bz, ux, uz, info_p, i) != -1) {"),
+         "                    aSNMgr_get_block_ut_num_set_npc(&bx, &bz, &ux, &uz, list_p);\n"
+         "                    make_flag = dc_npcdiag_gate(DC_NPCDIAG_G_REG_APPEAR, aSNMgr_set_appear_info_regular(manager, bx, bz, i));\n"
+         "                    if (make_flag == TRUE) {\n"
+         "                        if (((joint_event >> i) & 1) == 0) {\n"
+         "                            make_flag = dc_npcdiag_gate(DC_NPCDIAG_G_REG_UTNUM, aSNMgr_get_safe_utnum(&ux, &uz, bx, bz, *winfo_p));\n"
+         "                        }\n"
+         "\n"
+         "                        if (make_flag == TRUE &&\n"
+         "                            dc_npcdiag_gate(DC_NPCDIAG_G_REG_MAKE, aSNMgr_set_make_npc(manager->npc_info.make, animal_p->id.npc_id, bx, bz, ux, uz, info_p, i) != -1)) {"),
+
+        # 8. aSNMgr_set_npc_guest — the pass that ACTUALLY RUNS once the player
+        #    stops changing acre, because aSNMgr_set_npc_regular's tail switch
+        #    installs GUEST on every mFI_WADE_NONE tick. Instrumenting only the
+        #    REGULAR pass would have measured the wrong loop. Its two outer
+        #    gates count BLOCKED, not passed: they are `!`-tested in the source.
+        (1, _lit(
+            "    if (!aSNMgr_chk_arbeit_and_demo_and_halloween() &&\n"
+            "        !aSNMgr_check_in_block_max(manager->player_pos.now_block[0], manager->player_pos.now_block[1], (u8*)manager->npc_info.in_block_num)) {\n"
+            "        for (i = 0; i < ANIMAL_NUM_MAX; i++) {\n"
+            "            if (aSNMgr_chk_exist_and_appear_and_event(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE) {\n"
+            "                if (aSNMgr_check_in_scope(list_p->position, scope_p) == TRUE) {\n"
+            "                    aSNMgr_get_block_ut_num_set_npc(&bx, &bz, &ux, &uz, list_p);\n"
+            "                    if (aSNMgr_set_appear_info_guest(manager, *winfo_p, bx, bz) == TRUE &&\n"
+            "                        aSNMgr_get_safe_utnum(&ux, &uz, bx, bz, *winfo_p) == TRUE &&\n"
+            "                        aSNMgr_set_make_npc(manager->npc_info.make, animal_p->id.npc_id, bx, bz, ux, uz, info_p, i) != -1) {"),
+         "    dc_npcdiag_gate(DC_NPCDIAG_G_GST_CALL, 1); " + MARK + "\n"
+         "    if (!dc_npcdiag_gate(DC_NPCDIAG_G_GST_ARBEIT, aSNMgr_chk_arbeit_and_demo_and_halloween()) &&\n"
+         "        !dc_npcdiag_gate(DC_NPCDIAG_G_GST_BLKMAX, aSNMgr_check_in_block_max(manager->player_pos.now_block[0], manager->player_pos.now_block[1], (u8*)manager->npc_info.in_block_num))) {\n"
+         "        for (i = 0; i < ANIMAL_NUM_MAX; i++) {\n"
+         "            if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_EXIST, aSNMgr_chk_exist_and_appear_and_event(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE)) {\n"
+         "                if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_SCOPE, aSNMgr_check_in_scope(list_p->position, scope_p) == TRUE)) {\n"
+         "                    aSNMgr_get_block_ut_num_set_npc(&bx, &bz, &ux, &uz, list_p);\n"
+         "                    if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_APPEAR, aSNMgr_set_appear_info_guest(manager, *winfo_p, bx, bz) == TRUE) &&\n"
+         "                        dc_npcdiag_gate(DC_NPCDIAG_G_GST_UTNUM, aSNMgr_get_safe_utnum(&ux, &uz, bx, bz, *winfo_p) == TRUE) &&\n"
+         "                        dc_npcdiag_gate(DC_NPCDIAG_G_GST_MAKE, aSNMgr_set_make_npc(manager->npc_info.make, animal_p->id.npc_id, bx, bz, ux, uz, info_p, i) != -1)) {"),
+
+        # 9. The per-tick sample, at the TOP of aSNMgr_actor_move and BEFORE its
+        #    wade switch — so next_block/now_block are still the values the last
+        #    set pass actually used, not the ones this tick is about to install.
+        #    This is what answers hypothesis 1 (the wade histogram) and
+        #    hypothesis 5 (the roster's acres against the player's).
+        (1, _lit(
+            "static void aSNMgr_actor_move(ACTOR* actorx, GAME* game) {\n"
+            "    SET_NPC_MANAGER_ACTOR* manager = (SET_NPC_MANAGER_ACTOR*)actorx;\n"
+            "    GAME_PLAY* play = (GAME_PLAY*)game;\n"
+            "\n"
+            "    aSNMgr_get_player_pos(&manager->player_pos.pos, game);\n"
+            "    switch (mFI_GetPlayerWade()) {"),
+         "static void aSNMgr_actor_move(ACTOR* actorx, GAME* game) {\n"
+         "    SET_NPC_MANAGER_ACTOR* manager = (SET_NPC_MANAGER_ACTOR*)actorx;\n"
+         "    GAME_PLAY* play = (GAME_PLAY*)game;\n"
+         "\n"
+         "    aSNMgr_get_player_pos(&manager->player_pos.pos, game);\n"
+         "    dc_npcdiag_tick(mFI_GetPlayerWade(), manager->set_mode,\n"
+         "                    manager->player_pos.next_block[0], manager->player_pos.next_block[1],\n"
+         "                    manager->player_pos.now_block[0], manager->player_pos.now_block[1],\n"
+         "                    manager->npc_info.exist, manager->npc_info.appear,\n"
+         "                    manager->npc_info.list_p); " + MARK + "\n"
+         "    switch (mFI_GetPlayerWade()) {"),
+    ])
+
+
+def _npcdiag_cloth_rules():
+    """src/actor/npc/ac_npc_cloth.c_inc — SHADOW. Only built at --npcdiag=1.
+
+    ⚠️ THIS IS THE ONE THAT MUST NOT BE MISREAD. aNPC_dma_regist_check_cloth_data
+    returns FALSE on the FIRST attempt for any cloth BY DESIGN — the DMA
+    completes a frame later — so a low `setup: chk` is not evidence of anything
+    on its own. What IS decisive is the bank tally: if
+    mSc_secure_exchange_keep_bank fails for all ten slots, every `cloth->id`
+    stays mSC_BANK_NONE, aNPC_get_new_cloth_data_area can never return a slot,
+    and aNPC_setupNpc_check is FALSE forever with no diagnostic at all.
+    `cloth=0/10` on the report line is that hypothesis, proved or killed."""
+    return ("src/actor/npc/ac_npc_cloth.c_inc", "shadow", [
+        # The declarations, before the file's first function. This .c_inc is
+        # included BEFORE ac_npc_ctrl.c_inc by both ac_npc.c and ac_npc2.c, so
+        # this is the copy of the block that actually survives the
+        # DC_NPCDIAG_DECLS_ guard; the one in ac_npc_ctrl.c_inc is the
+        # standalone case.
+        (1, _lit("static void aNPC_dma_cloth_data(ACTOR* actorx) {"),
+         NPCDIAG_HEAD()
+         + "static void aNPC_dma_cloth_data(ACTOR* actorx) {"),
+
+        # The whole reservation loop, anchored end to end. Three calls: reset,
+        # then one per slot down each arm of the if.
+        (1, _lit(
+            "    for (i = 0; i < aNPC_CTRL_CLOTH_NUM; i++) {\n"
+            "        if (mSc_secure_exchange_keep_bank(exc, 0, aNPC_CLOTH_TEX_SIZE + aNPC_CLOTH_PAL_SIZE) != NULL) {\n"
+            "            cloth->texture_bank.size = aNPC_CLOTH_TEX_SIZE;"),
+         "    dc_npcdiag_cloth_begin(); " + MARK + "\n"
+         "    for (i = 0; i < aNPC_CTRL_CLOTH_NUM; i++) {\n"
+         "        if (mSc_secure_exchange_keep_bank(exc, 0, aNPC_CLOTH_TEX_SIZE + aNPC_CLOTH_PAL_SIZE) != NULL) {\n"
+         "            dc_npcdiag_cloth_bank(1); " + MARK + "\n"
+         "            cloth->texture_bank.size = aNPC_CLOTH_TEX_SIZE;"),
+        (1, _lit(
+            "        } else {\n"
+            "            cloth->texture_bank.ram_start = NULL;\n"
+            "            cloth->palette_bank.ram_start = NULL;\n"
+            "            cloth->id = mSC_BANK_NONE;"),
+         "        } else {\n"
+         "            dc_npcdiag_cloth_bank(0); " + MARK + "\n"
+         "            cloth->texture_bank.ram_start = NULL;\n"
+         "            cloth->palette_bank.ram_start = NULL;\n"
+         "            cloth->id = mSC_BANK_NONE;"),
+    ])
+
+
+def _npcdiag_ctrl_rules(diag):
+    """The N3 rules that ride S1c's src/actor/npc/ac_npc_ctrl.c_inc entry.
+
+    ⚠️ EMITTED AT --npcdiag=0 TOO, unlike the other two N3 entries. At 0 the
+    only thing it contributes is NPCDIAG_GUARD's `#error`, anchored on
+    aNPC_setupActor_sub's definition; that is the tripwire for a tree/build
+    mismatch, and it has to live in a TU that is in the shrink tree at EVERY
+    setting or it could not fire when the tree was generated at 0."""
+    sub_body = (
+        "static int aNPC_setupActor_sub(GAME_PLAY* play, s8 idx, mActor_name_t name, s16 profile, xyz_t* pos, s16 mvlist_no,\n"
+        "                               s16 arg) {\n"
+        "    int ret = FALSE;\n"
+        "\n"
+        "    if (aNPC_setupNpc_check(idx, name) == TRUE) {\n"
+        "        if (Actor_info_make_actor(&play->actor_info, (GAME*)play, profile, pos->x, pos->y, pos->z, 0, 0, 0,\n"
+        "                                  play->block_table.block_x, play->block_table.block_z, mvlist_no, name, arg, idx,\n"
+        "                                  -1) != NULL) {"
+    )
+    head = NPCDIAG_GUARD(diag) + "\n"
+    if not diag:
+        # The guard and nothing else: the vendored body goes back verbatim, so
+        # --npcdiag=0 leaves this TU byte-identical apart from the #if.
+        return [(1, _lit(sub_body), head + sub_body)]
+
+    head += NPCDIAG_HEAD()
+    rules = [
+        # aNPC_setupActor_sub — the last two gates before an ACTOR exists.
+        # `chk` is aNPC_setupNpc_check, i.e. the cloth; `actor` is
+        # Actor_info_make_actor, i.e. the actor cap at m_actor.c:760 and the
+        # TARGET_PC class_size guard at :765-770, which IS live on this target.
+        (1, _lit(sub_body),
+         head
+         + "static int aNPC_setupActor_sub(GAME_PLAY* play, s8 idx, mActor_name_t name, s16 profile, xyz_t* pos, s16 mvlist_no,\n"
+           "                               s16 arg) {\n"
+           "    int ret = FALSE;\n"
+           "\n"
+           "    dc_npcdiag_gate(DC_NPCDIAG_G_SU_ENT, 1); " + MARK + "\n"
+           "    if (dc_npcdiag_gate(DC_NPCDIAG_G_SU_CHK, aNPC_setupNpc_check(idx, name) == TRUE)) {\n"
+           "        if (dc_npcdiag_gate(DC_NPCDIAG_G_SU_ACTOR, Actor_info_make_actor(&play->actor_info, (GAME*)play, profile, pos->x, pos->y, pos->z, 0, 0, 0,\n"
+           "                                  play->block_table.block_x, play->block_table.block_z, mvlist_no, name, arg, idx,\n"
+           "                                  -1) != NULL)) {"),
+
+        # aNPC_actor_ct_c — the ONLY place CLIP(npc_clip) is ever assigned, and
+        # the frame in which aNPC_keep_cloth_data_area has just finished, so the
+        # cloth tally is final one statement later. Two one-shots: the
+        # controller ran, and the clip was installed.
+        (1, _lit(
+            "    aNPC_ctrlActor = actorx;\n"
+            "    aNPC_keep_cloth_data_area(obj_ex);\n"
+            "\n"
+            "    if (CLIP(npc_clip) == NULL) {\n"
+            "        CLIP(npc_clip) = &aNPC_clip;\n"
+            "        bzero(&aNPC_clip, sizeof(aNPC_clip));"),
+         "    aNPC_ctrlActor = actorx;\n"
+         "    aNPC_keep_cloth_data_area(obj_ex);\n"
+         "    dc_npcdiag_ctrl_ct(DC_NPCDIAG_IS_NPC2, CLIP(npc_clip) != NULL); " + MARK + "\n"
+         "\n"
+         "    if (CLIP(npc_clip) == NULL) {\n"
+         "        CLIP(npc_clip) = &aNPC_clip;\n"
+         "        bzero(&aNPC_clip, sizeof(aNPC_clip));\n"
+         "        dc_npcdiag_clip_set(DC_NPCDIAG_IS_NPC2); " + MARK),
+    ]
+    return rules
 
 
 def NPCSEED_GUARD(seed):
@@ -1867,6 +2391,19 @@ def main():
                          "otherwise be silent. 1 and 2 inject the same call "
                          "(the observe-only behaviour of 2 is chosen inside "
                          "dc/src/dc_npcseed.c, not here).")
+    ap.add_argument("--npcdiag", type=int,
+                    default=int(os.environ.get("DC_NPCDIAG", "0") or "0"),
+                    choices=(0, 1),
+                    help="N3, the villager-construction diagnostic. 1 wraps the "
+                         "nine serial gates between the npclist and a live "
+                         "ACTOR in dc_npcdiag_gate() and adds the per-tick wade "
+                         "sample, the cloth-bank tally and the clip one-shot. 0 "
+                         "(the default) injects nothing and adds no file to "
+                         "shrink.list -- a byte-identical revert. Must match "
+                         "dc/Makefile's DC_NPCDIAG; ac_npc_ctrl.c_inc carries an "
+                         "#error for a mismatch IN EITHER DIRECTION, because a "
+                         "tree/build mismatch here prints a full diagnostic line "
+                         "of zeroes and zero is a meaningful reading.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -1876,12 +2413,19 @@ def main():
     npctex = bool(args.npctex_pool)
     npcmdl = bool(args.npcmdl_pool)
     npcseed = bool(args.npc_seed)
+    npcdiag = bool(args.npcdiag)
     # S7 and S1c are built here, not at import time, because S10 rides in S7's
-    # src/game/m_field_make.c entry and S11 + S12 ride in S1c's
+    # src/game/m_field_make.c entry and S11 + S12 + N3 ride in S1c's
     # src/actor/npc/ac_npc_ctrl.c_inc entry, and all need the parsed flags.
-    rules_all = (RULES + [_s1c_rules(npctex, npcmdl)]
+    rules_all = (RULES + [_s1c_rules(npctex, npcmdl, npcdiag)]
                  + _s11_reset_rules(npctex, npcmdl, npcseed)
                  + _s7_rules(bgtex) + _audio_rules(audio))
+    # N3's other two TUs exist ONLY at --npcdiag=1. That is what keeps 0 a
+    # byte-identical revert: no extra entry in shrink.list, no extra shadow on
+    # the include path. The guard for the mismatched-tree case lives in
+    # ac_npc_ctrl.c_inc above, which is in the tree at every setting.
+    if npcdiag:
+        rules_all += [_npcdiag_mgr_rules(), _npcdiag_cloth_rules()]
     expected = EXPECTED + ([] if audio else EXPECTED_AUDIO_OFF)
 
     out_root = Path(args.out).resolve()
@@ -2024,6 +2568,15 @@ def main():
                   "so this COSTS ~115,296 B")
             print("                   of .bss and buys 31 species their "
                   "geometry")
+        # N3 moves no bytes at all — it is an instrument. Printed so a build
+        # log records whether the diagnostic seams are in the tree, which is
+        # the one fact a [DC/NPCDIAG] line full of zeroes cannot tell you.
+        print("  N3 / NPCDIAG   : {}   [--npcdiag={}]".format(
+            "9 gates + wade sample + cloth tally instrumented (3 TUs)"
+            if npcdiag else "guard only, nothing injected", args.npcdiag))
+        if npcdiag:
+            print("                   {} gate slots parsed from {}".format(
+                len(_npcdiag_slots()), NPCDIAG_HDR))
         print("  (dc/Makefile adds -16,384 more by dropping KOS's dcache")
         print("   walk buffer out of dc/src/dc_os.c — see DC_OS_TU_OPT there.)")
 

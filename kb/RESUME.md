@@ -18,19 +18,35 @@ Dreamcast with loading **at parity with the emulator** (human verdict, the
 and is taken to the houses. All 3,936 objects in the link compile and link for
 sh-elf with zero exclusions.
 
-⭐⭐⭐ **AND SINCE THE S14 BURN (2026-08-09) IT RUNS BETTER ON HARDWARE THAN THE
-EMULATOR MEASURED.** Human verdict on `AC-DC-20260809b.cdi`: *"definitely runs
-better on real hardware"*, *"sound is perfect, no skipping"* — against
-`[STUTTER] 65 / 900 s` in Flycast, which had scored the same batch as a **wash**
-(`us/v` 2.51 → 2.48, inside the noise floor). **That is measurement rule 12**:
-four of S14's seven changes pay only in cache misses and Flycast models no
-cache, so its number was the floor, not the result. `kb/batch-s14.md` §7.
+🔴 **HARDWARE IS MUCH SLOWER THAN THE EMULATOR. THE AUDIO IS FIXED; THE FRAME
+RATE IS NOT.** Human verdict, restated 2026-08-10 and **authoritative**:
+*"hardware does not run better than the emulator, it runs much worse. the audio
+sounds good though."*
 
-⚠️ **This SUPERSEDES the older verdict** *"on hardware the game runs super
-stable, fps and audio is worse for sure … the emulator runs buttery smooth"* —
-that was the pre-S14 build. The only hardware FPS FIGURE the project has ever
-had is still the old "~11 FPS in the town": **the new verdict is a direction,
-not a magnitude, and nothing has attributed it to a specific change.**
+⚠️ **THIS CORRECTS A CLAIM THIS FILE CARRIED FROM 2026-08-09 TO 2026-08-10.**
+The S14 burn verdict *"definitely runs better on real hardware"* was a
+comparison against **the previous hardware build**, not against Flycast, and
+this file promoted it to "better than the emulator measured". It is not. What
+S14 actually banked, and what still holds:
+
+- ✅ **the audio tail** — *"sound is perfect, no skipping"*, *"music doesn't cut
+  out at all or stutter"*, against `[STUTTER] 65 / 900 s` in Flycast.
+- 🔴 **the frame rate — NOT banked.** *"the FPS is still definitely worse than
+  emulator"* (2026-08-09) and *"much worse"* (2026-08-10).
+
+**Measurement rule 12 survives on the audio half alone** and is unchanged in
+mechanism: Flycast scored S14 a wash (`us/v` 2.51 → 2.48, inside the noise
+floor) and the burn fixed the stutter, so an emulator "no change" still cannot
+falsify a locality claim. What must not be repeated is reading that as an FPS
+result. `kb/batch-s14.md` §7.
+
+⭐ **CONSEQUENCE — THE PIVOT OF 2026-08-09 WAS BUILT ON THIS AND IS WITHDRAWN.**
+"FPS is good enough on hardware, the workstream is now playability" rested on
+the misread verdict. **FPS is not good enough, the deficit is on silicon, and
+Flycast cannot see it** (§6). The only hardware FPS FIGURE the project has ever
+had is still the old "~11 FPS in the town", and nothing has attributed the gap
+to a specific cause. **§6 is no longer an open question filed for later — it is
+the FPS workstream.**
 `AC-DC-20260809c-nof5.cdi` isolates F5 (same objects, only the link order
 differs); `AC-DC-20260809a-pmcr.cdi` gives `istall`. **Every FPS number in this
 kb is still Flycast's, and Flycast models no instruction cache, no operand cache
@@ -163,13 +179,19 @@ Add to the prefix above, then run the harness:
 12. ⭐⭐⭐ **A FLYCAST "NO CHANGE" IS NOT EVIDENCE AGAINST A CHANGE WHOSE
     MECHANISM IS CACHE — PROVEN 2026-08-09.** Batch S14 measured as a **wash**
     in Flycast (`us/v` 2.51 → 2.48, inside the ±2 % floor, every `[VTXSPLIT]`
-    bucket within 0.03 ms) and came back from a burned CD-R as *"definitely runs
-    better on real hardware"* with *"sound perfect, no skipping"* against
-    `[STUTTER] 65 / 900 s` in the emulator. Flycast models **no instruction
-    cache and no operand cache**, so a change made of locality is invisible
-    there BY CONSTRUCTION. **The emulator can falsify an instruction-count
-    claim; it can NEVER falsify a locality claim** — and the converse trap is
-    that a Flycast *win* on such a change is understated, not absent.
+    bucket within 0.03 ms) and came back from a burned CD-R with *"sound
+    perfect, no skipping"* against `[STUTTER] 65 / 900 s` in the emulator.
+    Flycast models **no instruction cache and no operand cache**, so a change
+    made of locality is invisible there BY CONSTRUCTION. **The emulator can
+    falsify an instruction-count claim; it can NEVER falsify a locality claim**
+    — and the converse trap is that a Flycast *win* on such a change is
+    understated, not absent.
+    ⚠️ **The FPS half of this rule's original evidence is WITHDRAWN (2026-08-10).**
+    The burn's *"definitely runs better on real hardware"* was against the
+    previous **hardware** build, not against Flycast; the standing human verdict
+    is that hardware is **much worse** than the emulator. The rule rests on the
+    audio result. **Do not cite rule 12 as evidence that any FPS change landed
+    on silicon — nothing has ever been measured there.** §1.
     ⚠️ **The audio half measures the TAIL, not the median.**
     `DC_AUDIO_MAX_FRAMES` caps production at
     `MAX_FRAMES × 17.49 ms × 2 ticks` **per PRESENTED frame** (§5 audio rule 4),
@@ -402,6 +424,67 @@ window, bracketed into `[PHASE]`'s draw/skip/vi plus `audio` and `xform`.
 - **What to photograph:** the town, standing still, ~12 s after boot (rows read
   `--` until their event has had a window). **`cyc` (does `ms` ≈ `wall`?),
   `istall`, `dstall`.**
+
+---
+
+## 6b. ⭐ P2 — THE INSTRUMENT §6 ASKED FOR NOW EXISTS AND HAS RUN (2026-08-12)
+
+`dc/src/dc_profdump.c` + the `DC_GPROF` block in `dc/Makefile` + the nine knobs
+forwarded by `dc/build-dc.sh`. **`-pg` on the LINK LINE ONLY, zero TUs** — the
+optimized code stays byte-identical, and the map proves our strong
+`gprof_init()` wins over `libgprof.a(gmon.o)`'s. Validated end to end in
+Flycast, console sink:
+
+```
+[GPROF] END lines=28 raw=612433 enc=1585 crc32=2fd07100
+612,433 B gmon.out recovered; 31,010 samples in 470 non-empty bins at 100 Hz
+94.76% thd_idle_task | 0.66 vid_waitvbl | 0.51 dc_gx_backend_submit
+0.50 scif_write | 0.38 RspStart | 0.20 emu64::set_position | 0.18 cull_batch
+```
+
+⭐ **The z0 zero-run RLE is what makes it affordable: 612,433 → 1,585 B → 28
+console lines**, not the ~145 s of serial the naive estimate predicted.
+🔴 **IDLE IS 94.76 % — COMPARE NON-IDLE SHARES, NEVER ABSOLUTE SECONDS.**
+⚠️ Samples accrue per RESCHEDULE, not per timer tick, so `dc_dvd_read_yielding()`
+is over-represented. Relative shares only.
+
+**It is TWO IMAGES and that is forced by hardware, not a compromise**: Flycast
+has no SD adapter, and on hardware the adapter occupies the serial port so there
+is no console. `DC_GPROF_SD=0` is the emulator half, `=1` the hardware half. The
+diff survives it — gprof symbolises against each run's own ELF and `-pg` changes
+no game code.
+
+Three things this cost, all now written down where they will be found again:
+
+- 🔴 **`fopen(...,"a")` IS UNUSABLE ON `fs_fat`.** `O_APPEND` is `0x08`, inside
+  KOS's `O_MODE_MASK` `0x0f`, so `fs_fat_write()` returns `EBADF` on every
+  append write — while `fs_fat_open()` does **not** check the mode, so the open
+  succeeds. libgprof writes gmon.out with `"a"`. A naive `/sd` sink comes home
+  from a burn with a **20-byte** file and no error anywhere. Fixed by never
+  letting gmon.c open the card: it writes to `/prof` all run and `prof_write()`
+  forwards into a file this port opened in `"w"` and holds open.
+- 🔴 **PROBING FOR AN ABSENT SD CARD WEDGES.** KOS's `sci_spi_rw_byte` waits on
+  RDRF with **no cycle cap** (every TDRE wait in `sci.c` has one; the four RDRF
+  waits in the SPI helpers do not), and SCSSR1's reset value passes every
+  bounded gate, so `sd_init_ex()` pins forever. SCIF is bounded but
+  `acmd41_loop()` is 5000 × two commands × a 500 ms ceiling. **`DC_GPROF_SD_IF`
+  now defaults to 0 (SCIF only)** and the "one CDI works with or without a card"
+  claim is **falsified**.
+- ⚠️ **A wedge behind a muted console is indistinguishable from a game hang.**
+  It cost four runs and a wrong diagnosis (twice: "the sampler is slow", then
+  "K.K. Slider hangs" — the screen just happened to show K.K.). The dump now
+  emits `[GPROF] dump: muting console, probing SD` **before** `dbgio_disable()`.
+
+✅ **Cleared under suspicion:** the sampler is NOT expensive —
+`histogram_callback` is ~20 instructions per reschedule, `thd_poll` parks the
+caller rather than spinning, and `[PERF]` read 24-28 FPS with it armed.
+
+🔴 **F5 MUST BE OFF FOR A keeplist-town BUILD.** `dc/section-order.txt` was
+generated from a **keeplist-full** link; against a keeplist-town link the image
+hangs in `maple_wait_scan()` — inside `arch_auto_init`, before `main()`. Proven
+by a four-build matrix. ⚠️ **Hardware boots it anyway**, so this is Flycast-only
+— but F5 is not inert when the link it describes changes. `kb/hardware-profiling.md`,
+`tools/dcprof/README.md`.
 
 ---
 

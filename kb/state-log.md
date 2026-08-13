@@ -7,6 +7,92 @@ of it and no longer do. Entries are dated snapshots: a number here was true when
 it was written and is **not** a claim about today. For what is true now, read
 `kb/STATE.md`.
 
+## 2026-08-12 (session 16) — P2 WORKS. THE §6 INSTRUMENT PRODUCED A REAL FLAT
+## PROFILE, AFTER THREE BUGS THAT ALL FAILED SILENTLY
+
+User directive: *"i have the dreamcast sd card reader in hand, get the iso ready
+for the hardware test with logging like we need."*
+
+**Starting state: the C was written and NOTHING was wired.** `dc/Makefile` and
+`dc/build-dc.sh` contained zero occurrences of `gprof`, `-pg`, `DC_GPROF` or
+`kosfat`, so `tools/dcprof/README.md`'s published build line was a **silent
+no-op** — the exact `DC_EMU64_HIST` failure mode `build-dc.sh` documents in its
+own comments. Any P2 "result" predating today is void.
+
+**What landed.** The `DC_GPROF` block in `dc/Makefile` (nine knobs, `-pg` +
+`-lkosfat` on the `$(TARGET)` recipe, keyed into `$(LINKSTATE)` and NOT
+`$(FLAGSTATE)` — `-pg` changes no object, so keying it into the compile stamp
+would rebuild ~3,900 TUs to relink one ELF); the matching forwarding in
+`dc/build-dc.sh`; and in `dc/src/dc_profdump.c` the SD sink, the L+R+START dump
+chord, and the six `g0`…`g5` stage markers.
+
+**Link verified from `AnimalCrossing.map`:** our `gprof_init` at `0x8c2305c4`
+from `dc_profdump.c.o` **wins**; `libgprof.a(gmon.o)`'s copy is discarded at
+`0x0`. `monstartup`, `_mcleanup`, `fs_fat_mount`, `sd_init_ex` all resolved.
+
+**THE RESULT — Flycast, console sink, town build, 2026-08-12:**
+
+```
+[GPROF] arming: range 8c010000..8c266062, predicted alloc 1506528 B, hz=100
+[GPROF] Total memory allocated: 1506528 bytes     <- gmon.c's own line
+[GPROF] END lines=28 raw=612433 enc=1585 crc32=2fd07100
+```
+
+`decode_gmon.py` → 612,433 B gmon.out, 306,190 bins, **31,010 samples in 470
+non-empty bins**; `sh-elf-gprof -b -p` symbolised it:
+
+| % | self s | symbol |
+|---:|---:|---|
+| 94.76 | 293.86 | `thd_idle_task` |
+| 0.66 | 2.05 | `vid_waitvbl` |
+| 0.51 | 1.59 | `dc_gx_backend_submit` |
+| 0.50 | 1.56 | `scif_write` |
+| 0.38 | 1.17 | `RspStart` |
+| 0.20 | 0.63 | `emu64::set_position(unsigned int)` |
+| 0.18 | 0.55 | `cull_batch(emu64*)` |
+
+⭐ **z0 RLE is what makes it affordable: 612,433 → 1,585 B → 28 console lines.**
+🔴 **Idle is 94.76 % — non-idle shares only, never absolute seconds.**
+⚠️ `scif_write` at 1.56 s is the console tax appearing in its own profile.
+
+**The three bugs, all of which failed silently, in the order they cost time:**
+
+1. 🔴 **`fopen(…,"a")` is unusable on `fs_fat`.** `O_APPEND` `0x08` sits inside
+   `O_MODE_MASK` `0x0f`, so `fs_fat_write()` returns `EBADF` on every append
+   write — and `fs_fat_open()` does not check the mode, so the open succeeds.
+   libgprof writes gmon.out with `"a"`. **Caught by an adversarial review before
+   the burn, not by a run**; it would have produced a 20-byte file and a receipt
+   saying "20 bytes". Fixed by never letting gmon.c open the card.
+2. 🔴 **F5's `section-order.txt` is link-specific.** Generated from a
+   keeplist-full link; against keeplist-town the image hangs in
+   `maple_wait_scan()`, before `main()`. Four-build matrix: full+F5 boots,
+   town+F5 hangs (with and without `DC_GPROF`), town+F5-off boots. ⚠️ **Hardware
+   boots the town+F5 image** — the user played it — so this is Flycast-only.
+3. 🔴 **Probing for an absent SD card wedges, behind a muted console.** KOS's
+   `sci_spi_rw_byte` waits on RDRF with no cycle cap while every TDRE wait in
+   the same file has one; SCIF's `acmd41_loop` is 5000 × 2 commands × 500 ms.
+   `DC_GPROF_SD_IF` now defaults to 0 and "one CDI works with or without a card"
+   is **falsified** — it is two images.
+
+**Two wrong diagnoses this produced, both mine, both from the same root cause**
+(a wedge behind a muted console looks exactly like a hang): *"`DC_GPROF_HZ=1000`
+is crushing the frame rate"* — refuted, `[PERF]` read 24-28 FPS with the sampler
+armed and `histogram_callback` is ~20 instructions; and *"K.K. Slider hangs"* —
+refuted, the dump wedged while K.K. happened to be on screen. **Every gprof run
+this session died exactly one 30-frame report short of its configured dump
+frame** (299/300, 389/400, 599/600); one cause explained all of them, and the
+pattern was visible in the logs long before it was read. The fix is a marker
+line emitted *before* `dbgio_disable()`.
+
+⚠️ **The build that went to hardware is `keeplist-town` with F5 off.** ~900 KB
+less resident geometry than shipping, to buy the 1.53 MB the gmon buffers need.
+A human read it as *"running noticeably better"* — **that is the missing
+content, not a win**, and it must not be recorded as an FPS result.
+
+Artefacts: `AC-DC-20260812b-gprof-sd.{cdi,elf,cdi.src.json}` on the NAS.
+
+---
+
 ## 2026-08-09 (session 15) — T1 BUILT: −841,888 B, SPENT ON 650 MODEL FILES.
 ## ONE VISUAL FAULT UNRESOLVED, AND TWO OF MY OWN CHANGES CAUSED REGRESSIONS
 

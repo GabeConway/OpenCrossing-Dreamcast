@@ -744,6 +744,36 @@ DEFINES += -DDC_NPC_SEED_MAX=$(DC_NPC_SEED_MAX)
 endif
 
 # =============================================================================
+# DC_NPCDIAG — N3: why is no villager ACTOR ever constructed (KILL SWITCH: =0)
+# =============================================================================
+# dc/src/dc_npcdiag.c is the documentation. NOT a lever and not a feature: it
+# moves no bytes and changes no pixel. The roster is already known good
+# ([DC/NPCSEED] pre ids=6 homed=6 | seeded id=8 home=8), so the break is
+# downstream, and the chain from the npclist to a live ACTOR is five functions
+# long with nine serial gates that say NOTHING when they refuse. This wraps
+# every one of them in dc_npcdiag_gate(), which returns its argument untouched,
+# and prints ONE cumulative [DC/NPCDIAG] line so a SINGLE town run is decisive.
+#
+#   0  default. Empty functions, no injected call, byte-identical old build.
+#   1  armed. Three TUs instrumented via tools/dcstub/make_src_shrink.py's N3.
+#
+# ⚠️ MUST match the --npcdiag= that make_src_shrink.py was run with. The
+# generated ac_npc_ctrl.c_inc #errors on a mismatch IN EITHER DIRECTION —
+# including the tree-at-0/build-at-1 case, which the pool knobs do not guard,
+# because there it would print every counter as zero and zero is a RESULT.
+DC_NPCDIAG ?= 0
+DEFINES += -DDC_NPCDIAG=$(DC_NPCDIAG)
+
+# DC_NPCDIAG_PERIOD=<N> — presented frames between [DC/NPCDIAG] lines, default
+# 300 (~15 s at the town's 20 FPS). Rounded UP to a multiple of 30: dc_vi.c only
+# offers the instrument a call once per 30-frame window. Turn it DOWN only on
+# Flycast — on hardware KOS busy-waits on the SCIF FIFO and a ~380-character
+# line is real frame time.
+ifneq ($(DC_NPCDIAG_PERIOD),)
+DEFINES += -DDC_NPCDIAG_PERIOD=$(DC_NPCDIAG_PERIOD)
+endif
+
+# =============================================================================
 # DC_TEXPOOL_PROBE — T1's falsification probe (KILL SWITCH: =0, the default)
 # =============================================================================
 # NOT a pool and NOT a lever: it moves no bytes and changes no pixel. It counts,
@@ -1310,6 +1340,132 @@ endif
 # full 640x480 captures (DC_FB_IMAGE=1) become affordable.
 ifneq ($(DC_SCIF_FAST),)
 DEFINES += -DDC_SCIF_FAST=$(DC_SCIF_FAST)
+endif
+
+# =============================================================================
+# DC_GPROF — P2, the gprof flat profile on real silicon (KILL SWITCH: unset)
+# =============================================================================
+# dc/src/dc_profdump.c and dc/include/dc_profdump.h are the documentation, and
+# kb/hardware-profiling.md is the plan. This answers kb/RESUME.md §6 — "hardware
+# is much slower than Flycast and nothing has ever attributed the gap" — by
+# producing a PER-SYMBOL flat profile from the SAME image on both targets so the
+# two can be diffed. Flycast models no icache, no operand cache and no seek, so
+# the functions whose share GROWS on the console are the victims.
+#
+# ⭐ THE ONE TRICK: `-pg` GOES ON THE LINK LINE AND ON NO TRANSLATION UNIT.
+# KOS's libgprof histogram sampler is scheduler-driven (it reads thd_current's
+# saved PC out of thd_poll) and does not depend on mcount, so every optimized
+# object stays byte-identical — no trapa at function entry, no
+# -fno-omit-frame-pointer, no -fno-inline, and none of the -Os + -O3-hot-list
+# tuning that is worth 11.6 -> 20.0 FPS is disturbed. We lose the call graph and
+# do not want it. kos-cc turns a bare `-pg` into
+# `-Wl,--whole-archive -lgprof -Wl,--no-whole-archive` by itself
+# (utils/build_wrappers/kos-cc), placed after our objects, so dc_profdump.c's
+# strong gprof_init() wins under the --allow-multiple-definition the link
+# already carries.
+#
+#   DC_GPROF=1              arm it. Unset or 0 = byte-identical shipping image.
+#   DC_GPROF_SD=1           write gmon.out to a FAT32 SD card instead of down
+#                           the serial console. Adds -lkosfat. The card is
+#                           brought up at DUMP TIME, not in gprof_init() — see
+#                           the DC_GPROF_SD block in dc/src/dc_profdump.c for
+#                           the three reasons.
+#                           🔴 **THIS IS A SEPARATE IMAGE, NOT A RUNTIME
+#                           CHOICE.** An earlier version of this comment claimed
+#                           it fell back to the console sink if the card did not
+#                           enumerate. It does not, because PROBING FOR AN
+#                           ABSENT CARD WEDGES rather than failing (KOS's
+#                           sci_spi_rw_byte waits on RDRF with no cycle cap;
+#                           SCIF's acmd41_loop is 5000 x two commands x a 500 ms
+#                           ceiling). Build =0 for Flycast and =1 for hardware.
+#                           That costs the diff nothing: gprof symbolises against
+#                           each run's own ELF and -pg changes no game code.
+#   DC_GPROF_SD_IF=0|1|2    0 = SCIF only (DEFAULT). 1 = SCI only. ⚠️ 2 = try
+#                           SCIF then SCI, and it INHERITS SCI's unbounded hang
+#                           — do not use until KOS's four RDRF loops in
+#                           hardware/sci.c get the SCI_MAX_WAIT_CYCLES cap that
+#                           every TDRE wait in that same file already has.
+#                           The jj1odm-style reader is SCIF; SWAT's is SCI.
+#                           ⚠️ The card must be MBR-partitioned FAT32 with the
+#                           volume in PRIMARY entry 0 — sd_blockdev_for_partition
+#                           reads that entry, so a logical partition inside an
+#                           extended partition does not enumerate. (Observed on
+#                           a real card 2026-08-12: macOS showed it as diskNs5 at
+#                           sector 2112 = 2048 + an EBR, and nothing mounted.)
+#   DC_GPROF_DUMP_FRAME=N   presented frames before the dump fires (default
+#                           1800, ~90 s at 20 FPS). 0 = no automatic dump.
+#   DC_GPROF_HZ=N           scheduler rate for the run, i.e. THE SAMPLE RATE.
+#                           0 (default) leaves KOS's 100 Hz; 1000 is the max
+#                           thd_set_hz accepts. ⚠️ never quote FPS from a run
+#                           with this set.
+#   DC_GPROF_SPAN=N         profile only N bytes of .text instead of all of it,
+#                           scaling monstartup()'s allocation by N/textsize.
+#   DC_GPROF_LOW=0xADDR     base of that window (default __executable_start).
+#   DC_GPROF_COLS=N         base64 chars per console payload line (default 76).
+#   DC_GPROF_CHORD=0        disable the L+R+START manual dump trigger (on by
+#                           default). ⭐ On hardware the chord is the point: the
+#                           frame cap is a guess at how long a human takes to
+#                           reach the town, the chord says "profile ends HERE".
+#
+# ⚠️ IT COSTS ~1.5 MB OF HEAP, so a profiling build MUST buy the difference — it
+# is a MEASUREMENT build, not the shipping one. **The lever is
+# keeplist-town.txt instead of keeplist-full.txt**, and it is enough: measured
+# 2026-08-12, `[GPROF] Total memory allocated: 1506528 bytes` succeeded with the
+# ARAM window left at 1 MB. DC_GPROF_SPAN is the reserve.
+# 🔴 **DC_ARAM_WINDOW=131072 IS THE WRONG LEVER AND THIS COMMENT USED TO
+# RECOMMEND IT.** It takes disc reads from 106 to 4,183 and bytes off disc from
+# 4.3 MB to 137.9 MB over 420 s (kb/RESUME.md §5) — i.e. it would dominate the
+# very profile being measured.
+# 🔴 **AND F5 MUST BE OFF** (DC_SECTION_ORDER=0) for a keeplist-town profiling
+# build: dc/section-order.txt was generated from a keeplist-FULL link, and
+# against a keeplist-town link the image hangs in maple_wait_scan(), before
+# main(). Hardware boots it anyway; Flycast does not. kb/RESUME.md §6b.
+#
+# ⚠️ DO NOT COMBINE WITH DC_CONSOLE_MUTE ON THE CONSOLE SINK — the mute calls
+# dbgio_disable() and the dump goes nowhere. With DC_GPROF_SD=1 the dump does
+# not use dbgio at all and the mute is not only safe but wanted.
+ifneq ($(DC_GPROF),)
+DEFINES += -DDC_GPROF=$(DC_GPROF)
+endif
+ifneq ($(DC_GPROF_SD),)
+DEFINES += -DDC_GPROF_SD=$(DC_GPROF_SD)
+endif
+ifneq ($(DC_GPROF_SD_IF),)
+DEFINES += -DDC_GPROF_SD_IF=$(DC_GPROF_SD_IF)
+endif
+ifneq ($(DC_GPROF_DUMP_FRAME),)
+DEFINES += -DDC_GPROF_DUMP_FRAME=$(DC_GPROF_DUMP_FRAME)
+endif
+ifneq ($(DC_GPROF_HZ),)
+DEFINES += -DDC_GPROF_HZ=$(DC_GPROF_HZ)
+endif
+ifneq ($(DC_GPROF_SPAN),)
+DEFINES += -DDC_GPROF_SPAN=$(DC_GPROF_SPAN)
+endif
+ifneq ($(DC_GPROF_LOW),)
+DEFINES += -DDC_GPROF_LOW=$(DC_GPROF_LOW)
+endif
+ifneq ($(DC_GPROF_COLS),)
+DEFINES += -DDC_GPROF_COLS=$(DC_GPROF_COLS)
+endif
+ifneq ($(DC_GPROF_CHORD),)
+DEFINES += -DDC_GPROF_CHORD=$(DC_GPROF_CHORD)
+endif
+
+# The LINK half. `-pg` is the whole mechanism (see above) and -lkosfat is only
+# needed for the SD sink; both are appended to the $(TARGET) recipe and keyed
+# into $(LINKSTATE) so flipping DC_GPROF actually relinks. -lkosfat precedes
+# kos-cc's own --start-group -lkallisti ... --end-group, so libkosfat's
+# dependencies on the kernel's blockdev layer resolve from it.
+#
+# $(filter-out 0,...) rather than a bare ifneq: DC_GPROF=0 is the documented
+# way to say "off", and it must not put -pg on the line.
+GPROF_LDFLAGS :=
+ifneq ($(strip $(filter-out 0,$(DC_GPROF))),)
+  GPROF_LDFLAGS := -pg
+  ifneq ($(strip $(filter-out 0,$(DC_GPROF_SD))),)
+    GPROF_LDFLAGS += -lkosfat
+  endif
 endif
 
 # DC_XDEFS — raw extra -D flags, appended last so they win.
@@ -1929,6 +2085,7 @@ FLAGSTATE := DC_ASSET_STUB=$(DC_ASSET_STUB) DC_SRC_SHRINK=$(DC_SRC_SHRINK) \
              DC_NPCTEX_POOL=$(DC_NPCTEX_POOL) \
              DC_NPCMDL_POOL=$(DC_NPCMDL_POOL) \
              DC_NPC_SEED=$(DC_NPC_SEED) \
+             DC_NPCDIAG=$(DC_NPCDIAG) \
              DC_TEXPOOL_PROBE=$(DC_TEXPOOL_PROBE) \
              DC_OPT_PROFILE=$(DC_OPT_PROFILE) \
              DECOMP_OPT=$(DECOMP_OPT) DECOMP_HOT_OPT=$(DECOMP_HOT_OPT) \
@@ -1946,8 +2103,13 @@ endif
 # would recompile all ~3,900 TUs to relink one ELF. Keyed here instead so that
 # flipping the kill switch still relinks — a kill switch that silently does
 # nothing is worse than no kill switch (CLAUDE.md §1).
+# GPROF_LDFLAGS is here for the same reason and not in $(FLAGSTATE): -pg on the
+# link line changes no object by construction (that is the entire point of P2),
+# so keying it into the compile stamp would rebuild ~3,900 TUs to relink one
+# ELF. ⚠️ The DC_GPROF* -D flags DO change dc_profdump.c and they reach
+# $(FLAGSTATE) through DEFINES, which is already in it.
 LINKSTAMP  := $(BUILD)/link.stamp
-LINKSTATE  := ORDER=$(strip $(ORDER_LDFLAGS))
+LINKSTATE  := ORDER=$(strip $(ORDER_LDFLAGS)) GPROF=$(strip $(GPROF_LDFLAGS))
 ifneq ($(LINKSTATE),$(strip $(shell cat $(LINKSTAMP) 2>/dev/null)))
 $(shell mkdir -p $(BUILD))
 $(file >$(LINKSTAMP),$(LINKSTATE))
@@ -1993,6 +2155,7 @@ optreport:
 	@echo "UB_GUARDS      = $(UB_GUARDS)"
 	@echo "OPT_GUARDS     = $(OPT_GUARDS)"
 	@echo "F5 order file  = $(if $(ORDER_LDFLAGS),$(ORDER_FILE),OFF (DC_SECTION_ORDER=$(DC_SECTION_ORDER)))"
+	@echo "P2 gprof link  = $(if $(GPROF_LDFLAGS),$(GPROF_LDFLAGS),OFF (DC_GPROF=$(DC_GPROF)))"
 
 # See the WARNSCAN block near the top. Recursive because it needs DECOMP_QUIET
 # empty at PARSE time, and because its objects must not pollute $(OBJDIR).
@@ -2047,7 +2210,7 @@ $(TARGET): $(OBJS)
 	$(file >$(RSP))
 	$(foreach _o,$(OBJS),$(file >>$(RSP),$(_o)))
 	@echo "  LD  $@"
-	$(Q)$(KCXX) -o $@ @$(RSP) -lGL -lz \
+	$(Q)$(KCXX) -o $@ @$(RSP) -lGL -lz $(GPROF_LDFLAGS) \
 		-Wl,--allow-multiple-definition $(GC_LDFLAGS) $(ORDER_LDFLAGS) \
 		-Wl,-Map,$(BUILD)/AnimalCrossing.map
 	@sh-elf-size $@ || true
