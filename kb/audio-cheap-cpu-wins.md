@@ -153,14 +153,56 @@ guard is the cheap detector for exactly the drift below; do not weaken it.
 3. **A listening pass.** Everything above is arithmetic; the noise-character
    risk is not something a counter can see.
 
-### What is NOT verified
+### ✅ IT RUNS, AND IT IS +8.6 % FPS IN FLYCAST (2026-08-13)
 
-🔴 **Nothing has run.** The image is proven self-consistent and proven to decode
-to the right PCM; it has never been in a build, let alone on a console. The
-first run is also the first test of the image/table coupling, and its failure
-mode is noise rather than a crash — so build it, boot it in Flycast, and check
-`[NEOS_OUT] peak` is non-zero and the music is recognisable **before** spending
-a CD-R on it.
+Matched A/B, `DC_AUDIO_S8=1` vs `=0`, everything else identical, 240 s each at
+the title screen's live demo (which has actors, camera **and music**, so audio
+is genuinely exercised):
+
+| | baseline | **S8** | |
+|---|---:|---:|---|
+| **FPS p50** | 23.2 | **25.2** | **+8.6 %** |
+| frames in 240 s | 4,019 | **4,349** | +8.2 % — an independent confirmation |
+| `[STUTTER]` | 156 | **122** | fewer |
+| `ASSET MISSING` | 0 | 0 | ✅ |
+| asserts / panics | 0 | 0 | ✅ |
+| `[NEOS_OUT]` max peak | 5806 | **5807** | same audio, same level |
+| `aram_mapped` | 13,282,784 | 18,227,328 | +4,944,544 = exactly the image growth |
+
+⭐ **The boot guard fired green: `[DC/AUDIO] S8 bank OK (13244928 B)`** — the
+image and the linked tables agree.
+
+⭐ **`[NEOS_OUT]` peaking at 5807 against the baseline's 5806 is the strongest
+cheap evidence available that the conversion is CORRECT**, not merely
+non-crashing: the engine is producing the same waveform amplitude from the same
+sequences. A misread bank would not land within 1 part in 5,800.
+
+⚠️ **`run_report.py --vs` says REGRESSED and it is the documented false
+positive.** The three counters it names — `emu_punt`, `emu_vid_batches`,
+`emu_pdec` — track **where the camera is standing**, exactly like
+`pvr_dropped` (`kb/RESUME.md` §9). `emu_trin` fell 13,832 → 10,370 between the
+two runs, i.e. the final 30-frame window simply had less geometry on screen.
+Two runs of a looping demo do not sample the same moment. Do not read it as a
+renderer regression, and do not "fix" it.
+
+⚠️ **Flycast UNDERSTATES this.** The hardware profile put audio at **2.13× its
+Flycast share**, so +8.6 % here is a floor for silicon, not a ceiling. The
+converse of measurement rule 12.
+
+Artefacts on the NAS: `AC-DC-20260813-s8.cdi`, `AC-DC-20260813-s8base.cdi`
+(the matched pair), `audiorom-s8.img`.
+
+### What is STILL not verified
+
+🔴 **Nobody has listened, and no counter can substitute.** Every check above is
+amplitude and liveness; none of them can hear the thing this change actually
+risks — 8-bit quantisation noise is *constant* where ADPCM's is
+signal-proportional, so the failure mode is hiss in quiet sustained passages,
+at full `[NEOS_OUT]` peak and zero errors. **Play `AC-DC-20260813-s8.cdi`
+against `AC-DC-20260813-s8base.cdi` before burning either.**
+
+🔴 **Only the title demo has run.** The town has more voices and a different
+soundfont mix. The FPS number is the title's.
 
 ---
 
