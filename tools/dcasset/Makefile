@@ -20,8 +20,10 @@ PYTHON ?= python3
 HERE   := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 REPO   := $(abspath $(HERE)/../..)
 
-# The user's own GameCube image. READ ONLY. Never copied into the repo.
-ISO ?= /Users/gabe/Documents/GitHub/OpenCrossing-Anbernic/harness/rom/Animal Crossing.iso
+# YOUR OWN GameCube image (GAFE01, USA Rev 0). READ ONLY, never copied into the
+# repo, and none ships with it. Set it in the environment or on the command
+# line:  make extract ISO="/path/to/Animal Crossing.iso"
+ISO ?= $(error set ISO=/path/to/your/Animal Crossing.iso -- no disc image ships with this repository)
 
 # Output MUST live outside the repository -- dcasset.py refuses otherwise.
 OUT ?= /tmp/opencrossing-dc/discroot

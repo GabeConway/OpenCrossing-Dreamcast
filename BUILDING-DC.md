@@ -12,7 +12,7 @@ The host needs nothing but Docker (colima on this machine).
 ## Quick start
 
 ```bash
-cd /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast
+cd /path/to/OpenCrossing-Dreamcast   # the repo root
 
 bash dc/build-dc-image.sh        # once, ~27 min. Skip if the image exists.
 bash dc/build-dc.sh              # ELF + CDI
@@ -41,7 +41,7 @@ You can also drive `make` directly:
 
 ```bash
 docker run --rm --platform linux/arm64 \
-  -v /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast:/work \
+  -v "$PWD":/work \
   opencrossing-dc:sdk bash -c 'make -C /work/dc -j4 objs'
 ```
 
