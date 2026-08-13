@@ -67,6 +67,25 @@ off before the next run.
 
 ---
 
+## 3b. ⚠️ THE NEXT BURN IS THE TOWN PROFILE, AND THAT IS A DECISION
+
+**User directive, end of session 16b: do NOT burn the play build.** A
+`keeplist-full` + F5-on + no-gprof build carrying P3 and `dc_ctz32` was built and
+passed the regression gate (`no regression detected`, `ASSET MISSING 0`,
+`fps_p50` 22.8 unchanged), but it was **deliberately not shipped** — the two
+fixes are ~2.4 % of CPU and a CD-R is better spent on the measurement that
+unblocks everything else.
+
+It is NOT on the NAS. It is at `scratchpad/play.{cdi,elf,cdi.src.json}` and that
+scratchpad does not survive; **rebuild it from the shipping config in
+`kb/RESUME.md` §2** (nothing extra is needed — P3 and `dc_ctz32` are defaults).
+
+⚠️ **`fps_p50` unchanged in Flycast is NOT evidence the fixes did nothing.**
+Audio is 9.4 % of busy time in Flycast against 23.9 % on hardware, so the
+emulator understates P3 by ~2.5×. Measurement rule 12.
+
+---
+
 ## 4. The three things to do next, in order
 
 1. **A hardware TOWN profile.** Everything vertex-load-dependent is provisional
