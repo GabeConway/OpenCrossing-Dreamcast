@@ -316,7 +316,14 @@ The evidence is `kb/RESUME.md` §6c. Three things moved:
    its Flycast share**; audio as a group is ~25 % of work and 2.13×. It is the
    ONLY subsystem that measurably gets worse on hardware. Old ranked action 8
    (AICA stage B) was priced at nothing because no instrument had ever seen it.
-   ⚠️ Its blockers are unchanged and hard (`kb/audio-cpu-cost.md` §3.5).
+   ⚠️ Its blockers are in **`kb/audio-engine.md` §3.5** — this file used to
+   cite `kb/audio-cpu-cost.md` §3.5, **which does not exist**.
+   ⭐ **AND THEY ARE NO LONGER "UNCHANGED": measured 2026-08-13,
+   `kb/audio-aica-offload.md`.** Two of the four are ONE blocker (bank 153
+   overflows *because* 19 of its samples exceed the channel limit; strip those
+   and it is 49 % of usable), the 8-bit-PCM mitigation is **falsified** (4.9×
+   usable), and the loop-discontinuity risk is 0 or ~163 samples depending on
+   a single unmeasured hardware fact.
 2. 🔴 **THE ICACHE PREDICTION FOR `dc_gx_backend_submit` IS FALSIFIED** — its
    share **shrank** 0.81× on hardware, as did the whole GX setter family. This
    does NOT clear the draw path of being icache-bound (a share cannot see a

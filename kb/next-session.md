@@ -86,6 +86,36 @@ emulator understates P3 by ~2.5×. Measurement rule 12.
 
 ---
 
+## 3c. ⭐ THE AUDIO OFFLOAD IS STARTED (2026-08-13) — READ `kb/audio-aica-offload.md`
+
+The user directed the session at audio offload. **The host toolchain exists and
+is `tools/dcaudio/`**; no runtime code was written and none should be quoted as
+existing. What it settled:
+
+- ✅ The kb's ×8/9 sizing arithmetic is **confirmed** against the real bank
+  (bank 153, seq 242, the median sequence, the 24 over-limit samples — all
+  reproduce to within rounding).
+- ⭐ **Two of the four blockers are one.** Bank 153 does not fit *because* 19
+  of its 126 samples exceed the 65,534-sample channel limit and are 52 % of its
+  bytes. Strip them and it is 940,370 B — 49 % of usable. All 24 over-limit
+  samples in the game are in wave bank 5 and are 21 % of all bytes in 2 % of
+  the count. **They are long-form material and want streaming, not residency.**
+- 🔴 **The "store looping samples as 8-bit PCM, still fits" mitigation is
+  FALSIFIED** — 9,310,243 B, i.e. **4.9× usable**, against 3.1× for all-4-bit.
+- ⭐ **The loop-discontinuity blocker is measured for the first time** and its
+  size is **0 or ~163 samples**, depending entirely on whether AICA resets
+  decoder state at the loop point. That one hardware fact is worth a burn.
+- 🔴 **The runtime design changed**: voices must NOT go through KOS's
+  `AICA_CMD_CHAN` queue (no overflow check at all, ~430 Hz service). Direct G2
+  register writes with SH-4 shadows; the queue only for key-on/off and setup.
+
+**Next, in order:** pack a bank (nothing emits one yet) → `dc/src/dc_aica.c`
+behind `DC_AUDIO_AICA=1` default OFF with the software path as the oracle →
+the loop-state burn. ⚠️ **Reverb has no home in the new design and nobody has
+costed it** — a first offload ships with reverb dropped, which is audible.
+
+---
+
 ## 4. The three things to do next, in order
 
 1. **A hardware TOWN profile.** Everything vertex-load-dependent is provisional

@@ -57,3 +57,6 @@ portmaster/*.zip
 harness/rom/
 harness/out/
 .claude/worktrees/
+
+# tools/dcaudio: the compiled VADPCM oracle, rebuilt on demand by test_vadpcm.py
+tools/dcaudio/tests/ref_adpcm

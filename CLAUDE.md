@@ -179,6 +179,8 @@ on the ARM7. VMU ≈ 100 KB user data vs a ~456 KB GC save. CD-R streams at
 | `kb/audio-stage-a-software.md` | stage A: rspsim at 22 kHz, effect-cut order, `snd_stream` |
 | `kb/audio-stage-b-aica.md` | stage B: the exact seam, AICA register map, residency policy, offline tools |
 | `kb/audio-plan-of-record.md` | the plan of record and what is still unmeasured |
+| `kb/audio-aica-offload.md` | ⭐ **stage B, MEASURED (2026-08-13) — read this before any AICA work.** Confirms the kb's ×8/9 sizing, then changes three things: **two of the four blockers are ONE** (bank 153 overflows *because* 19 of its samples exceed the 65,534-sample channel limit), the **8-bit-PCM mitigation is FALSIFIED** (4.9× usable, not "still fits"), and the loop-click risk is **0 or ~163 samples** depending on one unmeasured hardware fact. 🔴 §8 is the runtime design and it says **do NOT drive voices through KOS's ARM7 queue** — no overflow check, ~430 Hz service |
+| `tools/dcaudio/` | the host side: a VADPCM decoder **bit-exact against `rspsim.c` and tested that way**, the `audiorom.img` reader, the AICA-ADPCM codec, and `census.py` (the residency report + the manifest). ⚠️ Needs `audioheaders.c` as well as the image — `audiorom.img` carries **no index at all** |
 | `kb/save-budget.md` | 295,910 B of save into a 100 KB VMU — verdict + index. ⚠️ compression numbers are SYNTHETIC |
 | `kb/save-layout.md` | what the save actually is: verified struct sizes, `.gci` layout |
 | `kb/save-compression.md` | codec comparison and the VMU fit verdict |

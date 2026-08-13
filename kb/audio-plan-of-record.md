@@ -94,8 +94,18 @@ budget") should be inverted:
    §0.0; the *action* is not]** and start the offline converter
    (`tools/bankconv`) at M1, in parallel — it is pure host-side work with no
    dependency on the DC toolchain, and §3's measurements say it will work:
-   median sequence 49 KB in sound RAM, no soundfont over 2 MB, a single
-   uniform codec to convert.
+   median sequence 49 KB in sound RAM (**measured 2026-08-13 at 50,628 B**),
+   a single uniform codec to convert.
+   🔴 **"no soundfont over 2 MB" IS FALSIFIED and is struck from this list.**
+   It is true of 2 MB and false of the 1,900,544 B that is *usable*: bank 153
+   is 1,971,002 B, over by 70,458 B. The ⚠️ at line 77 flagged it; this step
+   was never rewritten. ⭐ **It is also no longer the blocker it looks like** —
+   19 of bank 153's 126 samples exceed the 65,534-sample channel limit and are
+   52 % of its bytes; without them it is 940,370 B. `kb/audio-aica-offload.md`
+   §4.
+   ⭐ **The converter now partly EXISTS: `tools/dcaudio/`** — a bit-exact
+   VADPCM decoder, the `audiorom.img` reader, an AICA-ADPCM codec and the
+   residency census. It does not yet pack a bank.
 3. **Take measurement #1 in §7 (live voice count) on the PC build this week.**
    If AC really only runs 8–12 voices in a town, stage A at 22 kHz fits the
    budget and stage B becomes a quality/headroom upgrade rather than a
