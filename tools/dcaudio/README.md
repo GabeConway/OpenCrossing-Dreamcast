@@ -4,10 +4,15 @@ The findings, and what they changed, are **`kb/audio-aica-offload.md`**. This
 file is how to run the thing.
 
 ```bash
-python3 tools/dcaudio/census.py                      # the residency report
+python3 tools/dcaudio/census.py                       # the residency report
 python3 tools/dcaudio/census.py --json /tmp/aica.json # + the sample manifest
-python3 tools/dcaudio/tests/test_vadpcm.py           # the decoder's falsifier
+python3 tools/dcaudio/tests/test_vadpcm.py            # the decoder's falsifier
+python3 tools/dcaudio/pack.py --out /tmp/aicabank.pak           # build the bank
+python3 tools/dcaudio/pack.py --out /tmp/aicabank.pak --verify  # check it
 ```
+
+The full bank packs in ~11 s to **4,753,376 B** (1,133 samples encoded, 24
+excluded as too long for a hardware channel).
 
 `census.py` needs two inputs and defaults to finding both:
 
@@ -28,6 +33,7 @@ array compiled into the game. See `kb/audio-aica-offload.md` §2.
 | `audiorom.py` | parses `audioheaders.c`, resolves aliases, walks soundfont → instrument/drum → `smzwavetable` → sample, dedupes |
 | `aica_adpcm.py` | Yamaha/AICA 4-bit ADPCM encode + decode, round-trip SNR, and `analyse_loop()` — the loop-state convergence measurement |
 | `census.py` | the report and the manifest |
+| `pack.py` | builds `aicabank.pak` (device_addr-sorted index + 32-byte-aligned ADPCM payloads) and, with `--verify`, re-derives it from the source bank and diffs it |
 | `tests/ref_adpcm.c` | the oracle: `A_CMD_ADPCM`'s frame loop lifted verbatim out of `rspsim.c` |
 | `tests/test_vadpcm.py` | drives both with random frames and diffs them |
 
@@ -54,12 +60,18 @@ That is the `device_addr` field in the `--json` manifest.
   falsifies a kb mitigation. Do not quote the optimistic column alone.
 - ⚠️ **A sequence's working set is the UNION of its banks' samples**, not the
   sum — soundfonts share samples.
-- ⚠️ **The manifest is a derived artefact and is not committed.** Regenerate
-  it; do not check it in.
+- ⚠️ **The manifest and `aicabank.pak` are derived artefacts and are not
+  committed.** Regenerate them; do not check them in. (`audiorom.img` is ROM
+  material — CLAUDE.md §1.)
+- ⚠️ **`--verify` must be given the same `--encoder`/`--leak` the pack was
+  written with**, or it reports a false mismatch. That has already happened
+  once.
 
 ## Not done
 
-No packed bank is emitted yet, and there is no runtime consumer
-(`dc/src/dc_aica.c` does not exist). `kb/audio-aica-offload.md` §8 is the
-runtime design — in particular, **voices must NOT be driven through KOS's ARM7
-command queue**, which has no overflow check and services at only ~430 Hz.
+There is no runtime consumer — `dc/src/dc_aica.c` does not exist, and nothing
+here has executed on the console. `kb/audio-aica-offload.md` §8 is the runtime
+design; in particular, **voices must NOT be driven through KOS's ARM7 command
+queue**, which has no overflow check at all and services at only ~430 Hz.
+§11 is why the offload can be built voice-by-voice rather than as one cut, and
+the latency-skew objection that comes with it.

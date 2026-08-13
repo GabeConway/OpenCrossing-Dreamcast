@@ -384,12 +384,88 @@ genuinely tractable: load per sequence start on the existing
 
 ---
 
-## 10. What is NOT done
+## 10. The bank packs, and the pipeline is verified end to end
 
-- **No encoder output is packed yet.** `aica_adpcm.py` encodes and decodes and
-  is measured, but nothing writes a bank file or a runtime-consumable pack.
+`tools/dcaudio/pack.py` emits `aicabank.pak` — a `device_addr`-sorted index
+plus 32-byte-aligned 4-bit AICA ADPCM payloads.
+
+```
+encoded   1133 samples
+excluded  24 over 65,534 samples (FLAG_TOO_LONG, no payload)
+payload   4,720,928 B
+file      4,753,376 B          elapsed 10.8 s
+```
+
+Reconciles with §3: 5,986,283 − 1,278,432 (the over-limit samples) = 4,707,851,
+plus 32-byte alignment padding. `--verify` re-derives the pack from the source
+bank and checks index ordering, payload non-overlap, the zero-payload rule for
+excluded entries, and byte-identity of sampled payloads against a fresh encode.
+Round-trip SNR across the probes runs **14–44 dB**, which is the normal spread
+for 4-bit ADPCM (transient-heavy percussion at the bottom, sustained tonal
+material at the top).
+
+⚠️ **`--verify` must be given the same `--encoder`/`--leak` the pack was
+written with**, or it reports a false mismatch. That mistake was made once
+already here.
+
+⚠️ **The excluded 24 are recorded, not dropped.** `FLAG_TOO_LONG` with a zero
+payload lets the runtime fall back to a software voice for those rather than
+going silent — which matters, because they are 21 % of the bank's bytes and
+include the longest musical material in the game.
+
+---
+
+## 11. ⭐ THE OFFLOAD CAN BE INCREMENTAL, AND NOTHING IN THE KB SAYS SO
+
+`kb/audio-stage-b-aica.md` §5.1 presents the seam as one wholesale cut:
+`Nas_DriveRsp` and `Nas_SynthMain` are replaced, `RspStart` is deleted, done.
+That framing makes stage B an all-or-nothing multi-session rewrite whose first
+testable moment is also its riskiest.
+
+**It does not have to be.** AICA sums all 64 hardware channels to the DAC. The
+software path already ends at two of them (`snd_stream` holds channels 0 and 1).
+So a voice played on a hardware channel and a voice rendered by `RspStart` into
+the stream **mix in hardware, for free**. Which means the offload can be done
+voice by voice:
+
+- Route the voices AICA can handle to hardware channels; leave the rest in
+  `RspStart`. Both halves land in the same output.
+- CPU falls in proportion to the fraction moved — this is not a
+  cliff-edge win that only arrives at 100 % coverage.
+- The software path stays live as the oracle at all times, which is exactly
+  what `DC_AUDIO_SOFTWARE=1` was specified for, and an A/B has a real fallback
+  instead of a rollback.
+- The 24 `FLAG_TOO_LONG` samples get a home on day one: they simply stay in
+  software.
+
+🔴 **THE OBJECTION, AND IT IS SERIOUS: LATENCY SKEW.** The software path is
+buffered — an ~8,192-sample ring plus `snd_stream`'s own buffers, order 100 ms
+— while a direct AICA key-on sounds immediately. A hybrid would play offloaded
+voices **~100 ms ahead** of software ones, which for sequenced music is not a
+subtlety, it is wrong. Two candidate fixes, neither tried:
+
+1. Delay hardware key-on by the measured ring depth
+   (`ring_write_pos - ring_read_pos` is already tracked in `dc_audio.c:37-38`).
+2. Use the ARM queue's `timestamp` field, which exists precisely to schedule a
+   command for a future jiffy (`main.c:178-179`, `timestamp == 0` means now).
+   ⚠️ But the jiffy clock is **4,410 Hz**, not the 1,000 Hz that
+   `aica_cmd_iface.h:32`'s "in milliseconds" comment claims — that comment is
+   stale and `crt0.s:105-107`'s 1000 Hz constant is dead code.
+
+**Neither the hybrid nor the skew has been measured.** It is recorded here
+because it changes the shape of the project from one big rewrite to a
+measurable ladder, and because the latency skew is the kind of thing that is
+obvious in hindsight and expensive to discover on a burn.
+
+---
+
+## 12. What is NOT done
+
 - **No runtime.** `dc/src/dc_aica.c` does not exist. §8 is its design, not its
-  implementation.
+  implementation. Nothing on the console has executed one line of this.
+- **No residency manager.** `pack.py` packs everything playable into one file;
+  it does not decide what is resident in 1,900,544 B at any moment. §9 is the
+  shape of that policy, not the policy.
 - **Reverb has no home.** The seam deletes `Nas_CpuFX` and the aux-buffer bus,
   but once AICA mixes there is no software output left to apply reverb to.
   `kb/audio-stage-b-aica.md` offers "an AICA DSP send" in one line and never
