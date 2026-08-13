@@ -104,6 +104,29 @@ enum {
     DC_NPCDIAG_G_GST_EA,
     DC_NPCDIAG_G_GST_JEVT,
 
+    /* aSNMgr_chk_arbeit_and_demo_and_halloween — the OUTER gate of the guest
+     * pass, and as of 2026-08-13 the thing that actually stops the villagers.
+     * The second N3 run read `gst: calls=24807 arb=24807 ... ea=0`, and since
+     * the guest body is `if (!arb && !blkmax)`, an arb that is TRUE on every
+     * tick means the per-villager loop NEVER RUNS. ea=0 was never an
+     * appear-type mismatch — the code does not reach it.
+     *
+     * The function returns TRUE unless ALL FIVE of these hold, so exactly one
+     * of them is the wall and these five counters name it. ⚠️ They count
+     * PASSES and they SHORT-CIRCUIT: read them left to right and the first one
+     * whose count collapses is the culprit; everything to its right is 0
+     * because it was never evaluated, NOT because it failed.
+     *
+     * Prior suspicion, from kb/RESUME.md §8: `mEv_CheckFirstIntro()` — "anything
+     * gated on mEv_CheckFirstIntro() == FALSE is invisible", because this port
+     * never completes the first-intro state. INTRO is the one to look at first,
+     * but do not assume it. */
+    DC_NPCDIAG_G_ARB_ARBEIT,    /* !mEv_CheckArbeit()                         */
+    DC_NPCDIAG_G_ARB_INTRO,     /* !mEv_CheckFirstIntro()                     */
+    DC_NPCDIAG_G_ARB_DEMO1,     /* CLIP(demo_clip)  == NULL                   */
+    DC_NPCDIAG_G_ARB_DEMO2,     /* CLIP(demo_clip2) == NULL                   */
+    DC_NPCDIAG_G_ARB_HALLO,     /* !mEv_check_status(HALLOWEEN, ACTIVE)       */
+
     DC_NPCDIAG_G_NUM
 };
 

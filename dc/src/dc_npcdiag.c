@@ -332,6 +332,7 @@ void dc_npcdiag_report(void)
         " | wade: none=%u start=%u prog=%u end=%u err=%u mode=%d"
         " | reg: calls=%u exist=%u scope=%u appear=%u utnum=%u make=%u"
         " | ut: calls=%u col=%u fgcol=%u hgap=%u"
+        " | arb[pass]: work=%u intro=%u demo1=%u demo2=%u hallo=%u"
         " | gst: calls=%u arb=%u blkmax=%u exist=%u(ea=%u jevt=%u)"
         " scope=%u appear=%u utnum=%u make=%u"
         " | mk: ent=%u gate=%u slot=%u idx=%u called=%u ret=%u"
@@ -344,6 +345,9 @@ void dc_npcdiag_report(void)
         s_g[DC_NPCDIAG_G_REG_UTNUM], s_g[DC_NPCDIAG_G_REG_MAKE],
         s_g[DC_NPCDIAG_G_UT_CALL], s_g[DC_NPCDIAG_G_UT_COL],
         s_g[DC_NPCDIAG_G_UT_FGCOL], s_g[DC_NPCDIAG_G_UT_HGAP],
+        s_g[DC_NPCDIAG_G_ARB_ARBEIT], s_g[DC_NPCDIAG_G_ARB_INTRO],
+        s_g[DC_NPCDIAG_G_ARB_DEMO1], s_g[DC_NPCDIAG_G_ARB_DEMO2],
+        s_g[DC_NPCDIAG_G_ARB_HALLO],
         s_g[DC_NPCDIAG_G_GST_CALL], s_g[DC_NPCDIAG_G_GST_ARBEIT],
         s_g[DC_NPCDIAG_G_GST_BLKMAX], s_g[DC_NPCDIAG_G_GST_EXIST],
         s_g[DC_NPCDIAG_G_GST_EA], s_g[DC_NPCDIAG_G_GST_JEVT],

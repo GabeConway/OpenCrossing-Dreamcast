@@ -1220,6 +1220,9 @@ NPCDIAG_REQUIRED = (
     "DC_NPCDIAG_G_GST_EXIST", "DC_NPCDIAG_G_GST_SCOPE", "DC_NPCDIAG_G_GST_APPEAR",
     "DC_NPCDIAG_G_GST_UTNUM", "DC_NPCDIAG_G_GST_MAKE",
     "DC_NPCDIAG_G_GST_EA", "DC_NPCDIAG_G_GST_JEVT",
+    "DC_NPCDIAG_G_ARB_ARBEIT", "DC_NPCDIAG_G_ARB_INTRO",
+    "DC_NPCDIAG_G_ARB_DEMO1", "DC_NPCDIAG_G_ARB_DEMO2",
+    "DC_NPCDIAG_G_ARB_HALLO",
     "DC_NPCDIAG_G_MK_ENT", "DC_NPCDIAG_G_MK_GATE", "DC_NPCDIAG_G_MK_SLOT",
     "DC_NPCDIAG_G_MK_IDX", "DC_NPCDIAG_G_MK_CALLED", "DC_NPCDIAG_G_MK_RET",
     "DC_NPCDIAG_G_SU_ENT", "DC_NPCDIAG_G_SU_CHK", "DC_NPCDIAG_G_SU_ACTOR",
@@ -1501,6 +1504,27 @@ def _npcdiag_mgr_rules():
         #    installs GUEST on every mFI_WADE_NONE tick. Instrumenting only the
         #    REGULAR pass would have measured the wrong loop. Its two outer
         #    gates count BLOCKED, not passed: they are `!`-tested in the source.
+        # 7b. aSNMgr_chk_arbeit_and_demo_and_halloween — the OUTER gate of the
+        #     guest pass, split into its five terms.
+        #     ⭐ THIS IS THE ONE THAT MATTERS. The second N3 run read
+        #     `gst: calls=24807 arb=24807 ... ea=0`, and the guest body is
+        #     `if (!arb && !blkmax)`, so an arb TRUE on every tick means the
+        #     per-villager loop NEVER RUNS -- ea=0 was never an appear-type
+        #     mismatch, the code does not reach it. Exactly one of these five
+        #     terms is the wall and these counters name it.
+        #     ⚠️ They count PASSES and they SHORT-CIRCUIT: read left to right,
+        #     the first count that collapses is the culprit, and everything to
+        #     its right reads 0 because it was never evaluated. Operand order
+        #     and && structure are unchanged, so behaviour is identical.
+        (1, _lit(
+            "    if (!mEv_CheckArbeit() && !mEv_CheckFirstIntro() && CLIP(demo_clip) == NULL && CLIP(demo_clip2) == NULL &&\n"
+            "        !mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE)) {"),
+         "    if (dc_npcdiag_gate(DC_NPCDIAG_G_ARB_ARBEIT, !mEv_CheckArbeit()) && " + MARK + "\n"
+         "        dc_npcdiag_gate(DC_NPCDIAG_G_ARB_INTRO, !mEv_CheckFirstIntro()) &&\n"
+         "        dc_npcdiag_gate(DC_NPCDIAG_G_ARB_DEMO1, CLIP(demo_clip) == NULL) &&\n"
+         "        dc_npcdiag_gate(DC_NPCDIAG_G_ARB_DEMO2, CLIP(demo_clip2) == NULL) &&\n"
+         "        dc_npcdiag_gate(DC_NPCDIAG_G_ARB_HALLO, !mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE))) {"),
+
         (1, _lit(
             "    if (!aSNMgr_chk_arbeit_and_demo_and_halloween() &&\n"
             "        !aSNMgr_check_in_block_max(manager->player_pos.now_block[0], manager->player_pos.now_block[1], (u8*)manager->npc_info.in_block_num)) {\n"
