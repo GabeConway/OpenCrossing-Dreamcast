@@ -117,25 +117,80 @@ pc/              the Linux/SDL reference port (reference only, NOT the target)
 
 ## Building
 
-You need **Docker** and a legally obtained `GAFE01` disc image. Nothing else —
-the SH-4 toolchain, KallistiOS and the disc tools all live in the image.
+You need **Docker**, **Python 3.9+**, and a legally obtained `GAFE01` disc image
+(Animal Crossing, USA Rev 0, 1,459,978,240 bytes). Nothing else — the SH-4
+toolchain, KallistiOS and the disc tools all live in the container image.
+
+No ROM material ships with this repository and none ever will. Every step below
+reads *your* disc image and writes outside the repo.
+
+### 1. Clone and build the toolchain image — once
 
 ```bash
 git clone https://github.com/GabeConway/OpenCrossing-Dreamcast
 cd OpenCrossing-Dreamcast
 
-bash dc/build-dc-image.sh     # once, ~27 min: sh-elf-gcc + KallistiOS + mkdcdisc
-bash dc/build-dc.sh           # ELF + bootable CDI in dc/build/
+bash dc/build-dc-image.sh     # ~27 min: sh-elf-gcc + KallistiOS + mkdcdisc
 ```
 
-Full reference — every make target, every environment knob, and the
-troubleshooting list — is [`BUILDING-DC.md`](BUILDING-DC.md).
+Idempotent, and slow only the first time. Don't rebuild it casually.
 
-**Running it:**
+### 2. Extract the disc content from your ISO
+
+The game streams its archives, models and audio off the disc at runtime, so it
+needs a **disc root** — a flat directory the build hands to `mkdcdisc`:
+
+```bash
+make -C tools/dcasset extract ISO="/path/to/Animal Crossing.iso"
+bash dc/stage-disc.sh /tmp/opencrossing-dc/discroot ~/.cache/oc-dc-discroot
+```
+
+`extract` writes the GameCube shape (`files/`, `sys/`); `stage-disc.sh` flattens
+it, because every path the port opens is `/cd/<name>` with no subdirectory.
+
+### 3. Build
+
+⚠️ **Use this line, not a bare `dc/build-dc.sh`.** The environment variables are
+not optional tuning — `DC_STUB_KEEP` is what decides whether the game has any
+content at all. Leave it out and you get a technically-working image containing
+about 53 KB of assets: the title logo and nothing else.
+
+```bash
+DC_STUB_KEEP="$(grep -v '^#' tools/dcstub/keeplist-full.txt | paste -sd: -)" \
+DC_DISC_ROOT=~/.cache/oc-dc-discroot DC_ASSET_STUB=1 \
+DC_ARAM_WINDOW=1048576 DC_ARENA_BYTES=1200000 \
+DC_AUDIO_SCENES=all DC_AUDIO_DISC_FRAMES=8 DC_AUDIO_VOICES=12 \
+bash dc/build-dc.sh
+```
+
+Output is `dc/build/OpenCrossing.cdi` plus the ELF beside it.
+
+**Check one line of the build log.** It is the cheapest possible confirmation
+that the keep list actually applied:
+
+```
+dc_stub_keep.inc: 3261 table rows + 2 .c_inc rows + 460 per-file init fns (2,929,360 B)
+```
+
+If that number is missing or small, stop — the image will boot, render, report
+zero errors, hold a steady frame rate, and be almost entirely empty. A stubbed
+asset is not a *missing* asset; it is deliberately one byte, so every counter
+stays honest and green while the geometry is gone. That failure mode has cost
+this project more than one debugging session.
+
+### 4. Run it
 
 - **Flycast:** open `dc/build/OpenCrossing.cdi`.
-- **Real hardware:** rebuild with `DC_CDI_PAD=1` and burn the CDI to a CD-R.
-  A MIL-CD-capable console is required (most pre-2000 units).
+- **Real hardware:** add `DC_CDI_PAD=1 DC_CONSOLE_MUTE=1` to the build line and
+  burn the CDI to a CD-R. A MIL-CD-capable console is required (most pre-2000
+  units). The mute is worth ~5 % of the frame — KOS busy-waits on the serial
+  FIFO *with no cable attached* — but it also silences crash dumps, so drop it
+  when you are triaging rather than playing.
+
+Full reference — every make target, every environment knob, the include-path
+order and the troubleshooting list — is [`BUILDING-DC.md`](BUILDING-DC.md).
+The build lines used for measurements, including the profiling and screenshot
+variants, are in [`kb/RESUME.md`](kb/RESUME.md) §2.
 
 > **Never distribute a built image.** It contains Nintendo's assets. Build your
 > own from your own disc.
