@@ -34,6 +34,7 @@ array compiled into the game. See `kb/audio-aica-offload.md` §2.
 | `audiorom.py` | parses `audioheaders.c`, resolves aliases, walks soundfont → instrument/drum → `smzwavetable` → sample, dedupes |
 | `aica_adpcm.py` | Yamaha/AICA 4-bit ADPCM encode + decode, round-trip SNR, and `analyse_loop()` — the loop-state convergence measurement |
 | `census.py` | the report and the manifest |
+| `s8bank.py` | **W1** — rewrites `audiorom.img` with `CODEC_S8` 8-bit PCM samples so rspsim's ADPCM decoder stops running (~5.5 % of busy, zero runtime code). `--verify` proves the transformation offline. ⚠️ Prints seven numbers that MUST be applied to `audioheaders.c` or the game plays noise |
 | `bounds.py` | walks all 748,255 frames and proves the `MAC.W` operand/accumulator bounds. ⚠️ Bounds the **data**, not the format — re-run if `audiorom.img` is ever regenerated. `kb/audio-cheap-cpu-wins.md` W2 |
 | `pack.py` | builds `aicabank.pak` (device_addr-sorted index + 32-byte-aligned ADPCM payloads) and, with `--verify`, re-derives it from the source bank and diffs it |
 | `tests/ref_adpcm.c` | the oracle: `A_CMD_ADPCM`'s frame loop lifted verbatim out of `rspsim.c` |

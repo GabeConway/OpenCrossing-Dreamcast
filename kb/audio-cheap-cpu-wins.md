@@ -102,24 +102,65 @@ table.** It is also trivially A/B-able, because the conversion is per sample —
 a mixed bank (some samples S8, some left ADPCM) is legal and needs no extra
 machinery, since the codec is per `smzwavetable`.
 
-### What has to be built
+### ✅ The converter is BUILT and self-verifies — `tools/dcaudio/s8bank.py`
 
-1. A writer that emits a new `audiorom.img`: decode each VADPCM sample to
-   PCM16 (already done — `tools/dcaudio/vadpcm.py`), take the high byte, and
-   relay out the tbl region. `loop_start`/`loop_end`/`sample_end` are in
-   SAMPLES and are unchanged; `book` becomes unused and can stay.
-2. Rewrite each `smzwavetable`'s `codec` and 24-bit `size`, and its `sample`
-   offset, since the tbl layout moves.
-3. 🔴 **The index tables are compiled into the game, so they must move too** —
+```
+wavetable structs patched   2147/2147
+audiorom.img  8,300,384 B  ->  13,244,928 B
+  tbl extent  7,025,632 B  ->  11,970,176 B
+--verify:  OK: 2147 wavetables, 8 payloads, 0 problem(s)
+```
+
+`--verify` re-reads the written image, checks every wavetable now declares
+`CODEC_S8` with `size == n_samples`, and byte-compares sampled payloads against
+a fresh VADPCM decode. **That proves the data transformation end to end with no
+console.**
+
+⚠️ **Quantisation is round-to-nearest, not truncation.** The engine
+reconstructs `s8 << 8`, so the right value is `round(pcm / 256)`. `pcm >> 8`
+would add a half-LSB DC bias to every sample — inaudible alone, a hum once 12
+voices sum.
+
+⚠️ **`--verify` must NOT build an `AudioRom` on the new image.** Its structure
+lives in tables compiled into the game, which still describe the old layout, so
+`AudioRom`'s "extents sum to the file size" guard fires — **correctly**. That
+guard is the cheap detector for exactly the drift below; do not weaken it.
+
+### What is still to build
+
+1. 🔴 **The index tables are compiled into the game, so they must move too** —
    `AudiodataHeaderStart` / `AudiowaveHeaderStart` in
    `src/static/jaudio_NES/game/audioheaders.c`
    (`kb/audio-aica-offload.md` §2). A `make_src_shrink.py` rule rewrites them.
    ⚠️ **THIS IS THE ONE REAL COUPLING RISK**: the image and the tables are two
    artefacts that must agree, and if they drift the game reads sample data at
    the wrong offsets and plays noise. Emit a checksum into both and check it at
-   boot.
-4. A kill switch. The natural one is free: **ship both images and pick at build
+   boot. `s8bank.py` prints the seven numbers it needs applied and the image's
+   sha256:
+
+   ```
+   AudiodataHeaderStart entry 2 (tbl):  size 11970176
+   AudiowaveHeaderStart 0: addr 0x0      -> 0x0        size   239,936 ->   409,936
+   AudiowaveHeaderStart 1: addr 0x3A940  -> 0x64160    size    57,088 ->   101,136
+   AudiowaveHeaderStart 2: addr 0x48840  -> 0x7CC80    size   434,304 ->   769,680
+   AudiowaveHeaderStart 3: addr 0xB28C0  -> 0x138B20   size 1,189,600 -> 1,623,968
+   AudiowaveHeaderStart 4: addr 0x1D4FA0 -> 0x2C52C0   size   986,656 -> 1,749,968
+   AudiowaveHeaderStart 5: addr 0x2C5DC0 -> 0x4706A0   size 4,118,048 -> 7,315,424
+   ```
+
+2. A kill switch. The natural one is free: **ship both images and pick at build
    time**, since nothing else changes.
+3. **A listening pass.** Everything above is arithmetic; the noise-character
+   risk is not something a counter can see.
+
+### What is NOT verified
+
+🔴 **Nothing has run.** The image is proven self-consistent and proven to decode
+to the right PCM; it has never been in a build, let alone on a console. The
+first run is also the first test of the image/table coupling, and its failure
+mode is noise rather than a crash — so build it, boot it in Flycast, and check
+`[NEOS_OUT] peak` is non-zero and the music is recognisable **before** spending
+a CD-R on it.
 
 ---
 
