@@ -84,6 +84,26 @@ enum {
     DC_NPCDIAG_G_UT_FGCOL,      /* mNpc_CheckNpcSet_fgcol                     */
     DC_NPCDIAG_G_UT_HGAP,       /* ...and !mCoBG_ExistHeightGap_KeepAndNow    */
 
+    /* aSNMgr_chk_exist_and_appear_and_event — the inside of GST_EXIST.
+     * ⭐ ADDED 2026-08-13, and it is the whole point of the second N3 run.
+     * The first run (kb/villagers-n3-result.md) found GST_EXIST at ZERO over
+     * 12,048 guest calls while the REGULAR pass's plain chk_exist_and_appear
+     * passed 28 times. The two differ by exactly one term, so the wrapper's
+     * two halves fail for completely different reasons and the single counter
+     * cannot say which:
+     *   GST_EA   the inner aSNMgr_chk_exist_and_appear, called with
+     *            mNpcW_APPEAR_STATUS_REGULAR -- zero here means an APPEAR-TYPE
+     *            mismatch, nothing to do with events.
+     *   GST_JEVT ((manager->npc_info.joint_event >> idx) & 1) == 0 -- zero here
+     *            (with EA non-zero) means the villagers are flagged as
+     *            joint-event participants and the guest pass is excluding them
+     *            on purpose.
+     * The two are wrapped as `EA && JEVT`, so JEVT is only evaluated when EA
+     * passed: EA==0 alone is decisive, and EA>0 with JEVT==0 is decisive the
+     * other way. */
+    DC_NPCDIAG_G_GST_EA,
+    DC_NPCDIAG_G_GST_JEVT,
+
     DC_NPCDIAG_G_NUM
 };
 

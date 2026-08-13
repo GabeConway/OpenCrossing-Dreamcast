@@ -1219,6 +1219,7 @@ NPCDIAG_REQUIRED = (
     "DC_NPCDIAG_G_GST_CALL", "DC_NPCDIAG_G_GST_ARBEIT", "DC_NPCDIAG_G_GST_BLKMAX",
     "DC_NPCDIAG_G_GST_EXIST", "DC_NPCDIAG_G_GST_SCOPE", "DC_NPCDIAG_G_GST_APPEAR",
     "DC_NPCDIAG_G_GST_UTNUM", "DC_NPCDIAG_G_GST_MAKE",
+    "DC_NPCDIAG_G_GST_EA", "DC_NPCDIAG_G_GST_JEVT",
     "DC_NPCDIAG_G_MK_ENT", "DC_NPCDIAG_G_MK_GATE", "DC_NPCDIAG_G_MK_SLOT",
     "DC_NPCDIAG_G_MK_IDX", "DC_NPCDIAG_G_MK_CALLED", "DC_NPCDIAG_G_MK_RET",
     "DC_NPCDIAG_G_SU_ENT", "DC_NPCDIAG_G_SU_CHK", "DC_NPCDIAG_G_SU_ACTOR",
@@ -1514,7 +1515,17 @@ def _npcdiag_mgr_rules():
          "    if (!dc_npcdiag_gate(DC_NPCDIAG_G_GST_ARBEIT, aSNMgr_chk_arbeit_and_demo_and_halloween()) &&\n"
          "        !dc_npcdiag_gate(DC_NPCDIAG_G_GST_BLKMAX, aSNMgr_check_in_block_max(manager->player_pos.now_block[0], manager->player_pos.now_block[1], (u8*)manager->npc_info.in_block_num))) {\n"
          "        for (i = 0; i < ANIMAL_NUM_MAX; i++) {\n"
-         "            if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_EXIST, aSNMgr_chk_exist_and_appear_and_event(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE)) {\n"
+         # ⭐ 2026-08-13: the wrapper is INLINED here rather than called, so its
+         # two terms can be counted separately. The first N3 run put GST_EXIST
+         # at ZERO over 12,048 guest calls while the REGULAR pass's plain
+         # chk_exist_and_appear passed 28 times, and the single counter cannot
+         # say which half refuses. This is EXACTLY aSNMgr_chk_exist_and_appear_
+         # and_event's body (ac_set_npc_manager.c) -- same operands, same order,
+         # same short-circuit -- so behaviour is unchanged and only the counters
+         # are finer. kb/villagers-n3-result.md.
+         "            if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_EXIST,\n"
+         "                    dc_npcdiag_gate(DC_NPCDIAG_G_GST_EA, aSNMgr_chk_exist_and_appear(manager, mNpcW_APPEAR_STATUS_REGULAR, i) == TRUE)\n"
+         "                    && dc_npcdiag_gate(DC_NPCDIAG_G_GST_JEVT, ((manager->npc_info.joint_event >> i) & 1) == 0))) {\n"
          "                if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_SCOPE, aSNMgr_check_in_scope(list_p->position, scope_p) == TRUE)) {\n"
          "                    aSNMgr_get_block_ut_num_set_npc(&bx, &bz, &ux, &uz, list_p);\n"
          "                    if (dc_npcdiag_gate(DC_NPCDIAG_G_GST_APPEAR, aSNMgr_set_appear_info_guest(manager, *winfo_p, bx, bz) == TRUE) &&\n"
