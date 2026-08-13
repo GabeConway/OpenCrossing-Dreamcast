@@ -31,7 +31,7 @@ number; the estimates in `kb/save-budget.md` §5 were superseded by it (§7).
    SH-4):
 
    ```bash
-   cd /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast
+   cd /path/to/OpenCrossing-Dreamcast
    docker run --rm --platform linux/arm/v7 -v "$PWD":/work acgc-smoke-deps:armhf bash -c '
      gcc -DTARGET_PC -DVERSION=0 -DF3DEX_GBI_2 -DNDEBUG -D_LANGUAGE_C \
          -DBUILD_USER=\"x\" -I /work/include -I /work/src -I /work \

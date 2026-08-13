@@ -4,7 +4,7 @@
 # =============================================================================
 # Invoked as:
 #     docker run --rm --platform linux/arm64 \
-#       -v /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast:/work \
+#       -v "$(pwd)":/work \
 #       opencrossing-dc:sdk bash /work/dc/build-dc-docker.sh
 #
 # The image's dc-env entrypoint has already exported KOS_BASE, KOS_PORTS,

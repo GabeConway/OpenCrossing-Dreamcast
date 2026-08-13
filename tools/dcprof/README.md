@@ -374,7 +374,7 @@ Then, inside the SDK container (`sh-elf-gprof` is `$KOS_GPROF`):
 
 ```bash
 docker run --rm --platform linux/arm64 \
-  -v /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast:/work \
+  -v "$(pwd)":/work \
   opencrossing-dc:sdk bash -c \
   'cd /work && sh-elf-gprof -b -p dc/build/AnimalCrossing.elf fc.gmon.out > fc.gprof.txt'
 ```

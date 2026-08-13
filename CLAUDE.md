@@ -35,7 +35,7 @@ status narrative**: for where the port is, read `kb/RESUME.md`; for the numbers,
   to miscompile goes on the quarantine list **with its evidence** rather than
   dragging the whole tree back.
 - **Never edit `src/` to make it compile.** Compat fixes go in
-  `dc/include/dc_prelude.h`, which is force-included. All 3,936 objects in the
+  `dc/include/dc_prelude.h`, which is force-included. All 3,942 objects in the
   link build this way with zero exclusions. The whole decomp tree carries
   **five** `#if defined(TARGET_DC)` branches in four files (verified
   2026-08-09): `src/game/m_play.c`, `src/static/jsyswrap.cpp`,
@@ -46,9 +46,10 @@ status narrative**: for where the port is, read `kb/RESUME.md`; for the numbers,
 - **`-DTARGET_PC` must stay.** It means "not GameCube", not "PC" — it guards the
   base port's little-endian correctness fixes. `-DTARGET_DC` goes *alongside* it.
 - **Never commit ROM material or built disc images.** No `.iso`/`.gcm`/`.cdi`/
-  `.gdi`/`.gci`. The user's ISO lives at
-  `/Users/gabe/Documents/GitHub/OpenCrossing-Anbernic/harness/rom/Animal Crossing.iso`
-  (GAFE01 USA Rev 0, 1,459,978,240 bytes) — reference it, never copy it in.
+  `.gdi`/`.gci`. The maintainer's own ISO (GAFE01 USA Rev 0, 1,459,978,240
+  bytes) lives outside this repo and is passed in as `$ISO` —
+  `make -C tools/dcasset extract ISO="/path/to/Animal Crossing.iso"`. Reference
+  it, never copy it in, and never write its path into a tracked file.
 - **`pc/` is reference material, not the build target.** The Dreamcast platform
   layer is `dc/`. Do not "fix" `pc/` for Dreamcast. Host-side tools go in
   `tools/`.

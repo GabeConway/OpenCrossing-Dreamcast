@@ -22,14 +22,14 @@ graphics API is reimplemented against the PowerVR.
 
 | | |
 |---|---|
-| ✅ | **Builds completely.** All **3,936** objects of the decomp link for sh-elf with **zero exclusions** — no file is skipped to make the port compile |
+| ✅ | **Builds completely.** All **3,942** objects of the decomp link for sh-elf with **zero exclusions** — no file is skipped to make the port compile |
 | ✅ | **Boots on a retail Dreamcast** from a burned CD-R (MIL-CD unit), and in the Flycast emulator |
 | ✅ | **Walks the town.** Title → intro → train → town → Tom Nook → the houses |
 | ✅ | **Music and sound effects**, streamed and mixed on the SH-4 |
 | ✅ | **Every summer acre, the interiors, the winter set and the gyroids** are in the image |
 | ✅ | **Textures stream off the disc on demand** — 6,068 texture arrays are read at bind time instead of living in RAM |
 | ⚠️ | **Frame rate.** ~16–23 FPS in Flycast depending on scene; **noticeably slower on real hardware**, and closing that gap is the current focus |
-| 🔴 | **No villagers yet.** The roster is generated correctly; nothing constructs the actors |
+| ⚠️ | **No villagers walking around yet — and it turned out not to be a bug.** Six diagnostic runs found only legitimate gates: the game deliberately suppresses villager spawns until Nook's opening job is finished, and nobody has been able to play that far because the frame rate makes it a slog. Content is downstream of FPS |
 | 🔴 | **No saving yet.** The VMU storage layer exists; the game's save path is not wired to it |
 | 🔴 | **Some geometry and a few materials are still missing** — the name-entry keyboard renders black, and some models are dropped by the residency budget |
 
@@ -120,6 +120,18 @@ pc/              the Linux/SDL reference port (reference only, NOT the target)
 You need **Docker**, **Python 3.9+**, and a legally obtained `GAFE01` disc image
 (Animal Crossing, USA Rev 0, 1,459,978,240 bytes). Nothing else — the SH-4
 toolchain, KallistiOS and the disc tools all live in the container image.
+
+> ⚠️ **The container is built and run as `linux/arm64`, and that is currently
+> hardcoded** (`dc/build-dc.sh`, `dc/build-dc-image.sh`). It has only ever been
+> exercised on an Apple-silicon Mac under colima. On an x86-64 host Docker will
+> fall back to qemu emulation, which is slow and — in this project's own
+> experience — flaky. Building a native `linux/amd64` toolchain image should
+> work but **has never been tested**; if you try it, dropping the three
+> `--platform linux/arm64` flags is the place to start, and a report either way
+> is genuinely useful.
+
+There is also no BuildKit on the reference host, which is why the image build
+sets `DOCKER_BUILDKIT=0`.
 
 No ROM material ships with this repository and none ever will. Every step below
 reads *your* disc image and writes outside the repo.
@@ -247,7 +259,9 @@ not a fact.
 
 Useful and self-contained places to start:
 
-- **Villager actors** — the roster is built; nothing spawns them.
+- **Frame rate** — the top item, and everything else is downstream of it. The
+  hardware profile is in `kb/RESUME.md` §6c; the largest unattributed block is
+  ~13 ms of vertex-index expansion and attribute staging per town frame.
 - **The VMU save path** — the storage layer works; the game's save I/O uses
   stdio on a relative path that does not exist on the console.
 - **TEV configs** — 27 of the 101 need one predicate narrowed; the maths is
@@ -291,13 +305,18 @@ This project is **not affiliated with, endorsed by, or sponsored by Nintendo or
 Sega.** "Animal Crossing" and all related names and marks are trademarks of
 Nintendo; they are used here only to factually describe compatibility.
 
-**No game assets, ROM contents, or original game code ship in this
-repository.** You must supply your own legally obtained disc image of a game
-you own. The build produces a disc image **for personal use only** — do not
-distribute built images, as they contain Nintendo-copyrighted assets.
+**No disc image, ROM dump, or extracted asset file ships in this repository** —
+no textures, models, audio or archives. You must supply your own legally
+obtained copy of a game you own; the build reads it, and never redistributes
+it. The disc image the build produces is **for personal use only** — do not
+distribute it, as it contains Nintendo-copyrighted assets.
 
-Licensing: see [LICENSE](LICENSE). The decompilation under `src/` is CC0 from
-ACreTeam; the port layers are MIT.
+To be exact about the part that is easy to overstate: **`src/` is a
+decompilation** — C source reconstructed from the retail game, including the
+data tables that source compiles. It is published by
+[ACreTeam](https://github.com/ACreTeam/ac-decomp) under CC0. Nintendo authored
+neither it nor its license. The port layers (`dc/`, `tools/`, `harness/dc/`,
+`kb/`, `pc/`) are MIT. See [LICENSE](LICENSE).
 
 AI tools (Claude) are used in the porting and planning work — platform code and
 documentation only, not the decompiled game code.

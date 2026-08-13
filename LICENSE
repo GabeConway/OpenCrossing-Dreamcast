@@ -11,8 +11,19 @@ This project is dual-licensed:
   and kb/ material, and all #if defined(TARGET_DC) additions to decomp
   files) is licensed under the same MIT License below.
 
-No Nintendo assets, ROM contents, or original game code are contained in
-this repository, and none are licensed by either of the above.
+What is and is not here, stated precisely:
+
+- No disc image, ROM dump, or extracted asset file (textures, models, audio,
+  archives) is contained in this repository, and none is licensed by either
+  of the above. Building a playable image requires your own legally obtained
+  copy of the game; its archives are read at build time and at runtime and
+  are never redistributed here.
+
+- src/ IS a decompilation: C source reconstructed from the retail game,
+  including the data tables that source compiles. It is published by
+  ACreTeam under CC0. Nintendo authored neither it nor its license and
+  retains all rights in the original work. Nothing here is affiliated with,
+  endorsed by, or sponsored by Nintendo or Sega.
 
 
 MIT License

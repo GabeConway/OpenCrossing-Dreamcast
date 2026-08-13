@@ -10,7 +10,7 @@
 #     bash dc/build-dc.sh              # wrapper -> docker run -> build-dc-docker.sh
 # or directly:
 #     docker run --rm --platform linux/arm64 \
-#       -v /Users/gabe/Documents/GitHub/OpenCrossing-Dreamcast:/work \
+#       -v "$(pwd)":/work \
 #       opencrossing-dc:sdk bash -c 'make -C /work/dc -j4 objs'
 #
 # TARGETS
