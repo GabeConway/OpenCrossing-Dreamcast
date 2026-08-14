@@ -405,7 +405,7 @@ numbers to photograph off the TV, town, standing still, ~12 s after boot, are
 
 ### The images, built 2026-08-09 and waiting on a CD-R
 
-On the NAS at `/Volumes/Gabe/AC-DC/` (Jupiter), same convention as the
+Archived off-tree alongside the images, same convention as the
 2026-08-08 set. ⚠️ **Both are the post-S14 tree with `-DDC_GX_NRMSKIP` OFF**, so
 neither carries the dead branch §2b describes.
 

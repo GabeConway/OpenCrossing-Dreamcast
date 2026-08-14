@@ -980,7 +980,7 @@ is also there and is not what this wants.
 
 ### What is staged
 
-`~/Downloads/AC-DC-20260808f-pmcr.cdi` (740,090,153 B, padded, burnable):
+`AC-DC-20260808f-pmcr.cdi` (740,090,153 B, padded, burnable):
 shipping config + `DC_PMCR=1 DC_PMCR_HUD=1 DC_CONSOLE_MUTE=1`, no
 `DC_SCIF_FAST`, no `DC_AUTOSTART`, no probes. **It is a measurement image, not
 a play image** — the HUD covers the top-left of the screen and the console is

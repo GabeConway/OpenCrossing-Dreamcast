@@ -12,9 +12,6 @@ graphics API is reimplemented against the PowerVR.
 > It is not yet a game you can finish — see [What works](#what-works) for an
 > honest line-by-line.
 
-<!-- TODO before going public: drop a screenshot or a short capture here.
-     `docs/doc_assets/town.png` and reference it as:
-     ![The town, running on a retail Dreamcast](docs/doc_assets/town.png) -->
 
 ---
 

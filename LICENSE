@@ -11,6 +11,34 @@ This project is dual-licensed:
   and kb/ material, and all #if defined(TARGET_DC) additions to decomp
   files) is licensed under the same MIT License below.
 
+THIRD-PARTY CODE VENDORED IN THIS TREE
+
+The three-way split above does NOT cover everything. These paths carry their
+own licenses and their own copyright holders, and nothing here relicenses
+them:
+
+- tools/pyjkernel/          GPL-3.0. (c) Aurum. Full text in
+                            tools/pyjkernel/LICENSE. Used by tools/arc_tool.py.
+                            NOT MIT, despite the "tools/" line above.
+- dc/third_party/sh4zam/    MIT. (c) 2025, 2026 Falco Girgis and SH4ZAM
+                            Contributors. See dc/third_party/sh4zam/LICENSE
+                            and dc/third_party/VENDORING.md. Vendored verbatim.
+- include/PR/               Nintendo 64 SDK headers carrying a 1994 Silicon
+                            Graphics, Inc. proprietary notice that forbids
+                            redistribution. Required by the decompilation
+                            (13,042 files include gbi.h) and inherited from
+                            upstream ac-decomp, where they are equally
+                            present. They are NOT CC0 and are NOT ours to
+                            license. Listed here so the situation is disclosed
+                            rather than implied.
+- include/MSL_C/            Metrowerks Standard Library headers, plus Sun
+                            Microsystems fdlibm under MSL_Common_Embedded/Math.
+- include/dolphin/          GameCube SDK-shaped headers, community
+                            reconstructed, no upstream notice.
+- pc/lib/glad/              glad OpenGL loader generator output (public
+                            domain / MIT per the generator).
+
+
 What is and is not here, stated precisely:
 
 - No disc image, ROM dump, or extracted asset file (textures, models, audio,

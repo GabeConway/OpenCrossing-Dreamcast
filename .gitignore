@@ -1,10 +1,27 @@
 # ROM material — never commit (see README disclaimer)
+#
+# ⚠️ EXTENSION LIST, NOT A PRINCIPLE — keep it ahead of the tooling. Audited
+# 2026-08-13 and it had holes exactly where the newest tools work: audiorom.img
+# is 13.2 MB of the game's own VADPCM samples, four committed tools read and
+# write it, and nothing here stopped a `git add -A` from publishing it.
 rom/
 *.iso
 *.gcm
 *.ciso
 *.gci
+*.gcz
+*.rvz
+*.nkit
 orig/
+*.img
+*.pak
+*.szs
+*.arc
+*.wav
+*.adpcm
+*.raw
+discroot/
+*discroot/
 
 # Built disc images contain copyrighted assets — never commit
 *.cdi
@@ -56,7 +73,7 @@ pc/lib/SDL*
 portmaster/*.zip
 harness/rom/
 harness/out/
-.claude/worktrees/
+.claude/
 
 # tools/dcaudio: the compiled VADPCM oracle, rebuilt on demand by test_vadpcm.py
 tools/dcaudio/tests/ref_adpcm

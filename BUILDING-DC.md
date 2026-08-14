@@ -633,8 +633,14 @@ as host code.
 
 ## Where this build currently stands
 
-`make all` links and `mkdcdisc` produces a CDI. **It does not boot — it is too
-big to load.**
+⚠️ **HISTORICAL — this section describes M1 (2026-08), when the image did not
+fit in RAM. It has been fixed and is kept because the arithmetic below is the
+clearest statement of the constraint that shaped the whole port.** The port now
+boots on retail hardware and walks the town; current numbers are
+[`kb/STATE.md`](kb/STATE.md).
+
+As of that snapshot: `make all` linked and `mkdcdisc` produced a CDI, but **it
+did not boot — it was too big to load.**
 
 ```
    text      data       bss   image span   image end

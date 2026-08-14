@@ -321,7 +321,10 @@ def emit_order(path, hot, pats, a, hot_bytes, text_bytes):
         "#",
         "# PROVENANCE",
         "#   generated      : %s (UTC) by tools/dcopt/icache_map.py" % stamp,
-        "#   nm input       : %s" % os.path.abspath(a.nm),
+        # BASENAME, NOT abspath: this header ships in dc/section-order.txt, which
+        # is a tracked file in a public repo. The absolute form leaked an OS
+        # username, a home-directory layout and an agent session UUID.
+        "#   nm input       : %s" % os.path.basename(a.nm),
         "#   elf            : %s" % (a.order_elf or "(not stated — pass --order-elf)"),
         "#   --hot patterns : %s" % " ".join(p.pattern for p in pats),
         "#",

@@ -11,7 +11,7 @@
 #
 # PROVENANCE
 #   generated      : 2026-08-09 (UTC) by tools/dcopt/icache_map.py
-#   nm input       : /private/tmp/claude-501/-Users-gabe-Documents-GitHub-OpenCrossing-Dreamcast/50c51f80-00a9-446c-bd83-f886d8581f56/scratchpad/nm.txt
+#   nm input       : <scratch>/nm.txt
 #   elf            : dc/build/AnimalCrossing.elf
 #   --hot patterns : ^_emu64_taskstart ^__ZN5emu64 ^_dl_G_ ^_dc_gx_ ^_GX[A-Z] ^_dc_pvr_ ^__ZL10cull_batchP5emu64 ^__ZL7cu_trinPv ^__ZL13cu_trin_indepPv ^_dc_emu64_cull ^_emit_projected$ ^_emit_triangle_raw$ ^_fog_program$ ^_PSMTX ^_C_MTX ^_Nas_ ^_pc_audio_
 #

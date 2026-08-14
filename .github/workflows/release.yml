@@ -1,6 +1,6 @@
 name: Release
 
-# Frugal with Actions minutes (private repo): runs only on version tags
+# Frugal with Actions minutes: runs only on version tags
 # or when started by hand.
 on:
   push:
