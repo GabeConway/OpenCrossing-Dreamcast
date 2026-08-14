@@ -53,14 +53,15 @@ colima/binfmt install).
 
 ## Cutting a release
 
-Releases are built by CI (`.github/workflows/release.yml`):
+⚠️ **There is no release automation in this repository, deliberately.**
 
-1. Merge `dev` into `main`.
-2. Tag on `main`: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. CI builds the armhf binary under QEMU (slow — up to a couple of hours),
-   packages the PortMaster zip via `portmaster/make-package.sh`, and publishes
-   a GitHub release with the zip attached.
+An inherited `.github/workflows/release.yml` used to build an armhf binary
+under QEMU on any `v*` tag and publish it as a public GitHub release, with
+`release.sh` posting the same zip to a Discord webhook. Both were removed on
+2026-08-13. They came from the Anbernic handheld port, they never built
+anything for the Dreamcast target, and a workflow that publishes a compiled
+binary of the decompiled game is not something that should fire by accident on
+a tag.
 
-**Don't tag on `dev`** — the workflow triggers on any `v*` tag regardless of
-branch, and releases should only come from `main`. Manual `workflow_dispatch`
-runs upload the zip as a build artifact instead of creating a release.
+Build images locally from your own disc — `dc/build-dc.sh`, see
+[`BUILDING-DC.md`](BUILDING-DC.md) — and do not distribute them.

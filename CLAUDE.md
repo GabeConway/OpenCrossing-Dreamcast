@@ -53,8 +53,8 @@ status narrative**: for where the port is, read `kb/RESUME.md`; for the numbers,
 - **`pc/` is reference material, not the build target.** The Dreamcast platform
   layer is `dc/`. Do not "fix" `pc/` for Dreamcast. Host-side tools go in
   `tools/`.
-- **Branches:** `main` = releases, `dev` = daily work. Never tag dev. Agents must
-  not run git — the main thread commits.
+- **Branches:** `main` only. The `dev` branch was merged and removed on
+  2026-08-13. Agents must not run git — the main thread commits.
 - **Every optimization gets a kill switch** (compile-time or settings flag), and
   **the default is the good build**: a result that lives only in a command line
   is one unset environment variable away from being lost.
